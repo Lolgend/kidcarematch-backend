@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 kidcarematch-backend = "kidcarematch_backend:main"
+sync-centres = "kidcarematch_backend.cron.sync_centres:main"
 
 [build-system]
 requires = ["uv_build>=0.12.7,<0.13.0"]
