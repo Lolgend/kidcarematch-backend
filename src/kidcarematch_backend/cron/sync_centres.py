@@ -24,6 +24,7 @@ DATA_GOV_SG_API_URL = "https://data.gov.sg/api/action/datastore_search"
 
 REQUESTED_FIELDS = [
     "centre_code",
+    "tp_code",
     "centre_name",
     "centre_contact_no",
     "contactno_lifesg",
@@ -178,7 +179,7 @@ def sync_centres(
         logger.info("Found %d existing centres in the database.", len(existing_centres))
 
         for rec in records:
-            code = clean_str(rec.get("centre_code"))
+            code = clean_str(rec.get("centre_code")) or clean_str(rec.get("tp_code"))
             name = clean_str(rec.get("centre_name"))
 
             if not code or not name:
