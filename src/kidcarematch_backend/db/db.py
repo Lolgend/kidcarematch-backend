@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from sqlmodel import Field, Relationship, SQLModel, create_engine
 
 from kidcarematch_backend.core.config import settings
@@ -54,5 +54,7 @@ class PreschoolService(SQLModel, table=True):
 
 engine = create_engine(settings.DATABASE_URL, echo=True)
 
-# Create everything
-SQLModel.metadata.create_all(engine)
+
+def init_db(db_engine: Any = None) -> None:
+    """Create database tables."""
+    SQLModel.metadata.create_all(db_engine or engine)

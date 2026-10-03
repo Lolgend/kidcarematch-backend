@@ -11,7 +11,13 @@ import httpx
 from sqlmodel import Session, SQLModel, select
 
 from kidcarematch_backend.core.config import settings
-from kidcarematch_backend.db.db import PreschoolCentre, engine
+from kidcarematch_backend.db.db import (
+    PreschoolCentre,
+    PreschoolService,
+    VacancyRecord,
+    engine,
+    init_db,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,6 +49,18 @@ REQUESTED_FIELDS = [
     "provision_of_transport",
     "government_subsidy",
     "last_updated",
+] + [
+    f"{level}_vacancy_{horizon}"
+    for level in ("infant", "pg", "n1", "n2", "k1", "k2")
+    for horizon in (
+        "current_month",
+        "next_month",
+        "third_month",
+        "fourth_month",
+        "fifth_month",
+        "sixth_month",
+        "seventh_month",
+    )
 ]
 
 
@@ -86,15 +104,120 @@ def parse_datetime(val: Any) -> datetime | None:
         return None
 
 
-def fetch_all_centres(
+VACANCY_LEVELS = ["infant", "pg", "n1", "n2", "k1", "k2"]
+VACANCY_HORIZONS = [
+    ("current_month", 0),
+    ("next_month", 1),
+    ("third_month", 2),
+    ("fourth_month", 3),
+    ("fifth_month", 4),
+    ("sixth_month", 5),
+    ("seventh_month", 6),
+]
+
+
+def add_months_to_date(base_dt: datetime, months_to_add: int) -> datetime:
+    """Return the 1st of the month offset by months_to_add from base_dt in UTC."""
+    year = base_dt.year
+    month = base_dt.month + months_to_add
+    year += (month - 1) // 12
+    month = ((month - 1) % 12) + 1
+    return datetime(year, month, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def parse_vacancies_for_centre(rec: dict[str, Any], centre_id: int) -> list[VacancyRecord]:
+    """Extract 42 VacancyRecord entries from a raw centre API record."""
+    code = clean_str(rec.get("centre_code")) or clean_str(rec.get("tp_code"))
+    if not code:
+        return []
+
+    base_dt = parse_datetime(rec.get("last_updated")) or datetime.now(timezone.utc)
+    vacancies: list[VacancyRecord] = []
+
+    for level in VACANCY_LEVELS:
+        for horizon_key, month_offset in VACANCY_HORIZONS:
+            field_name = f"{level}_vacancy_{horizon_key}"
+            val = rec.get(field_name)
+            raw_val = str(val).strip() if val is not None else ""
+            if raw_val.lower() in ("na", "n/a", "not applicable"):
+                status = "Not Applicable"
+            else:
+                status = clean_str(val) or "Not Available"
+
+            target_month = add_months_to_date(base_dt, month_offset)
+            record_id = f"{code}_{level}_{target_month.strftime('%Y%m')}"
+
+            vacancies.append(
+                VacancyRecord(
+                    record_id=record_id,
+                    centre_id=centre_id,
+                    level_type=level,
+                    enrollment_month_year=target_month,
+                    vacancy_status=status,
+                )
+            )
+
+    return vacancies
+
+
+def parse_float(val: Any) -> float:
+    """Parse numeric fee value safely."""
+    clean_val = clean_str(val)
+    if not clean_val:
+        return 0.0
+    try:
+        return float(clean_val)
+    except ValueError:
+        logger.warning("Could not parse fee float: %r", val)
+        return 0.0
+
+
+def parse_centre_service(
+    rec: dict[str, Any],
+    centre_map: dict[str, int],
+) -> PreschoolService | None:
+    """Parse raw listing of centre services record into a PreschoolService instance."""
+    code = clean_str(rec.get("centre_code"))
+    if not code:
+        return None
+
+    centre_id = centre_map.get(code)
+    if not centre_id:
+        return None
+
+    service_type = clean_str(rec.get("type_of_service"))
+    level = clean_str(rec.get("levels_offered"))
+    citizenship = clean_str(rec.get("type_of_citizenship"))
+
+    if not service_type or not level or not citizenship:
+        return None
+
+    fee = parse_float(rec.get("fees"))
+    updated_at = parse_datetime(rec.get("last_updated"))
+    remarks = clean_str(rec.get("remarks"))
+
+    return PreschoolService(
+        centre_id=centre_id,
+        type_of_service=service_type,
+        level=level,
+        fee=fee,
+        citizenship_type=citizenship,
+        last_updated=updated_at,
+        remarks=remarks,
+    )
+
+
+def fetch_datastore_records(
     resource_id: str,
+    fields: list[str],
+    entity_name: str = "records",
     batch_size: int = 1000,
     max_records: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Fetch all centre records from data.gov.sg using pagination."""
+    """Fetch paginated records from data.gov.sg datastore search endpoint."""
     all_records: list[dict[str, Any]] = []
     offset = 0
-    fields_query = ",".join(REQUESTED_FIELDS)
+    fields_query = ",".join(fields)
 
     with httpx.Client(timeout=30.0) as client:
         while True:
@@ -105,25 +228,25 @@ def fetch_all_centres(
             if limit <= 0:
                 break
 
-            params = {
+            params: dict[str, str | int] = {
                 "resource_id": resource_id,
                 "limit": limit,
                 "offset": offset,
                 "fields": fields_query,
             }
 
-            logger.info("Fetching records from data.gov.sg (offset=%d, limit=%d)...", offset, limit)
+            logger.info("Fetching %s from data.gov.sg (offset=%d, limit=%d)...", entity_name, offset, limit)
 
             retries = 3
-            data = None
+            data: dict[str, Any] = {}
             for attempt in range(1, retries + 1):
                 try:
                     response = client.get(DATA_GOV_SG_API_URL, params=params)
                     response.raise_for_status()
-                    data = response.json()
+                    data = response.json() or {}
                     break
                 except (httpx.HTTPError, httpx.TimeoutException) as exc:
-                    logger.warning("API request failed (attempt %d/%d): %s", attempt, retries, exc)
+                    logger.warning("%s API request failed (attempt %d/%d): %s", entity_name, attempt, retries, exc)
                     if attempt == retries:
                         raise
                     time.sleep(attempt * 2)
@@ -132,17 +255,17 @@ def fetch_all_centres(
             records = result.get("records", [])
 
             if not records:
-                logger.info("No more records returned from API.")
+                logger.info("No more %s returned from API.", entity_name)
                 break
 
             all_records.extend(records)
-            logger.info("Fetched %d records so far.", len(all_records))
+            logger.info("Fetched %d %s so far.", len(all_records), entity_name)
 
             total_available = result.get("total")
             offset += len(records)
 
             if total_available and offset >= total_available:
-                logger.info("Reached total available records (%d).", total_available)
+                logger.info("Reached total available %s (%d).", entity_name, total_available)
                 break
 
             if max_records and len(all_records) >= max_records:
@@ -151,39 +274,105 @@ def fetch_all_centres(
     return all_records
 
 
+def fetch_all_centres(
+    resource_id: str,
+    batch_size: int = 1000,
+    max_records: int | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch all centre records from data.gov.sg using pagination."""
+    return fetch_datastore_records(
+        resource_id=resource_id,
+        fields=REQUESTED_FIELDS,
+        entity_name="centres",
+        batch_size=batch_size,
+        max_records=max_records,
+    )
+
+
+SERVICES_REQUESTED_FIELDS = [
+    "centre_code",
+    "centre_name",
+    "class_of_licence",
+    "type_of_service",
+    "levels_offered",
+    "fees",
+    "type_of_citizenship",
+    "last_updated",
+    "remarks",
+]
+
+
+def fetch_all_services(
+    resource_id: str,
+    batch_size: int = 1000,
+    max_records: int | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch all centre service records from data.gov.sg using pagination."""
+    return fetch_datastore_records(
+        resource_id=resource_id,
+        fields=SERVICES_REQUESTED_FIELDS,
+        entity_name="services",
+        batch_size=batch_size,
+        max_records=max_records,
+    )
+
+
 def sync_centres(
     max_records: int | None = None,
     dry_run: bool = False,
+    db_engine: Any = None,
 ) -> dict[str, int]:
-    """Sync data.gov.sg preschool centres into the PreschoolCentre database table."""
-    resource_id = settings.DATA_GOV_SG_CENTRES_RESOURCE_ID
-    logger.info("Starting preschool centres sync with resource ID: %s", resource_id)
+    """Sync data.gov.sg preschool centres, vacancies, and services into database."""
+    centres_resource_id = settings.DATA_GOV_SG_CENTRES_RESOURCE_ID
+    services_resource_id = settings.DATA_GOV_SG_SERVICES_RESOURCE_ID
+    logger.info("Starting sync with centres resource ID: %s", centres_resource_id)
 
+    target_engine = db_engine or engine
     # Ensure tables exist in database
-    SQLModel.metadata.create_all(engine)
+    init_db(target_engine)
 
-    records = fetch_all_centres(
-        resource_id=resource_id,
+    centre_records = fetch_all_centres(
+        resource_id=centres_resource_id,
         batch_size=1000,
         max_records=max_records,
     )
-    logger.info("Total records fetched from API: %d", len(records))
+    logger.info("Total centre records fetched from API: %d", len(centre_records))
 
-    stats = {"total_fetched": len(records), "inserted": 0, "updated": 0, "skipped": 0}
+    stats = {
+        "centres_fetched": len(centre_records),
+        "centres_inserted": 0,
+        "centres_updated": 0,
+        "centres_skipped": 0,
+        "vacancies_synced": 0,
+        "services_fetched": 0,
+        "services_inserted": 0,
+        "services_updated": 0,
+        "services_skipped": 0,
+    }
 
-    with Session(engine) as session:
-        # Load existing centres by centre_code to support idempotent upserts
+    # Fetch services before entering the database transaction to avoid holding open connections
+    service_records = fetch_all_services(
+        resource_id=services_resource_id,
+        batch_size=1000,
+        max_records=max_records,
+    )
+    stats["services_fetched"] = len(service_records)
+    logger.info("Total service records fetched from API: %d", len(service_records))
+
+    with Session(target_engine) as session:
+        # Load existing centres by centre_code and id
         existing_centres = {
             c.centre_code: c for c in session.exec(select(PreschoolCentre)).all()
         }
         logger.info("Found %d existing centres in the database.", len(existing_centres))
 
-        for rec in records:
+        # 1. Upsert Centres and Vacancies
+        for rec in centre_records:
             code = clean_str(rec.get("centre_code")) or clean_str(rec.get("tp_code"))
             name = clean_str(rec.get("centre_name"))
 
             if not code or not name:
-                stats["skipped"] += 1
+                stats["centres_skipped"] += 1
                 continue
 
             contact = clean_str(rec.get("centre_contact_no")) or clean_str(rec.get("contactno_lifesg"))
@@ -201,8 +390,8 @@ def sync_centres(
             subsidy = parse_bool(rec.get("government_subsidy"))
             updated_at = parse_datetime(rec.get("last_updated"))
 
+            centre: PreschoolCentre
             if code in existing_centres:
-                # Update existing row (keeps existing centre_id and relationship integrity)
                 centre = existing_centres[code]
                 centre.centre_name = name
                 centre.contact = contact
@@ -220,10 +409,9 @@ def sync_centres(
                 centre.gov_subsidy = subsidy
                 centre.last_updated = updated_at
                 session.add(centre)
-                stats["updated"] += 1
+                stats["centres_updated"] += 1
             else:
-                # Insert new row
-                new_centre = PreschoolCentre(
+                centre = PreschoolCentre(
                     centre_code=code,
                     centre_name=name,
                     contact=contact,
@@ -241,9 +429,62 @@ def sync_centres(
                     gov_subsidy=subsidy,
                     last_updated=updated_at,
                 )
-                session.add(new_centre)
-                existing_centres[code] = new_centre
-                stats["inserted"] += 1
+                session.add(centre)
+                session.flush()  # populate centre_id for foreign keys
+                existing_centres[code] = centre
+                stats["centres_inserted"] += 1
+
+            # Sync Vacancies for this centre
+            vacancies = parse_vacancies_for_centre(rec, centre.centre_id)  # type: ignore[arg-type]
+            for v in vacancies:
+                existing_v = session.get(VacancyRecord, v.record_id)
+                if existing_v:
+                    existing_v.vacancy_status = v.vacancy_status
+                    existing_v.enrollment_month_year = v.enrollment_month_year
+                    session.add(existing_v)
+                else:
+                    session.add(v)
+                stats["vacancies_synced"] += 1
+
+        session.flush()
+
+        # Build centre code / tp_code map for services lookup
+        centre_map: dict[str, int] = {}
+        for c in existing_centres.values():
+            if c.centre_code and c.centre_id:
+                centre_map[c.centre_code] = c.centre_id
+
+        # 2. Sync Services
+        # Index existing services by (centre_id, type_of_service, level, citizenship_type)
+        existing_services_list = session.exec(select(PreschoolService)).all()
+        existing_services: dict[tuple[int, str, str, str], PreschoolService] = {
+            (s.centre_id, s.type_of_service, s.level, s.citizenship_type): s
+            for s in existing_services_list
+        }
+
+        for s_rec in service_records:
+            parsed_service = parse_centre_service(s_rec, centre_map)
+            if not parsed_service:
+                stats["services_skipped"] += 1
+                continue
+
+            s_key = (
+                parsed_service.centre_id,
+                parsed_service.type_of_service,
+                parsed_service.level,
+                parsed_service.citizenship_type,
+            )
+            if s_key in existing_services:
+                svc = existing_services[s_key]
+                svc.fee = parsed_service.fee
+                svc.last_updated = parsed_service.last_updated
+                svc.remarks = parsed_service.remarks
+                session.add(svc)
+                stats["services_updated"] += 1
+            else:
+                session.add(parsed_service)
+                existing_services[s_key] = parsed_service
+                stats["services_inserted"] += 1
 
         if dry_run:
             logger.info("Dry-run enabled: rolling back transaction without saving changes.")
@@ -252,13 +493,7 @@ def sync_centres(
             session.commit()
             logger.info("Transaction committed successfully.")
 
-    logger.info(
-        "Sync completed: %d fetched, %d inserted, %d updated, %d skipped.",
-        stats["total_fetched"],
-        stats["inserted"],
-        stats["updated"],
-        stats["skipped"],
-    )
+    logger.info("Sync completed: %s", stats)
     return stats
 
 

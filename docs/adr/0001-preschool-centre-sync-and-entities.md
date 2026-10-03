@@ -1,0 +1,3 @@
+# Preschool Centre, Vacancy, and Service Sync Architecture
+
+To provide accurate childcare matching, KidCareMatch synchronizes preschool centre data from data.gov.sg (ECDA datasets). We decided to orchestrate a unified sync pipeline that ingests `PreschoolCentre`, extracts 7-month `VacancyRecord`s, and fetches `PreschoolService` offerings. Deterministic natural keys (`{centre_code}_{level}_{YYYYMM}`) are used for `VacancyRecord` to ensure idempotent monthly updates, while `PreschoolService` records are deduplicated across `(centre_id, type_of_service, level, citizenship_type)` to preserve relational integrity.
