@@ -125,13 +125,17 @@ def add_months_to_date(base_dt: datetime, months_to_add: int) -> datetime:
     return datetime(year, month, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 
-def parse_vacancies_for_centre(rec: dict[str, Any], centre_id: int) -> list[VacancyRecord]:
+def parse_vacancies_for_centre(
+    rec: dict[str, Any],
+    centre_id: int,
+    sync_date: datetime | None = None,
+) -> list[VacancyRecord]:
     """Extract 42 VacancyRecord entries from a raw centre API record."""
     code = clean_str(rec.get("centre_code")) or clean_str(rec.get("tp_code"))
     if not code:
         return []
 
-    base_dt = parse_datetime(rec.get("last_updated")) or datetime.now(timezone.utc)
+    base_dt = sync_date or datetime.now(timezone.utc)
     vacancies: list[VacancyRecord] = []
 
     for level in VACANCY_LEVELS:
@@ -321,6 +325,7 @@ def sync_centres(
     max_records: int | None = None,
     dry_run: bool = False,
     db_engine: Any = None,
+    sync_date: datetime | None = None,
 ) -> dict[str, int]:
     """Sync data.gov.sg preschool centres, vacancies, and services into database."""
     centres_resource_id = settings.DATA_GOV_SG_CENTRES_RESOURCE_ID
@@ -330,6 +335,8 @@ def sync_centres(
     target_engine = db_engine or engine
     # Ensure tables exist in database
     init_db(target_engine)
+
+    effective_sync_date = sync_date or datetime.now(timezone.utc)
 
     centre_records = fetch_all_centres(
         resource_id=centres_resource_id,
@@ -435,7 +442,9 @@ def sync_centres(
                 stats["centres_inserted"] += 1
 
             # Sync Vacancies for this centre
-            vacancies = parse_vacancies_for_centre(rec, centre.centre_id)  # type: ignore[arg-type]
+            vacancies = parse_vacancies_for_centre(
+                rec, centre.centre_id, sync_date=effective_sync_date  # type: ignore[arg-type]
+            )
             for v in vacancies:
                 existing_v = session.get(VacancyRecord, v.record_id)
                 if existing_v:
