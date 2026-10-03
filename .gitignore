@@ -16,3 +16,7 @@ wheels/
 
 # ai coding
 .agents
+
+.mypy_cache
+.pytest_cache
+.scratch/
