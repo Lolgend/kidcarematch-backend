@@ -62,7 +62,42 @@ class PreschoolService(SQLModel, table=True):
     centre: Optional[PreschoolCentre] = Relationship(back_populates="services")
 
 
+class User(SQLModel, table=True):
+    user_id: Optional[str] = Field(default=None, primary_key=True)
+    email: str = Field(index=True, unique=True)
+    password_hash: str
+    full_name: str
+    role: str = Field(default="PARENT", index=True)
+    account_status: str = Field(default="ACTIVE")
+    admin_level: Optional[int] = Field(default=None)
+
+
+class SubsidyRule(SQLModel, table=True):
+    rule_id: Optional[str] = Field(default=None, primary_key=True)
+    subsidy_name: str = Field(index=True)
+    tier_name: Optional[str] = Field(default=None)
+    care_type: str = Field(index=True)
+    metric: str = Field(index=True)
+    applicant_status: Optional[str] = Field(default=None, index=True)
+    citizenship: str = Field(default="SC", index=True)
+    income_min: Optional[float] = Field(default=None)
+    income_max: Optional[float] = Field(default=None)
+    subsidy_amount: float
+    effective_date: Optional[datetime] = Field(default=None)
+
+
+class ExternalDataSourceStatus(SQLModel, table=True):
+    source_id: str = Field(primary_key=True)
+    source_name: str
+    sync_state: str = Field(default="IDLE")
+    last_successful_sync: Optional[datetime] = Field(default=None)
+    last_attempted_sync: Optional[datetime] = Field(default=None)
+    records_processed: int = Field(default=0)
+    error_message: Optional[str] = Field(default=None)
+
+
 engine = create_engine(settings.DATABASE_URL, echo=True)
+
 
 
 def init_db(db_engine: Any = None) -> None:
