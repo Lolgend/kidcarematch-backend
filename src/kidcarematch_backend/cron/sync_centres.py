@@ -122,7 +122,7 @@ def resolve_centre_identifier(rec: dict[str, Any]) -> str | None:
 
 
 def add_months_to_date(base_dt: datetime, months_to_add: int) -> datetime:
-    """Return the 1st of the month offset by months_to_add from base_dt in UTC."""
+    """Offset base_dt by months_to_add and truncate to the 1st of the month at 00:00:00 UTC."""
     year = base_dt.year
     month = base_dt.month + months_to_add
     year += (month - 1) // 12
@@ -134,9 +134,10 @@ def parse_vacancies_for_centre(
     rec: dict[str, Any],
     centre_id: int,
     sync_date: datetime | None = None,
+    centre_code: str | None = None,
 ) -> list[VacancyRecord]:
     """Extract 42 VacancyRecord entries from a raw centre API record."""
-    code = resolve_centre_identifier(rec)
+    code = centre_code or resolve_centre_identifier(rec)
     if not code:
         return []
 
@@ -355,6 +356,9 @@ def sync_centres(
         "centres_inserted": 0,
         "centres_updated": 0,
         "centres_skipped": 0,
+        "vacancies_inserted": 0,
+        "vacancies_updated": 0,
+        "vacancies_skipped": 0,
         "vacancies_synced": 0,
         "services_fetched": 0,
         "services_inserted": 0,
@@ -372,14 +376,15 @@ def sync_centres(
     logger.info("Total service records fetched from API: %d", len(service_records))
 
     with Session(target_engine) as session:
-        # Load existing centres indexed by centre_code and tp_code
+        # Load existing centres indexed by centre_code
         existing_centres: dict[str, PreschoolCentre] = {}
         for db_centre in session.exec(select(PreschoolCentre)).all():
             if db_centre.centre_code:
                 existing_centres[db_centre.centre_code] = db_centre
-            if db_centre.tp_code:
-                existing_centres[db_centre.tp_code] = db_centre
-        logger.info("Loaded existing centres in database: %d mapped identifiers.", len(existing_centres))
+        logger.info("Loaded %d existing centres from database.", len(existing_centres))
+
+        # In-memory map from temporary permit code to centre_id for services resolution
+        tp_alias_map: dict[str, int] = {}
 
         # 1. Upsert Centres and Vacancies
         for rec in centre_records:
@@ -390,6 +395,7 @@ def sync_centres(
 
             if not identifier or not name:
                 stats["centres_skipped"] += 1
+                stats["vacancies_skipped"] += 42
                 continue
 
             contact = clean_str(rec.get("centre_contact_no")) or clean_str(rec.get("contactno_lifesg"))
@@ -408,15 +414,42 @@ def sync_centres(
             updated_at = parse_datetime(rec.get("last_updated"))
 
             centre: PreschoolCentre | None = None
+            old_code: str | None = None
             if centre_code and centre_code in existing_centres:
                 centre = existing_centres[centre_code]
             elif tp_code and tp_code in existing_centres:
                 centre = existing_centres[tp_code]
+                old_code = centre.centre_code
 
             if centre is not None:
-                if centre_code:
+                # Handle code transition: previously keyed under tp_code, now received permanent centre_code
+                if centre_code and old_code and centre_code != old_code:
+                    logger.info("Migrating centre code from %s to %s for centre_id=%s", old_code, centre_code, centre.centre_id)
                     centre.centre_code = centre_code
-                centre.tp_code = tp_code
+                    # Migrate existing vacancies to avoid duplicates while preserving history
+                    old_vacancies = session.exec(
+                        select(VacancyRecord).where(VacancyRecord.centre_id == centre.centre_id)
+                    ).all()
+                    for ev in old_vacancies:
+                        if ev.record_id and ev.record_id.startswith(f"{old_code}_"):
+                            suffix = ev.record_id[len(old_code) + 1 :]
+                            new_record_id = f"{centre_code}_{suffix}"
+                            session.delete(ev)
+                            session.flush()
+                            session.add(
+                                VacancyRecord(
+                                    record_id=new_record_id,
+                                    centre_id=ev.centre_id,
+                                    level_type=ev.level_type,
+                                    enrollment_month_year=ev.enrollment_month_year,
+                                    vacancy_status=ev.vacancy_status,
+                                )
+                            )
+                    session.flush()
+                    if old_code in existing_centres:
+                        del existing_centres[old_code]
+                    existing_centres[centre_code] = centre
+
                 centre.centre_name = name
                 centre.contact = contact
                 centre.email = email
@@ -433,15 +466,11 @@ def sync_centres(
                 centre.gov_subsidy = subsidy
                 centre.last_updated = updated_at
                 session.add(centre)
-                if centre.centre_code:
-                    existing_centres[centre.centre_code] = centre
-                if centre.tp_code:
-                    existing_centres[centre.tp_code] = centre
+                existing_centres[centre.centre_code] = centre
                 stats["centres_updated"] += 1
             else:
                 centre = PreschoolCentre(
                     centre_code=identifier,
-                    tp_code=tp_code,
                     centre_name=name,
                     contact=contact,
                     email=email,
@@ -460,15 +489,18 @@ def sync_centres(
                 )
                 session.add(centre)
                 session.flush()  # populate centre_id for foreign keys
-                if centre.centre_code:
-                    existing_centres[centre.centre_code] = centre
-                if centre.tp_code:
-                    existing_centres[centre.tp_code] = centre
+                existing_centres[centre.centre_code] = centre
                 stats["centres_inserted"] += 1
+
+            if tp_code and centre.centre_id:
+                tp_alias_map[tp_code] = centre.centre_id
 
             # Sync Vacancies for this centre
             vacancies = parse_vacancies_for_centre(
-                rec, centre.centre_id, sync_date=effective_sync_date  # type: ignore[arg-type]
+                rec,
+                centre.centre_id,  # type: ignore[arg-type]
+                sync_date=effective_sync_date,
+                centre_code=centre.centre_code,
             )
             for v in vacancies:
                 existing_v = session.get(VacancyRecord, v.record_id)
@@ -476,8 +508,10 @@ def sync_centres(
                     existing_v.vacancy_status = v.vacancy_status
                     existing_v.enrollment_month_year = v.enrollment_month_year
                     session.add(existing_v)
+                    stats["vacancies_updated"] += 1
                 else:
                     session.add(v)
+                    stats["vacancies_inserted"] += 1
                 stats["vacancies_synced"] += 1
 
         session.flush()
@@ -485,11 +519,10 @@ def sync_centres(
         # Build centre code / tp_code map for services lookup
         centre_map: dict[str, int] = {}
         for centre in existing_centres.values():
-            if centre.centre_id:
-                if centre.centre_code:
-                    centre_map[centre.centre_code] = centre.centre_id
-                if centre.tp_code:
-                    centre_map[centre.tp_code] = centre.centre_id
+            if centre.centre_id and centre.centre_code:
+                centre_map[centre.centre_code] = centre.centre_id
+        for tp, cid in tp_alias_map.items():
+            centre_map[tp] = cid
 
         # 2. Sync Services
         # Index existing services by (centre_id, type_of_service, level, citizenship_type)

@@ -8,7 +8,6 @@ from kidcarematch_backend.core.config import settings
 class PreschoolCentre(SQLModel, table=True):
     centre_id: Optional[int] = Field(default=None, primary_key=True)
     centre_code: str = Field(index=True, unique=True)
-    tp_code: Optional[str] = Field(default=None, index=True)
     centre_name: str = Field(index=True)
     contact: Optional[str] = None
     email: Optional[str] = None

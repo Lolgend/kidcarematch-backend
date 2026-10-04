@@ -1,7 +1,32 @@
 from datetime import datetime, timezone
+from typing import Any
 import pytest
 
-from kidcarematch_backend.cron.sync_centres import parse_vacancies_for_centre
+from kidcarematch_backend.cron.sync_centres import (
+    VACANCY_HORIZONS,
+    VACANCY_LEVELS,
+    parse_vacancies_for_centre,
+)
+
+
+def make_test_centre_payload(
+    centre_code: str | None = "PC0001",
+    centre_name: str = "Test Kindergarten",
+    last_updated: str = "2026-10-01",
+    vacancy_status: str = "Available",
+    **extra: Any,
+) -> dict[str, Any]:
+    """Helper to generate a realistic centre payload with all 42 vacancy fields populated."""
+    payload: dict[str, Any] = {
+        "centre_code": centre_code,
+        "centre_name": centre_name,
+        "last_updated": last_updated,
+    }
+    payload.update(extra)
+    for lvl in VACANCY_LEVELS:
+        for hor, _ in VACANCY_HORIZONS:
+            payload.setdefault(f"{lvl}_vacancy_{hor}", vacancy_status)
+    return payload
 
 
 def test_parse_vacancies_for_centre_generates_42_records_with_correct_keys():
@@ -76,18 +101,13 @@ def test_parse_vacancies_for_centre_generates_42_records_with_correct_keys():
 
 def test_parse_vacancies_anchored_to_sync_date_ignoring_stale_last_updated():
     # Centre profile has a stale last_updated from January 2025
-    centre_record = {
-        "centre_code": "STALE01",
-        "last_updated": "2025-01-10",
-        "infant_vacancy_current_month": "Available",
-        "infant_vacancy_seventh_month": "Full",
-    }
-    # Populate dummy entries for remaining fields
-    from kidcarematch_backend.cron.sync_centres import VACANCY_LEVELS, VACANCY_HORIZONS
-    for lvl in VACANCY_LEVELS:
-        for hor, _ in VACANCY_HORIZONS:
-            field = f"{lvl}_vacancy_{hor}"
-            centre_record.setdefault(field, "Full")
+    centre_record = make_test_centre_payload(
+        centre_code="STALE01",
+        last_updated="2025-01-10",
+        vacancy_status="Full",
+        infant_vacancy_current_month="Available",
+        infant_vacancy_seventh_month="Full",
+    )
 
     # Explicit sync date is October 2026
     explicit_sync_date = datetime(2026, 10, 15, 12, 30, tzinfo=timezone.utc)
@@ -163,19 +183,14 @@ def test_sync_centres_orchestration_with_mocks(monkeypatch):
     monkeypatch.setattr(sc_mod, "engine", test_engine)
 
     sample_centres = [
-        {
-            "centre_code": "PC001",
-            "centre_name": "Test Kindergarten",
-            "last_updated": "2026-10-01",
-            "infant_vacancy_current_month": "Immediate",
-        }
+        make_test_centre_payload(
+            centre_code="PC001",
+            centre_name="Test Kindergarten",
+            last_updated="2026-10-01",
+            vacancy_status="Full",
+            infant_vacancy_current_month="Immediate",
+        )
     ]
-    # Add other 41 fields with default
-    for lvl in sc_mod.VACANCY_LEVELS:
-        for hor, _ in sc_mod.VACANCY_HORIZONS:
-            f = f"{lvl}_vacancy_{hor}"
-            if f not in sample_centres[0]:
-                sample_centres[0][f] = "Full"
 
     sample_services = [
         {
@@ -202,6 +217,8 @@ def test_sync_centres_orchestration_with_mocks(monkeypatch):
     stats = sync_centres(max_records=1, dry_run=False, db_engine=test_engine)
 
     assert stats["centres_inserted"] == 1
+    assert stats["vacancies_inserted"] == 42
+    assert stats["vacancies_updated"] == 0
     assert stats["vacancies_synced"] == 42
     assert stats["services_inserted"] == 1
     assert stats["services_skipped"] == 1
@@ -231,20 +248,16 @@ def test_sync_centres_multi_centre_horizon_alignment(monkeypatch):
     monkeypatch.setattr(sc_mod, "engine", test_engine)
 
     # Two centres with very different last_updated timestamps
-    centre_1 = {
-        "centre_code": "CTR001",
-        "centre_name": "Old Profile Centre",
-        "last_updated": "2024-01-15",
-    }
-    centre_2 = {
-        "centre_code": "CTR002",
-        "centre_name": "Recent Profile Centre",
-        "last_updated": "2026-09-30",
-    }
-    for c in (centre_1, centre_2):
-        for lvl in VACANCY_LEVELS:
-            for hor, _ in VACANCY_HORIZONS:
-                c[f"{lvl}_vacancy_{hor}"] = "Available"
+    centre_1 = make_test_centre_payload(
+        centre_code="CTR001",
+        centre_name="Old Profile Centre",
+        last_updated="2024-01-15",
+    )
+    centre_2 = make_test_centre_payload(
+        centre_code="CTR002",
+        centre_name="Recent Profile Centre",
+        last_updated="2026-09-30",
+    )
 
     monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [centre_1, centre_2])
     monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [])
@@ -253,6 +266,8 @@ def test_sync_centres_multi_centre_horizon_alignment(monkeypatch):
     stats = sync_centres(db_engine=test_engine, sync_date=reference_sync_date)
 
     assert stats["centres_inserted"] == 2
+    assert stats["vacancies_inserted"] == 84
+    assert stats["vacancies_updated"] == 0
     assert stats["vacancies_synced"] == 84
 
     with Session(test_engine) as session:
@@ -295,22 +310,22 @@ def test_sync_centres_rolling_cycle_preserves_historical_records(monkeypatch):
     monkeypatch.setattr(sc_mod, "engine", test_engine)
 
     # Run 1: October 2026 sync
-    oct_centre = {
-        "centre_code": "ROLL01",
-        "centre_name": "Rolling Horizon Centre",
-        "last_updated": "2026-10-01",
-    }
-    for lvl in VACANCY_LEVELS:
-        for hor, _ in VACANCY_HORIZONS:
-            oct_centre[f"{lvl}_vacancy_{hor}"] = "Available"
-    # Mark October infant as "Immediate"
-    oct_centre["infant_vacancy_current_month"] = "Immediate"
+    oct_centre = make_test_centre_payload(
+        centre_code="ROLL01",
+        centre_name="Rolling Horizon Centre",
+        last_updated="2026-10-01",
+        vacancy_status="Available",
+        infant_vacancy_current_month="Immediate",
+    )
 
     monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [oct_centre])
     monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [])
 
     oct_sync_date = datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc)
-    sync_centres(db_engine=test_engine, sync_date=oct_sync_date)
+    stats1 = sync_centres(db_engine=test_engine, sync_date=oct_sync_date)
+    assert stats1["vacancies_inserted"] == 42
+    assert stats1["vacancies_updated"] == 0
+    assert stats1["vacancies_synced"] == 42
 
     with Session(test_engine) as session:
         records_oct = session.exec(select(VacancyRecord)).all()
@@ -320,21 +335,21 @@ def test_sync_centres_rolling_cycle_preserves_historical_records(monkeypatch):
         assert oct_infant.vacancy_status == "Immediate"
 
     # Run 2: November 2026 sync (calendar rolls forward by 1 month)
-    nov_centre = {
-        "centre_code": "ROLL01",
-        "centre_name": "Rolling Horizon Centre",
-        "last_updated": "2026-11-01",
-    }
-    for lvl in VACANCY_LEVELS:
-        for hor, _ in VACANCY_HORIZONS:
-            nov_centre[f"{lvl}_vacancy_{hor}"] = "Full"
-    # In Nov, current_month is 2026-11, so infant in Nov is now "Full"
-    nov_centre["infant_vacancy_current_month"] = "Full"
+    nov_centre = make_test_centre_payload(
+        centre_code="ROLL01",
+        centre_name="Rolling Horizon Centre",
+        last_updated="2026-11-01",
+        vacancy_status="Full",
+        infant_vacancy_current_month="Full",
+    )
 
     monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [nov_centre])
 
     nov_sync_date = datetime(2026, 11, 2, 0, 0, tzinfo=timezone.utc)
-    sync_centres(db_engine=test_engine, sync_date=nov_sync_date)
+    stats2 = sync_centres(db_engine=test_engine, sync_date=nov_sync_date)
+    assert stats2["vacancies_inserted"] == 6
+    assert stats2["vacancies_updated"] == 36
+    assert stats2["vacancies_synced"] == 42
 
     with Session(test_engine) as session:
         all_records = session.exec(select(VacancyRecord)).all()
@@ -424,7 +439,7 @@ def test_parse_centre_service_resolves_tp_code():
 
 def test_sync_centres_resolves_services_for_tp_code_centres(monkeypatch):
     from sqlmodel import Session, create_engine, select
-    from kidcarematch_backend.cron.sync_centres import sync_centres, VACANCY_LEVELS, VACANCY_HORIZONS
+    from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import PreschoolCentre, PreschoolService, init_db
     import kidcarematch_backend.cron.sync_centres as sc_mod
 
@@ -433,15 +448,12 @@ def test_sync_centres_resolves_services_for_tp_code_centres(monkeypatch):
     monkeypatch.setattr(sc_mod, "engine", test_engine)
 
     # Centre operating with primary centre_code and a temporary permit tp_code
-    centre_with_tp = {
-        "centre_code": "PC9999",
-        "tp_code": "TP9999",
-        "centre_name": "Temporary Permit Centre",
-        "last_updated": "2026-10-01",
-    }
-    for lvl in VACANCY_LEVELS:
-        for hor, _ in VACANCY_HORIZONS:
-            centre_with_tp[f"{lvl}_vacancy_{hor}"] = "Available"
+    centre_with_tp = make_test_centre_payload(
+        centre_code="PC9999",
+        tp_code="TP9999",
+        centre_name="Temporary Permit Centre",
+        last_updated="2026-10-01",
+    )
 
     # Services API returns records using tp_code instead of centre_code
     services_with_tp = [
@@ -475,7 +487,7 @@ def test_sync_centres_resolves_services_for_tp_code_centres(monkeypatch):
     with Session(test_engine) as session:
         centre = session.exec(select(PreschoolCentre).where(PreschoolCentre.centre_code == "PC9999")).first()
         assert centre is not None
-        assert centre.tp_code == "TP9999"
+        assert centre.centre_code == "PC9999"
 
         services = session.exec(select(PreschoolService).where(PreschoolService.centre_id == centre.centre_id)).all()
         assert len(services) == 2
@@ -485,7 +497,7 @@ def test_sync_centres_resolves_services_for_tp_code_centres(monkeypatch):
 
 def test_sync_centres_updates_existing_services_idempotently(monkeypatch):
     from sqlmodel import Session, create_engine, select
-    from kidcarematch_backend.cron.sync_centres import sync_centres, VACANCY_LEVELS, VACANCY_HORIZONS
+    from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import PreschoolService, init_db
     import kidcarematch_backend.cron.sync_centres as sc_mod
 
@@ -493,14 +505,11 @@ def test_sync_centres_updates_existing_services_idempotently(monkeypatch):
     init_db(test_engine)
     monkeypatch.setattr(sc_mod, "engine", test_engine)
 
-    centre_rec = {
-        "centre_code": "PC5555",
-        "centre_name": "Idempotent Centre",
-        "last_updated": "2026-10-01",
-    }
-    for lvl in VACANCY_LEVELS:
-        for hor, _ in VACANCY_HORIZONS:
-            centre_rec[f"{lvl}_vacancy_{hor}"] = "Available"
+    centre_rec = make_test_centre_payload(
+        centre_code="PC5555",
+        centre_name="Idempotent Centre",
+        last_updated="2026-10-01",
+    )
 
     service_initial = [
         {
@@ -549,8 +558,8 @@ def test_sync_centres_updates_existing_services_idempotently(monkeypatch):
 
 def test_sync_centres_tp_code_only_centre_and_subsequent_update(monkeypatch):
     from sqlmodel import Session, create_engine, select
-    from kidcarematch_backend.cron.sync_centres import sync_centres, VACANCY_LEVELS, VACANCY_HORIZONS
-    from kidcarematch_backend.db.db import PreschoolCentre, PreschoolService, init_db
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import PreschoolCentre, PreschoolService, VacancyRecord, init_db
     import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
@@ -558,15 +567,12 @@ def test_sync_centres_tp_code_only_centre_and_subsequent_update(monkeypatch):
     monkeypatch.setattr(sc_mod, "engine", test_engine)
 
     # Initial sync: new centre only has tp_code, centre_code is None
-    tp_only_centre = {
-        "centre_code": None,
-        "tp_code": "TP7777",
-        "centre_name": "Brand New TP Centre",
-        "last_updated": "2026-10-01",
-    }
-    for lvl in VACANCY_LEVELS:
-        for hor, _ in VACANCY_HORIZONS:
-            tp_only_centre[f"{lvl}_vacancy_{hor}"] = "Available"
+    tp_only_centre = make_test_centre_payload(
+        centre_code=None,
+        tp_code="TP7777",
+        centre_name="Brand New TP Centre",
+        last_updated="2026-10-01",
+    )
 
     services_initial = [
         {
@@ -584,19 +590,27 @@ def test_sync_centres_tp_code_only_centre_and_subsequent_update(monkeypatch):
 
     stats1 = sync_centres(db_engine=test_engine)
     assert stats1["centres_inserted"] == 1
+    assert stats1["vacancies_inserted"] == 42
+    assert stats1["vacancies_updated"] == 0
     assert stats1["services_inserted"] == 1
     assert stats1["services_skipped"] == 0
 
+    with Session(test_engine) as session:
+        centres = session.exec(select(PreschoolCentre)).all()
+        assert len(centres) == 1
+        assert centres[0].centre_code == "TP7777"
+
+        vacancies = session.exec(select(VacancyRecord).where(VacancyRecord.centre_id == centres[0].centre_id)).all()
+        assert len(vacancies) == 42
+        assert all(v.record_id.startswith("TP7777_") for v in vacancies)
+
     # Second sync: centre now has permanent centre_code assigned while keeping tp_code
-    centre_updated = {
-        "centre_code": "EC7777",
-        "tp_code": "TP7777",
-        "centre_name": "Brand New TP Centre (Registered)",
-        "last_updated": "2026-11-01",
-    }
-    for lvl in VACANCY_LEVELS:
-        for hor, _ in VACANCY_HORIZONS:
-            centre_updated[f"{lvl}_vacancy_{hor}"] = "Available"
+    centre_updated = make_test_centre_payload(
+        centre_code="EC7777",
+        tp_code="TP7777",
+        centre_name="Brand New TP Centre (Registered)",
+        last_updated="2026-11-01",
+    )
 
     services_updated = [
         {
@@ -614,6 +628,8 @@ def test_sync_centres_tp_code_only_centre_and_subsequent_update(monkeypatch):
 
     stats2 = sync_centres(db_engine=test_engine)
     assert stats2["centres_updated"] == 1
+    assert stats2["vacancies_updated"] == 42
+    assert stats2["vacancies_inserted"] == 0
     assert stats2["services_updated"] == 1
     assert stats2["services_skipped"] == 0
 
@@ -621,12 +637,94 @@ def test_sync_centres_tp_code_only_centre_and_subsequent_update(monkeypatch):
         centres = session.exec(select(PreschoolCentre)).all()
         assert len(centres) == 1
         assert centres[0].centre_code == "EC7777"
-        assert centres[0].tp_code == "TP7777"
+
+        # Verify NO duplicate vacancies were created during transition from TP7777 to EC7777
+        vacancies = session.exec(select(VacancyRecord).where(VacancyRecord.centre_id == centres[0].centre_id)).all()
+        assert len(vacancies) == 42
+        assert all(v.record_id.startswith("EC7777_") for v in vacancies)
 
         services = session.exec(select(PreschoolService)).all()
         assert len(services) == 1
         assert services[0].fee == 1150.0
         assert services[0].centre_id == centres[0].centre_id
+
+
+def test_code_transition_migrates_historical_vacancies_without_duplicates(monkeypatch):
+    from sqlmodel import Session, create_engine, select
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import PreschoolCentre, PreschoolService, VacancyRecord, init_db
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    # Sync 1: September 2026 - Centre only has tp_code
+    sep_centre = make_test_centre_payload(
+        centre_code=None,
+        tp_code="TP1234",
+        centre_name="Initial TP Centre",
+        last_updated="2026-09-01",
+    )
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [sep_centre])
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [])
+
+    sep_date = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    stats1 = sync_centres(db_engine=test_engine, sync_date=sep_date)
+    assert stats1["centres_inserted"] == 1
+    assert stats1["vacancies_inserted"] == 42
+
+    # Sync 2: October 2026 - Centre now has official centre_code "EC1234" alongside "TP1234"
+    oct_centre = make_test_centre_payload(
+        centre_code="EC1234",
+        tp_code="TP1234",
+        centre_name="Registered Centre",
+        last_updated="2026-10-01",
+    )
+    oct_services = [
+        {
+            "centre_code": "TP1234",
+            "type_of_service": "Full Day",
+            "levels_offered": "Infant Care",
+            "fees": "1300",
+            "type_of_citizenship": "SC",
+            "last_updated": "2026-10-01",
+        }
+    ]
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [oct_centre])
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: oct_services)
+
+    oct_date = datetime(2026, 10, 15, tzinfo=timezone.utc)
+    stats2 = sync_centres(db_engine=test_engine, sync_date=oct_date)
+    assert stats2["centres_updated"] == 1
+    assert stats2["vacancies_updated"] == 36  # 36 overlapping months updated
+    assert stats2["vacancies_inserted"] == 6   # 6 new seventh_month (2027-04) records inserted
+    assert stats2["services_inserted"] == 1
+
+    with Session(test_engine) as session:
+        centres = session.exec(select(PreschoolCentre)).all()
+        assert len(centres) == 1
+        assert centres[0].centre_code == "EC1234"
+
+        all_vacancies = session.exec(select(VacancyRecord).where(VacancyRecord.centre_id == centres[0].centre_id)).all()
+        # 42 original from Sep + 6 new for Apr 2027 = 48 total records
+        assert len(all_vacancies) == 48
+
+        # Verify NO records exist with the old TP1234 prefix
+        assert not any(v.record_id.startswith("TP1234_") for v in all_vacancies)
+        assert all(v.record_id.startswith("EC1234_") for v in all_vacancies)
+
+        # Historical September record was migrated to EC1234 and preserved
+        hist_sep = session.get(VacancyRecord, "EC1234_infant_202609")
+        assert hist_sep is not None
+        assert hist_sep.enrollment_month_year == datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
+
+        # Services under tp_code resolved to EC1234
+        services = session.exec(select(PreschoolService)).all()
+        assert len(services) == 1
+        assert services[0].centre_id == centres[0].centre_id
+        assert services[0].fee == 1300.0
+
 
 
 
