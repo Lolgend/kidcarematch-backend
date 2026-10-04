@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Any, Optional
-from sqlmodel import Field, Relationship, SQLModel, create_engine
+from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint, create_engine
 
 from kidcarematch_backend.core.config import settings
 
@@ -8,6 +8,7 @@ from kidcarematch_backend.core.config import settings
 class PreschoolCentre(SQLModel, table=True):
     centre_id: Optional[int] = Field(default=None, primary_key=True)
     centre_code: str = Field(index=True, unique=True)
+    tp_code: Optional[str] = Field(default=None, index=True)
     centre_name: str = Field(index=True)
     contact: Optional[str] = None
     email: Optional[str] = None
@@ -40,6 +41,16 @@ class VacancyRecord(SQLModel, table=True):
 
 
 class PreschoolService(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "centre_id",
+            "type_of_service",
+            "level",
+            "citizenship_type",
+            name="uq_preschool_service_offering",
+        ),
+    )
+
     service_id: Optional[int] = Field(default=None, primary_key=True)
     centre_id: int = Field(foreign_key="preschoolcentre.centre_id", nullable=False, index=True)
     type_of_service: str

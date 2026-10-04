@@ -361,3 +361,273 @@ def test_sync_centres_rolling_cycle_preserves_historical_records(monkeypatch):
         assert new_may_infant.vacancy_status == "Full"
         assert new_may_infant.enrollment_month_year == datetime(2027, 5, 1, 0, 0, tzinfo=timezone.utc)
 
+
+def test_preschool_service_composite_uniqueness_constraint():
+    from sqlalchemy.exc import IntegrityError
+    from sqlmodel import Session, create_engine
+    from kidcarematch_backend.db.db import PreschoolCentre, PreschoolService, init_db
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(centre_code="UNIQ01", centre_name="Unique Centre")
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+
+        service1 = PreschoolService(
+            centre_id=centre.centre_id,
+            type_of_service="Full Day",
+            level="Infant Care",
+            fee=1200.0,
+            citizenship_type="SC",
+        )
+        session.add(service1)
+        session.commit()
+
+        # Attempt to insert exact duplicate offering (same centre_id, type_of_service, level, citizenship_type)
+        service2 = PreschoolService(
+            centre_id=centre.centre_id,
+            type_of_service="Full Day",
+            level="Infant Care",
+            fee=1300.0,
+            citizenship_type="SC",
+        )
+        session.add(service2)
+        with pytest.raises(IntegrityError):
+            session.commit()
+
+
+def test_parse_centre_service_resolves_tp_code():
+    from kidcarematch_backend.cron.sync_centres import parse_centre_service
+
+    raw_rec = {
+        "centre_code": "TP8888",
+        "type_of_service": "Full Day",
+        "levels_offered": "Playgroup",
+        "fees": "950",
+        "type_of_citizenship": "PR",
+    }
+    # Mapping indexed by tp_code
+    centre_map = {"TP8888": 202}
+
+    service = parse_centre_service(raw_rec, centre_map)
+
+    assert service is not None
+    assert service.centre_id == 202
+    assert service.type_of_service == "Full Day"
+    assert service.level == "Playgroup"
+    assert service.fee == 950.0
+    assert service.citizenship_type == "PR"
+
+
+def test_sync_centres_resolves_services_for_tp_code_centres(monkeypatch):
+    from sqlmodel import Session, create_engine, select
+    from kidcarematch_backend.cron.sync_centres import sync_centres, VACANCY_LEVELS, VACANCY_HORIZONS
+    from kidcarematch_backend.db.db import PreschoolCentre, PreschoolService, init_db
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    # Centre operating with primary centre_code and a temporary permit tp_code
+    centre_with_tp = {
+        "centre_code": "PC9999",
+        "tp_code": "TP9999",
+        "centre_name": "Temporary Permit Centre",
+        "last_updated": "2026-10-01",
+    }
+    for lvl in VACANCY_LEVELS:
+        for hor, _ in VACANCY_HORIZONS:
+            centre_with_tp[f"{lvl}_vacancy_{hor}"] = "Available"
+
+    # Services API returns records using tp_code instead of centre_code
+    services_with_tp = [
+        {
+            "centre_code": "TP9999",
+            "type_of_service": "Full Day",
+            "levels_offered": "Infant Care",
+            "fees": "1000",
+            "type_of_citizenship": "SC",
+            "last_updated": "2026-10-01",
+        },
+        {
+            "centre_code": "PC9999",
+            "type_of_service": "Half Day",
+            "levels_offered": "Playgroup",
+            "fees": "600",
+            "type_of_citizenship": "SC",
+            "last_updated": "2026-10-01",
+        },
+    ]
+
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [centre_with_tp])
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: services_with_tp)
+
+    stats = sync_centres(db_engine=test_engine)
+
+    assert stats["centres_inserted"] == 1
+    assert stats["services_inserted"] == 2
+    assert stats["services_skipped"] == 0
+
+    with Session(test_engine) as session:
+        centre = session.exec(select(PreschoolCentre).where(PreschoolCentre.centre_code == "PC9999")).first()
+        assert centre is not None
+        assert centre.tp_code == "TP9999"
+
+        services = session.exec(select(PreschoolService).where(PreschoolService.centre_id == centre.centre_id)).all()
+        assert len(services) == 2
+        service_types = {s.type_of_service for s in services}
+        assert service_types == {"Full Day", "Half Day"}
+
+
+def test_sync_centres_updates_existing_services_idempotently(monkeypatch):
+    from sqlmodel import Session, create_engine, select
+    from kidcarematch_backend.cron.sync_centres import sync_centres, VACANCY_LEVELS, VACANCY_HORIZONS
+    from kidcarematch_backend.db.db import PreschoolService, init_db
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    centre_rec = {
+        "centre_code": "PC5555",
+        "centre_name": "Idempotent Centre",
+        "last_updated": "2026-10-01",
+    }
+    for lvl in VACANCY_LEVELS:
+        for hor, _ in VACANCY_HORIZONS:
+            centre_rec[f"{lvl}_vacancy_{hor}"] = "Available"
+
+    service_initial = [
+        {
+            "centre_code": "PC5555",
+            "type_of_service": "Full Day",
+            "levels_offered": "Infant Care",
+            "fees": "1200",
+            "type_of_citizenship": "SC",
+            "last_updated": "2026-10-01",
+            "remarks": "Initial fee",
+        }
+    ]
+
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [centre_rec])
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: service_initial)
+
+    stats1 = sync_centres(db_engine=test_engine)
+    assert stats1["services_inserted"] == 1
+    assert stats1["services_updated"] == 0
+
+    # Second sync: fee changes and remarks update
+    service_updated = [
+        {
+            "centre_code": "PC5555",
+            "type_of_service": "Full Day",
+            "levels_offered": "Infant Care",
+            "fees": "1250",
+            "type_of_citizenship": "SC",
+            "last_updated": "2026-11-01",
+            "remarks": "Revised fee",
+        }
+    ]
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: service_updated)
+
+    stats2 = sync_centres(db_engine=test_engine)
+    assert stats2["services_inserted"] == 0
+    assert stats2["services_updated"] == 1
+
+    with Session(test_engine) as session:
+        services = session.exec(select(PreschoolService)).all()
+        assert len(services) == 1
+        assert services[0].fee == 1250.0
+        assert services[0].remarks == "Revised fee"
+        assert services[0].last_updated == datetime(2026, 11, 1, 0, 0, tzinfo=timezone.utc)
+
+
+def test_sync_centres_tp_code_only_centre_and_subsequent_update(monkeypatch):
+    from sqlmodel import Session, create_engine, select
+    from kidcarematch_backend.cron.sync_centres import sync_centres, VACANCY_LEVELS, VACANCY_HORIZONS
+    from kidcarematch_backend.db.db import PreschoolCentre, PreschoolService, init_db
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    # Initial sync: new centre only has tp_code, centre_code is None
+    tp_only_centre = {
+        "centre_code": None,
+        "tp_code": "TP7777",
+        "centre_name": "Brand New TP Centre",
+        "last_updated": "2026-10-01",
+    }
+    for lvl in VACANCY_LEVELS:
+        for hor, _ in VACANCY_HORIZONS:
+            tp_only_centre[f"{lvl}_vacancy_{hor}"] = "Available"
+
+    services_initial = [
+        {
+            "centre_code": "TP7777",
+            "type_of_service": "Full Day",
+            "levels_offered": "Infant Care",
+            "fees": "1100",
+            "type_of_citizenship": "SC",
+            "last_updated": "2026-10-01",
+        }
+    ]
+
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [tp_only_centre])
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: services_initial)
+
+    stats1 = sync_centres(db_engine=test_engine)
+    assert stats1["centres_inserted"] == 1
+    assert stats1["services_inserted"] == 1
+    assert stats1["services_skipped"] == 0
+
+    # Second sync: centre now has permanent centre_code assigned while keeping tp_code
+    centre_updated = {
+        "centre_code": "EC7777",
+        "tp_code": "TP7777",
+        "centre_name": "Brand New TP Centre (Registered)",
+        "last_updated": "2026-11-01",
+    }
+    for lvl in VACANCY_LEVELS:
+        for hor, _ in VACANCY_HORIZONS:
+            centre_updated[f"{lvl}_vacancy_{hor}"] = "Available"
+
+    services_updated = [
+        {
+            "centre_code": "TP7777",
+            "type_of_service": "Full Day",
+            "levels_offered": "Infant Care",
+            "fees": "1150",
+            "type_of_citizenship": "SC",
+            "last_updated": "2026-11-01",
+        }
+    ]
+
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [centre_updated])
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: services_updated)
+
+    stats2 = sync_centres(db_engine=test_engine)
+    assert stats2["centres_updated"] == 1
+    assert stats2["services_updated"] == 1
+    assert stats2["services_skipped"] == 0
+
+    with Session(test_engine) as session:
+        centres = session.exec(select(PreschoolCentre)).all()
+        assert len(centres) == 1
+        assert centres[0].centre_code == "EC7777"
+        assert centres[0].tp_code == "TP7777"
+
+        services = session.exec(select(PreschoolService)).all()
+        assert len(services) == 1
+        assert services[0].fee == 1150.0
+        assert services[0].centre_id == centres[0].centre_id
+
+
+
+
