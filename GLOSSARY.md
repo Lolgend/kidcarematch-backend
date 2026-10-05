@@ -36,3 +36,15 @@ _Avoid_: Discount rule, grant scheme, rebate config
 A persistent operational heartbeat record tracking the real-time synchronization state, execution timestamps, record counts, and failure diagnostics for an external data provider.
 _Avoid_: Sync log, healthcheck record, source tracker
 
+**Family Preference Profile**:
+A parent-configured matching criteria profile representing a specific child or search scenario, capturing target service type, location postal anchors, household income, budget ceiling, and cost/travel trade-off weights.
+_Avoid_: Search filter, match config, family setting
+
+**Review**:
+A parent-submitted evaluation of a preschool centre comprising a 1-to-5 star rating and qualitative commentary, governed by a tri-state moderation workflow (`PENDING`, `APPROVED`, `REJECTED`) and strictly unique per parent per centre.
+_Avoid_: Feedback, rating entry, centre comment
+
+**Watchlist Entry**:
+A cohort-specific alert subscription tracking vacancy availability for a specific age level and enrollment month at a preschool centre.
+_Avoid_: Favourite, bookmark, notification subscription
+
