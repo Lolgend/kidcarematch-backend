@@ -451,9 +451,9 @@ def test_review_moderation_workflow_audit(test_session: Session):
     assert saved.moderated_by is None
 
     # 2. Admin moderates review -> APPROVED
-    mod_time = datetime(2026, 10, 5, 8, 30, tzinfo=timezone.utc)
+    moderation_time = datetime(2026, 10, 5, 8, 30, tzinfo=timezone.utc)
     saved.moderation_status = ModerationStatus.APPROVED
-    saved.moderated_at = mod_time
+    saved.moderated_at = moderation_time
     saved.moderated_by = admin.user_id
     test_session.add(saved)
     test_session.commit()
@@ -461,7 +461,7 @@ def test_review_moderation_workflow_audit(test_session: Session):
     approved_rev = test_session.get(Review, "rev_alex_01")
     assert approved_rev is not None
     assert approved_rev.moderation_status == ModerationStatus.APPROVED
-    assert approved_rev.moderated_at == mod_time
+    assert approved_rev.moderated_at == moderation_time
     assert approved_rev.moderated_by == "admin_auditor_01"
 
 
