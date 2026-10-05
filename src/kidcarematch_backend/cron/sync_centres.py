@@ -13,6 +13,7 @@ from sqlmodel import Session, SQLModel, select
 from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.db.db import (
     PreschoolCentre,
+    PreschoolLevels,
     PreschoolService,
     VacancyRecord,
     engine,
@@ -161,7 +162,7 @@ def parse_vacancies_for_centre(
                 VacancyRecord(
                     record_id=record_id,
                     centre_id=centre_id,
-                    level_type=level,
+                    level_type=PreschoolLevels(level),
                     enrollment_month_year=target_month,
                     vacancy_status=status,
                 )

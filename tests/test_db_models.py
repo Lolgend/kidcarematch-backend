@@ -8,11 +8,13 @@ from kidcarematch_backend.db.db import (
     AccountStatus,
     ApplicantStatus,
     CareType,
+    CitizenshipType,
     ExternalDataSourceStatus,
     FamilyPreferenceProfile,
     LocationPreference,
     ModerationStatus,
     PreschoolCentre,
+    PreschoolLevels,
     PreschoolService,
     Review,
     SubsidyMetric,
@@ -107,7 +109,7 @@ def test_create_and_query_subsidy_rules(test_session: Session):
         care_type=CareType.INFANT_CARE,
         metric=SubsidyMetric.FIXED,
         applicant_status=ApplicantStatus.WORKING_APPLICANT,
-        citizenship="SC",
+        citizenship=CitizenshipType.SC,
         income_min=None,
         income_max=None,
         subsidy_amount=600.0,
@@ -122,7 +124,7 @@ def test_create_and_query_subsidy_rules(test_session: Session):
         care_type=CareType.INFANT_CARE,
         metric=SubsidyMetric.HOUSEHOLD_INCOME,
         applicant_status=ApplicantStatus.WORKING_APPLICANT,
-        citizenship="SC",
+        citizenship=CitizenshipType.SC,
         income_min=0.0,
         income_max=3000.0,
         subsidy_amount=710.0,
@@ -137,7 +139,7 @@ def test_create_and_query_subsidy_rules(test_session: Session):
         care_type=CareType.INFANT_CARE,
         metric=SubsidyMetric.HOUSEHOLD_INCOME,
         applicant_status=ApplicantStatus.WORKING_APPLICANT,
-        citizenship="SC",
+        citizenship=CitizenshipType.SC,
         income_min=3000.01,
         income_max=6000.0,
         subsidy_amount=540.0,
@@ -152,7 +154,7 @@ def test_create_and_query_subsidy_rules(test_session: Session):
         care_type=CareType.CHILD_CARE,
         metric=SubsidyMetric.FIXED,
         applicant_status=ApplicantStatus.WORKING_APPLICANT,
-        citizenship="SC",
+        citizenship=CitizenshipType.SC,
         income_min=None,
         income_max=None,
         subsidy_amount=300.0,
@@ -268,8 +270,8 @@ def test_family_preference_profile_multi_creation_for_parent(test_session: Sessi
         profile_id="fpp_child1",
         user_id=parent.user_id,
         profile_name="Infant Search - Lucas",
-        level="infant",
-        citizenship_status="SC",
+        level=PreschoolLevels.INFANT,
+        citizenship_status=CitizenshipType.SC,
         service_required="Full Day",
         home_postal_code="560123",
         workplace_postal_code="018989",
@@ -284,8 +286,8 @@ def test_family_preference_profile_multi_creation_for_parent(test_session: Sessi
         profile_id="fpp_child2",
         user_id=parent.user_id,
         profile_name="Playgroup Search - Lucas",
-        level="pg",
-        citizenship_status="SC",
+        level=PreschoolLevels.PG,
+        citizenship_status=CitizenshipType.SC,
         service_required="Half Day",
         home_postal_code="560123",
         workplace_postal_code=None,
@@ -487,7 +489,7 @@ def test_watchlist_entry_cohort_subscription_and_uniqueness(test_session: Sessio
         watchlist_id="watch_01",
         user_id=parent.user_id,
         centre_id=centre.centre_id,
-        level="infant",
+        level=PreschoolLevels.INFANT,
         enrollment_month_year=datetime(2027, 3, 1, tzinfo=timezone.utc),
     )
     # 2. Watchlist subscription for Playgroup cohort in March 2027 (different level -> valid)
@@ -495,7 +497,7 @@ def test_watchlist_entry_cohort_subscription_and_uniqueness(test_session: Sessio
         watchlist_id="watch_02",
         user_id=parent.user_id,
         centre_id=centre.centre_id,
-        level="pg",
+        level=PreschoolLevels.PG,
         enrollment_month_year=datetime(2027, 3, 1, tzinfo=timezone.utc),
     )
     # 3. Watchlist subscription for Infant cohort in April 2027 (different month -> valid)
@@ -503,7 +505,7 @@ def test_watchlist_entry_cohort_subscription_and_uniqueness(test_session: Sessio
         watchlist_id="watch_03",
         user_id=parent.user_id,
         centre_id=centre.centre_id,
-        level="infant",
+        level=PreschoolLevels.INFANT,
         enrollment_month_year=datetime(2027, 4, 1, tzinfo=timezone.utc),
     )
     test_session.add_all([entry1, entry2, entry3])
@@ -519,7 +521,7 @@ def test_watchlist_entry_cohort_subscription_and_uniqueness(test_session: Sessio
         watchlist_id="watch_dup",
         user_id=parent.user_id,
         centre_id=centre.centre_id,
-        level="infant",
+        level=PreschoolLevels.INFANT,
         enrollment_month_year=datetime(2027, 3, 1, tzinfo=timezone.utc),
     )
     test_session.add(duplicate_entry)
@@ -550,7 +552,7 @@ def test_bidirectional_relationships_navigation(test_session: Session):
         user_id=parent.user_id,
         profile_name="Nav Profile",
         service_required="Full Day",
-        level="n1",
+        level=PreschoolLevels.N1,
     )
     review = Review(
         review_id="rev_nav_01",
@@ -563,7 +565,7 @@ def test_bidirectional_relationships_navigation(test_session: Session):
         watchlist_id="watch_nav_01",
         user_id=parent.user_id,
         centre_id=centre.centre_id,
-        level="n1",
+        level=PreschoolLevels.N1,
         enrollment_month_year=datetime(2027, 5, 1, tzinfo=timezone.utc),
     )
     test_session.add_all([profile, review, watchlist])
@@ -608,7 +610,7 @@ def test_preschool_centre_cascade_deletion(test_session: Session):
     vacancy = VacancyRecord(
         record_id="CTR_CASCADE_01_infant_202610",
         centre_id=centre.centre_id,
-        level_type="infant",
+        level_type=PreschoolLevels.INFANT,
         enrollment_month_year=datetime(2026, 10, 1, tzinfo=timezone.utc),
         vacancy_status="Available",
     )
@@ -629,7 +631,7 @@ def test_preschool_centre_cascade_deletion(test_session: Session):
         watchlist_id="watch_cascade_01",
         user_id=user.user_id,
         centre_id=centre.centre_id,
-        level="infant",
+        level=PreschoolLevels.INFANT,
         enrollment_month_year=datetime(2026, 10, 1, tzinfo=timezone.utc),
     )
     test_session.add_all([vacancy, service, review, watchlist])
@@ -652,3 +654,152 @@ def test_preschool_centre_cascade_deletion(test_session: Session):
     assert test_session.get(WatchlistEntry, "watch_cascade_01") is None
     # User should remain intact
     assert test_session.get(User, "user_cascade_01") is not None
+
+
+def test_user_cascade_deletion(test_session: Session):
+    centre = PreschoolCentre(
+        centre_code="CTR_USER_CASC_01",
+        centre_name="User Cascade Test Centre",
+    )
+    user = User(
+        user_id="user_to_delete_01",
+        email="delete_me@example.com",
+        password_hash="pw_del_123",
+        full_name="Delete Me",
+    )
+    test_session.add_all([centre, user])
+    test_session.commit()
+    assert centre.centre_id is not None
+    assert user.user_id is not None
+
+    profile = FamilyPreferenceProfile(
+        profile_id="fpp_user_casc_01",
+        user_id=user.user_id,
+        profile_name="Delete Profile",
+        service_required="Full Day",
+        level=PreschoolLevels.INFANT,
+        citizenship_status=CitizenshipType.SC,
+        household_income=5000.0,
+        household_member_count=3,
+        enrollment_month_year=datetime(2027, 1, 1, tzinfo=timezone.utc),
+    )
+    review = Review(
+        review_id="rev_user_casc_01",
+        centre_id=centre.centre_id,
+        user_id=user.user_id,
+        rating=4,
+        review_description="Great facilities.",
+    )
+    watchlist = WatchlistEntry(
+        watchlist_id="watch_user_casc_01",
+        user_id=user.user_id,
+        centre_id=centre.centre_id,
+        level=PreschoolLevels.INFANT,
+        enrollment_month_year=datetime(2026, 12, 1, tzinfo=timezone.utc),
+    )
+    test_session.add_all([profile, review, watchlist])
+    test_session.commit()
+
+    assert test_session.get(FamilyPreferenceProfile, "fpp_user_casc_01") is not None
+    assert test_session.get(Review, "rev_user_casc_01") is not None
+    assert test_session.get(WatchlistEntry, "watch_user_casc_01") is not None
+
+    test_session.delete(user)
+    test_session.commit()
+
+    # Verify that all user-owned child records are deleted
+    assert test_session.get(FamilyPreferenceProfile, "fpp_user_casc_01") is None
+    assert test_session.get(Review, "rev_user_casc_01") is None
+    assert test_session.get(WatchlistEntry, "watch_user_casc_01") is None
+    # Centre should remain intact
+    assert test_session.get(PreschoolCentre, centre.centre_id) is not None
+
+
+def test_canonical_enums_values_and_db_loading(test_session: Session):
+    # Verify PreschoolLevels canonical lowercase values
+    expected_levels = {"infant", "pg", "n1", "n2", "k1", "k2", "student_care"}
+    assert {level.value for level in PreschoolLevels} == expected_levels
+
+    # Verify CitizenshipType canonical values
+    expected_citizenships = {"SC", "SPR", "OTHERS"}
+    assert {c.value for c in CitizenshipType} == expected_citizenships
+
+    # Verify database loading for models with enums
+    centre = PreschoolCentre(
+        centre_code="CTR_ENUM_01",
+        centre_name="Enum Test Centre",
+    )
+    user = User(
+        user_id="user_enum_01",
+        email="enum_user@example.com",
+        password_hash="pw_enum",
+        full_name="Enum User",
+    )
+    test_session.add_all([centre, user])
+    test_session.commit()
+    assert centre.centre_id is not None
+    assert user.user_id is not None
+
+    # Load VacancyRecord
+    vacancy = VacancyRecord(
+        record_id="CTR_ENUM_01_pg_202701",
+        centre_id=centre.centre_id,
+        level_type=PreschoolLevels.PG,
+        enrollment_month_year=datetime(2027, 1, 1, tzinfo=timezone.utc),
+        vacancy_status="Available",
+    )
+    # Load FamilyPreferenceProfile
+    profile = FamilyPreferenceProfile(
+        profile_id="fpp_enum_01",
+        user_id=user.user_id,
+        profile_name="Enum Profile",
+        level=PreschoolLevels.N2,
+        citizenship_status=CitizenshipType.SPR,
+        service_required="Full Day",
+    )
+    # Load WatchlistEntry
+    watchlist = WatchlistEntry(
+        watchlist_id="watch_enum_01",
+        user_id=user.user_id,
+        centre_id=centre.centre_id,
+        level=PreschoolLevels.K1,
+        enrollment_month_year=datetime(2027, 2, 1, tzinfo=timezone.utc),
+    )
+    test_session.add_all([vacancy, profile, watchlist])
+    test_session.commit()
+
+    loaded_vac = test_session.get(VacancyRecord, "CTR_ENUM_01_pg_202701")
+    assert loaded_vac is not None
+    assert loaded_vac.level_type == PreschoolLevels.PG
+    assert loaded_vac.level_type.value == "pg"
+
+    loaded_fpp = test_session.get(FamilyPreferenceProfile, "fpp_enum_01")
+    assert loaded_fpp is not None
+    assert loaded_fpp.level == PreschoolLevels.N2
+    assert loaded_fpp.level.value == "n2"
+    assert loaded_fpp.citizenship_status == CitizenshipType.SPR
+    assert loaded_fpp.citizenship_status.value == "SPR"
+
+    loaded_watch = test_session.get(WatchlistEntry, "watch_enum_01")
+    assert loaded_watch is not None
+    assert loaded_watch.level == PreschoolLevels.K1
+    assert loaded_watch.level.value == "k1"
+
+
+def test_foreign_key_cascade_declarations():
+    # Verify database-level ondelete="CASCADE" metadata declarations
+    fpp_user_fk = next(fk for fk in FamilyPreferenceProfile.__table__.c.user_id.foreign_keys)
+    assert fpp_user_fk.ondelete == "CASCADE"
+
+    watch_user_fk = next(fk for fk in WatchlistEntry.__table__.c.user_id.foreign_keys)
+    assert watch_user_fk.ondelete == "CASCADE"
+
+    review_user_fk = next(fk for fk in Review.__table__.c.user_id.foreign_keys)
+    assert review_user_fk.ondelete == "CASCADE"
+
+    vacancy_centre_fk = next(fk for fk in VacancyRecord.__table__.c.centre_id.foreign_keys)
+    assert vacancy_centre_fk.ondelete == "CASCADE"
+
+    service_centre_fk = next(fk for fk in PreschoolService.__table__.c.centre_id.foreign_keys)
+    assert service_centre_fk.ondelete == "CASCADE"
+

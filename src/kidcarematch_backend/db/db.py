@@ -58,13 +58,13 @@ class CitizenshipType(str, Enum):
     OTHERS = "OTHERS"
 
 class PreschoolLevels(str, Enum):
-    INFANT = "INFANT"
-    PLAYGROUP = "PLAYGROUP"
-    N1 = "N1"
-    N2 = "N2"
-    K1 = "K1"
-    K2 = "K2"
-    STUDENT_CARE = "STUDENT_CARE"
+    INFANT = "infant"
+    PG = "pg"
+    N1 = "n1"
+    N2 = "n2"
+    K1 = "k1"
+    K2 = "k2"
+    STUDENT_CARE = "student_care"
 
 
 
@@ -141,9 +141,9 @@ class PreschoolService(SQLModel, table=True):
         index=True,
     )
     type_of_service: str
-    level: PreschoolLevels
+    level: str
     fee: float
-    citizenship_type: CitizenshipType
+    citizenship_type: str
     last_updated: Optional[datetime] = Field(default=None)
     remarks: Optional[str] = None
 
@@ -175,19 +175,19 @@ class User(SQLModel, table=True):
 
 
 class FamilyPreferenceProfile(SQLModel, table=True):
-    profile_id: str = Field(default=None, primary_key=True)
-    user_id: str = Field(foreign_key="user.user_id", nullable=False, index=True)
+    profile_id: Optional[str] = Field(default=None, primary_key=True)
+    user_id: str = Field(foreign_key="user.user_id", ondelete="CASCADE", nullable=False, index=True)
     profile_name: str
     level: Optional[PreschoolLevels] = Field(default=None, index=True)
     citizenship_status: CitizenshipType = Field(default=CitizenshipType.SC, index=True)
     service_required: str = Field(index=True)
     home_postal_code: Optional[str] = Field(default=None)
     workplace_postal_code: Optional[str] = Field(default=None)
-    location_preference: LocationPreference = Field(default=LocationPreference.HOME)
-    household_income: int = Field()
-    household_member_count: int = Field()
+    location_preference: Optional[LocationPreference] = Field(default=LocationPreference.HOME)
+    household_income: Optional[float] = Field(default=None)
+    household_member_count: Optional[int] = Field(default=None)
     budget_max: Optional[float] = Field(default=None)
-    enrollment_month_year: datetime = Field(default=None)
+    enrollment_month_year: Optional[datetime] = Field(default=None)
     cost_weight: Optional[float] = Field(default=0.5)
     travel_weight: Optional[float] = Field(default=0.5)
 
@@ -232,6 +232,10 @@ class Review(SQLModel, table=True):
             raise ValueError("Rating must be between 1 and 5 stars")
         return v
 
+    @validates("rating")
+    def _validate_rating_sa(self, key: str, value: int) -> int:
+        return self.validate_rating(value)
+
 
 class WatchlistEntry(SQLModel, table=True):
     __table_args__ = (
@@ -245,7 +249,7 @@ class WatchlistEntry(SQLModel, table=True):
     )
 
     watchlist_id: Optional[str] = Field(default=None, primary_key=True)
-    user_id: str = Field(foreign_key="user.user_id", nullable=False, index=True)
+    user_id: str = Field(foreign_key="user.user_id", ondelete="CASCADE", nullable=False, index=True)
     centre_id: int = Field(
         foreign_key="preschoolcentre.centre_id",
         ondelete="CASCADE",

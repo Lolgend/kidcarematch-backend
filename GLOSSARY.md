@@ -48,3 +48,11 @@ _Avoid_: Feedback, rating entry, centre comment
 A cohort-specific alert subscription tracking vacancy availability for a specific age level and enrollment month at a preschool centre.
 _Avoid_: Favourite, bookmark, notification subscription
 
+**Preschool Level**:
+The developmental age cohort for childcare enrollment, canonically represented by short codes (`infant`, `pg`, `n1`, `n2`, `k1`, `k2`, `student_care`).
+_Avoid_: Age group, grade, tier, class level
+
+**Citizenship Type**:
+The Singapore residency classification tier determining subsidy eligibility and fee scales, canonically categorized as Singapore Citizen (`SC`), Singapore Permanent Resident (`SPR`), or Foreigner/Non-Resident (`OTHERS`).
+_Avoid_: Nationality status, resident type, citizen tier
+
