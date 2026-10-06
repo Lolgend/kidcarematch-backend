@@ -142,7 +142,7 @@ class PreschoolService(SQLModel, table=True):
     fee: float
     citizenship_type: CitizenshipType = Field(default=CitizenshipType.OTHERS, index=True)
     last_updated: Optional[datetime] = Field(default=None)
-    remarks: Optional[str] = None
+    remarks: Optional[str] = Field(default=None, max_length=1000)
 
     centre: Optional[PreschoolCentre] = Relationship(back_populates="services")
 
@@ -281,7 +281,7 @@ class ExternalDataSourceStatus(SQLModel, table=True):
     last_successful_sync: Optional[datetime] = Field(default=None)
     last_attempted_sync: Optional[datetime] = Field(default=None)
     records_processed: int = Field(default=0)
-    error_message: Optional[str] = Field(default=None)
+    error_message: Optional[str] = Field(default=None, max_length=1000)
 
 
 database_url = settings.DATABASE_URL
