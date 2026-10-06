@@ -14,6 +14,7 @@ from kidcarematch_backend.db.db import (
     LocationPreference,
     ModerationStatus,
     PreschoolCentre,
+    PreschoolLevel,
     PreschoolLevels,
     PreschoolService,
     Review,
@@ -783,7 +784,8 @@ def test_canonical_enums_values_and_db_loading(test_session: Session):
 
     loaded_fpp = test_session.get(FamilyPreferenceProfile, "fpp_enum_01")
     assert loaded_fpp is not None
-    assert loaded_fpp.level == PreschoolLevels.N2
+    assert loaded_fpp.level == PreschoolLevel.N2
+    assert loaded_fpp.level is not None
     assert loaded_fpp.level.value == "n2"
     assert loaded_fpp.citizenship_status == CitizenshipType.SPR
     assert loaded_fpp.citizenship_status.value == "SPR"

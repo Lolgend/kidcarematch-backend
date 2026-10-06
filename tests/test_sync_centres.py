@@ -192,6 +192,7 @@ def test_normalize_preschool_level_invalid_and_empty_returns_none(caplog):
         assert normalize_preschool_level("Unknown Level") is None
         assert normalize_preschool_level("Senior Daycare") is None
 
+    assert any("Empty or blank preschool service level" in record.message for record in caplog.records)
     assert any("Unmapped preschool service level" in record.message for record in caplog.records)
 
 
@@ -298,6 +299,28 @@ def test_parse_centre_service_unmapped_level_returns_none(caplog):
 
     assert service is None
     assert any("Unmapped preschool service level" in record.message for record in caplog.records)
+
+
+def test_parse_centre_service_empty_or_blank_level_logs_warning_and_returns_none(caplog):
+    import logging
+    from kidcarematch_backend.cron.sync_centres import parse_centre_service
+
+    for empty_level in ("", "   ", None, "NA"):
+        raw_rec = {
+            "centre_code": "EB0001",
+            "type_of_service": "Full Day",
+            "levels_offered": empty_level,
+            "fees": "500",
+            "type_of_citizenship": "SC",
+        }
+        centre_map = {"EB0001": 101}
+
+        with caplog.at_level(logging.WARNING):
+            service = parse_centre_service(raw_rec, centre_map)
+
+        assert service is None
+        assert any("Empty or blank preschool service level" in record.message for record in caplog.records)
+        caplog.clear()
 
 
 def test_parse_centre_service_unknown_centre_returns_none():

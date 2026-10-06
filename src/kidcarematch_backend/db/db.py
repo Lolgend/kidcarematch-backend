@@ -66,6 +66,8 @@ class PreschoolLevel(str, Enum):
     K2 = "k2"
     STUDENT_CARE = "student_care"
 
+PreschoolLevels = PreschoolLevel
+
 
 
 
@@ -175,21 +177,21 @@ class User(SQLModel, table=True):
 
 
 class FamilyPreferenceProfile(SQLModel, table=True):
-    profile_id: str = Field(default=None, primary_key=True)
+    profile_id: Optional[str] = Field(default=None, primary_key=True)
     user_id: str = Field(foreign_key="user.user_id", ondelete="CASCADE", nullable=False, index=True)
     profile_name: str
     level: Optional[PreschoolLevel] = Field(default=None, index=True)
     citizenship_status: CitizenshipType = Field(default=CitizenshipType.SC, index=True)
     service_required: str = Field(index=True)
-    home_postal_code: str = Field(default=None)
+    home_postal_code: Optional[str] = Field(default=None)
     workplace_postal_code: Optional[str] = Field(default=None)
     location_preference: LocationPreference = Field(default=LocationPreference.HOME)
-    household_income: float = Field(default=None)
-    household_member_count: int = Field(default=None)
-    budget_max: float = Field(default=None)
-    enrollment_month_year: datetime = Field(default=None)
-    cost_weight: float = Field(default=0.5)
-    travel_weight: float = Field(default=0.5)
+    household_income: Optional[float] = Field(default=None)
+    household_member_count: Optional[int] = Field(default=None)
+    budget_max: Optional[float] = Field(default=None)
+    enrollment_month_year: Optional[datetime] = Field(default=None)
+    cost_weight: Optional[float] = Field(default=0.5)
+    travel_weight: Optional[float] = Field(default=0.5)
 
     user: Optional[User] = Relationship(back_populates="preference_profiles")
 

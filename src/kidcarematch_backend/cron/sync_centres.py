@@ -17,6 +17,7 @@ from kidcarematch_backend.db.db import (
     CitizenshipType,
     ExternalDataSourceStatus,
     PreschoolCentre,
+    PreschoolLevel,
     PreschoolLevels,
     PreschoolService,
     SyncState,
@@ -169,7 +170,7 @@ def parse_vacancies_for_centre(
                 VacancyRecord(
                     record_id=record_id,
                     centre_id=centre_id,
-                    level_type=PreschoolLevels(level),
+                    level_type=PreschoolLevel(level),
                     enrollment_month_year=target_month,
                     vacancy_status=status,
                 )
@@ -190,17 +191,18 @@ def parse_float(val: Any) -> float:
         return 0.0
 
 
-def normalize_preschool_level(val: Any) -> PreschoolLevels | None:
-    """Normalize raw ECDA service offering level string to canonical PreschoolLevels enum member."""
+def normalize_preschool_level(val: Any) -> PreschoolLevel | None:
+    """Normalize raw ECDA service offering level string to canonical PreschoolLevel enum member."""
     clean_val = clean_str(val)
     if not clean_val:
+        logger.warning("Empty or blank preschool service level: %r", val)
         return None
 
     s = clean_val.strip().lower()
 
     # Direct match against enum value
     try:
-        return PreschoolLevels(s)
+        return PreschoolLevel(s)
     except ValueError:
         pass
 
@@ -210,30 +212,30 @@ def normalize_preschool_level(val: Any) -> PreschoolLevels | None:
 
     # Direct match against enum member name (e.g. STUDENT_CARE)
     upper_name = normalized.upper().replace(" ", "_")
-    if upper_name in PreschoolLevels.__members__:
-        return PreschoolLevels[upper_name]
+    if upper_name in PreschoolLevel.__members__:
+        return PreschoolLevel[upper_name]
 
     # Keyword / prefix heuristics
     if "infant" in normalized:
-        return PreschoolLevels.INFANT
+        return PreschoolLevel.INFANT
 
     if "playgroup" in normalized or "play group" in normalized or re.search(r"\bpg\b", normalized):
-        return PreschoolLevels.PG
+        return PreschoolLevel.PG
 
     if "nursery 1" in normalized or "nursery1" in normalized or re.search(r"\bn1\b", normalized):
-        return PreschoolLevels.N1
+        return PreschoolLevel.N1
 
     if "nursery 2" in normalized or "nursery2" in normalized or re.search(r"\bn2\b", normalized):
-        return PreschoolLevels.N2
+        return PreschoolLevel.N2
 
     if "kindergarten 1" in normalized or "kindergarten1" in normalized or re.search(r"\bk1\b", normalized):
-        return PreschoolLevels.K1
+        return PreschoolLevel.K1
 
     if "kindergarten 2" in normalized or "kindergarten2" in normalized or re.search(r"\bk2\b", normalized):
-        return PreschoolLevels.K2
+        return PreschoolLevel.K2
 
     if "student care" in normalized or "studentcare" in normalized or "student_care" in normalized:
-        return PreschoolLevels.STUDENT_CARE
+        return PreschoolLevel.STUDENT_CARE
 
     logger.warning("Unmapped preschool service level: %r", val)
     return None
@@ -671,7 +673,7 @@ def sync_centres(
             # 2. Sync Services
             # Index existing services by (centre_id, type_of_service, level, citizenship_type)
             existing_services_list = session.exec(select(PreschoolService)).all()
-            existing_services: dict[tuple[int, str, PreschoolLevels, CitizenshipType], PreschoolService] = {
+            existing_services: dict[tuple[int, str, PreschoolLevel, CitizenshipType], PreschoolService] = {
                 (s.centre_id, s.type_of_service, s.level, s.citizenship_type): s
                 for s in existing_services_list
             }
