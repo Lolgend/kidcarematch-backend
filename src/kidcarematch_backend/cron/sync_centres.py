@@ -18,7 +18,6 @@ from kidcarematch_backend.db.db import (
     ExternalDataSourceStatus,
     PreschoolCentre,
     PreschoolLevel,
-    PreschoolLevels,
     PreschoolService,
     SyncState,
     VacancyRecord,
@@ -222,10 +221,10 @@ def normalize_preschool_level(val: Any) -> PreschoolLevel | None:
     if "playgroup" in normalized or "play group" in normalized or re.search(r"\bpg\b", normalized):
         return PreschoolLevel.PG
 
-    if "nursery 1" in normalized or "nursery1" in normalized or re.search(r"\bn1\b", normalized):
+    if "pre nursery" in normalized:
         return PreschoolLevel.N1
 
-    if "nursery 2" in normalized or "nursery2" in normalized or re.search(r"\bn2\b", normalized):
+    if "nursery" in normalized:
         return PreschoolLevel.N2
 
     if "kindergarten 1" in normalized or "kindergarten1" in normalized or re.search(r"\bk1\b", normalized):
@@ -405,7 +404,7 @@ SERVICES_REQUESTED_FIELDS = [
 
 def fetch_all_services(
     resource_id: str,
-    batch_size: int = 1000,
+    batch_size: int = 5000,
     max_records: int | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch all centre service records from data.gov.sg using pagination."""
@@ -515,7 +514,7 @@ def sync_centres(
         # Fetch services before entering the database transaction to avoid holding open connections
         service_records = fetch_all_services(
             resource_id=services_resource_id,
-            batch_size=1000,
+            batch_size=5000,
             max_records=max_records,
         )
         stats["services_fetched"] = len(service_records)
@@ -678,7 +677,7 @@ def sync_centres(
                 for s in existing_services_list
             }
 
-            for s_rec in service_records:
+            for i, s_rec in enumerate(service_records):
                 parsed_service = parse_centre_service(s_rec, centre_map)
                 if not parsed_service:
                     stats["services_skipped"] += 1
