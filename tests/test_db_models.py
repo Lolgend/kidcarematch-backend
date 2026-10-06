@@ -617,9 +617,9 @@ def test_preschool_centre_cascade_deletion(test_session: Session):
     service = PreschoolService(
         centre_id=centre.centre_id,
         type_of_service="Full Day",
-        level="Infant Care",
+        level=PreschoolLevels.INFANT,
         fee=1100.0,
-        citizenship_type="SC",
+        citizenship_type=CitizenshipType.SC,
     )
     review = Review(
         review_id="rev_cascade_01",
@@ -765,7 +765,15 @@ def test_canonical_enums_values_and_db_loading(test_session: Session):
         level=PreschoolLevels.K1,
         enrollment_month_year=datetime(2027, 2, 1, tzinfo=timezone.utc),
     )
-    test_session.add_all([vacancy, profile, watchlist])
+    # Load PreschoolService
+    service = PreschoolService(
+        centre_id=centre.centre_id,
+        type_of_service="Full Day",
+        level=PreschoolLevels.STUDENT_CARE,
+        fee=650.0,
+        citizenship_type=CitizenshipType.OTHERS,
+    )
+    test_session.add_all([vacancy, profile, watchlist, service])
     test_session.commit()
 
     loaded_vac = test_session.get(VacancyRecord, "CTR_ENUM_01_pg_202701")
@@ -784,6 +792,15 @@ def test_canonical_enums_values_and_db_loading(test_session: Session):
     assert loaded_watch is not None
     assert loaded_watch.level == PreschoolLevels.K1
     assert loaded_watch.level.value == "k1"
+
+    loaded_svc = test_session.exec(
+        select(PreschoolService).where(PreschoolService.centre_id == centre.centre_id)
+    ).first()
+    assert loaded_svc is not None
+    assert loaded_svc.level == PreschoolLevels.STUDENT_CARE
+    assert loaded_svc.level.value == "student_care"
+    assert loaded_svc.citizenship_type == CitizenshipType.OTHERS
+    assert loaded_svc.citizenship_type.value == "OTHERS"
 
 
 def test_foreign_key_cascade_declarations():

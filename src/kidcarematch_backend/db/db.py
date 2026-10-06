@@ -141,9 +141,9 @@ class PreschoolService(SQLModel, table=True):
         index=True,
     )
     type_of_service: str
-    level: str
+    level: PreschoolLevels = Field(index=True)
     fee: float
-    citizenship_type: str
+    citizenship_type: CitizenshipType = Field(default=CitizenshipType.OTHERS, index=True)
     last_updated: Optional[datetime] = Field(default=None)
     remarks: Optional[str] = None
 

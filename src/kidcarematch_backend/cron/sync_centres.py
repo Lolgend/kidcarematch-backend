@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ from sqlmodel import Session, SQLModel, select
 
 from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.db.db import (
+    CitizenshipType,
     PreschoolCentre,
     PreschoolLevels,
     PreschoolService,
@@ -183,6 +185,84 @@ def parse_float(val: Any) -> float:
         return 0.0
 
 
+def normalize_preschool_level(val: Any) -> PreschoolLevels | None:
+    """Normalize raw ECDA service offering level string to canonical PreschoolLevels enum member."""
+    clean_val = clean_str(val)
+    if not clean_val:
+        return None
+
+    s = clean_val.strip().lower()
+
+    # Direct match against enum value
+    try:
+        return PreschoolLevels(s)
+    except ValueError:
+        pass
+
+    # Normalize separators
+    normalized = re.sub(r"[_\-]+", " ", s)
+    normalized = " ".join(normalized.split())
+
+    # Direct match against enum member name (e.g. STUDENT_CARE)
+    upper_name = normalized.upper().replace(" ", "_")
+    if upper_name in PreschoolLevels.__members__:
+        return PreschoolLevels[upper_name]
+
+    # Keyword / prefix heuristics
+    if "infant" in normalized:
+        return PreschoolLevels.INFANT
+
+    if "playgroup" in normalized or "play group" in normalized or re.search(r"\bpg\b", normalized):
+        return PreschoolLevels.PG
+
+    if "nursery 1" in normalized or "nursery1" in normalized or re.search(r"\bn1\b", normalized):
+        return PreschoolLevels.N1
+
+    if "nursery 2" in normalized or "nursery2" in normalized or re.search(r"\bn2\b", normalized):
+        return PreschoolLevels.N2
+
+    if "kindergarten 1" in normalized or "kindergarten1" in normalized or re.search(r"\bk1\b", normalized):
+        return PreschoolLevels.K1
+
+    if "kindergarten 2" in normalized or "kindergarten2" in normalized or re.search(r"\bk2\b", normalized):
+        return PreschoolLevels.K2
+
+    if "student care" in normalized or "studentcare" in normalized or "student_care" in normalized:
+        return PreschoolLevels.STUDENT_CARE
+
+    logger.warning("Unmapped preschool service level: %r", val)
+    return None
+
+
+def normalize_citizenship_type(val: Any) -> CitizenshipType:
+    """Normalize raw citizenship string to canonical CitizenshipType enum, defaulting to OTHERS."""
+    clean_val = clean_str(val)
+    if not clean_val:
+        return CitizenshipType.OTHERS
+
+    s = clean_val.strip().upper()
+
+    try:
+        return CitizenshipType(s)
+    except ValueError:
+        pass
+
+    normalized = re.sub(r"[_\-]+", " ", s)
+    normalized = " ".join(normalized.split())
+
+    # Check for negative or explicit other/foreign markers first to avoid false-positive submatches
+    if any(k in normalized for k in ("NON", "NOT", "OTHER", "FOREIGN")):
+        return CitizenshipType.OTHERS
+
+    if normalized in ("SC", "SINGAPORE CITIZEN", "SINGAPORE CITIZENS", "SINGAPOREAN", "CITIZEN", "CITIZENS") or re.search(r"\bSC\b", normalized):
+        return CitizenshipType.SC
+
+    if normalized in ("SPR", "PR", "SINGAPORE PERMANENT RESIDENT", "SINGAPORE PERMANENT RESIDENTS", "PERMANENT RESIDENT", "PERMANENT RESIDENTS", "PERMANENTRESIDENT") or re.search(r"\b(SPR|PR)\b", normalized):
+        return CitizenshipType.SPR
+
+    return CitizenshipType.OTHERS
+
+
 def parse_centre_service(
     rec: dict[str, Any],
     centre_map: dict[str, int],
@@ -197,11 +277,14 @@ def parse_centre_service(
         return None
 
     service_type = clean_str(rec.get("type_of_service"))
-    level = clean_str(rec.get("levels_offered"))
-    citizenship = clean_str(rec.get("type_of_citizenship"))
-
-    if not service_type or not level or not citizenship:
+    if not service_type:
         return None
+
+    level = normalize_preschool_level(rec.get("levels_offered"))
+    if not level:
+        return None
+
+    citizenship = normalize_citizenship_type(rec.get("type_of_citizenship"))
 
     fee = parse_float(rec.get("fees"))
     updated_at = parse_datetime(rec.get("last_updated"))
@@ -528,7 +611,7 @@ def sync_centres(
         # 2. Sync Services
         # Index existing services by (centre_id, type_of_service, level, citizenship_type)
         existing_services_list = session.exec(select(PreschoolService)).all()
-        existing_services: dict[tuple[int, str, str, str], PreschoolService] = {
+        existing_services: dict[tuple[int, str, PreschoolLevels, CitizenshipType], PreschoolService] = {
             (s.centre_id, s.type_of_service, s.level, s.citizenship_type): s
             for s in existing_services_list
         }
