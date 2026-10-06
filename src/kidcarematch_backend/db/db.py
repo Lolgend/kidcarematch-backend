@@ -57,7 +57,7 @@ class CitizenshipType(str, Enum):
     SPR = "SPR"
     OTHERS = "OTHERS"
 
-class PreschoolLevels(str, Enum):
+class PreschoolLevel(str, Enum):
     INFANT = "infant"
     PG = "pg"
     N1 = "n1"
@@ -115,7 +115,7 @@ class VacancyRecord(SQLModel, table=True):
         nullable=False,
         index=True,
     )
-    level_type: PreschoolLevels
+    level_type: PreschoolLevel
     enrollment_month_year: datetime
     vacancy_status: str
 
@@ -141,7 +141,7 @@ class PreschoolService(SQLModel, table=True):
         index=True,
     )
     type_of_service: str
-    level: PreschoolLevels = Field(index=True)
+    level: PreschoolLevel = Field(index=True)
     fee: float
     citizenship_type: CitizenshipType = Field(default=CitizenshipType.OTHERS, index=True)
     last_updated: Optional[datetime] = Field(default=None)
@@ -175,21 +175,21 @@ class User(SQLModel, table=True):
 
 
 class FamilyPreferenceProfile(SQLModel, table=True):
-    profile_id: Optional[str] = Field(default=None, primary_key=True)
+    profile_id: str = Field(default=None, primary_key=True)
     user_id: str = Field(foreign_key="user.user_id", ondelete="CASCADE", nullable=False, index=True)
     profile_name: str
-    level: Optional[PreschoolLevels] = Field(default=None, index=True)
+    level: Optional[PreschoolLevel] = Field(default=None, index=True)
     citizenship_status: CitizenshipType = Field(default=CitizenshipType.SC, index=True)
     service_required: str = Field(index=True)
-    home_postal_code: Optional[str] = Field(default=None)
+    home_postal_code: str = Field(default=None)
     workplace_postal_code: Optional[str] = Field(default=None)
-    location_preference: Optional[LocationPreference] = Field(default=LocationPreference.HOME)
-    household_income: Optional[float] = Field(default=None)
-    household_member_count: Optional[int] = Field(default=None)
-    budget_max: Optional[float] = Field(default=None)
-    enrollment_month_year: Optional[datetime] = Field(default=None)
-    cost_weight: Optional[float] = Field(default=0.5)
-    travel_weight: Optional[float] = Field(default=0.5)
+    location_preference: LocationPreference = Field(default=LocationPreference.HOME)
+    household_income: float = Field(default=None)
+    household_member_count: int = Field(default=None)
+    budget_max: float = Field(default=None)
+    enrollment_month_year: datetime = Field(default=None)
+    cost_weight: float = Field(default=0.5)
+    travel_weight: float = Field(default=0.5)
 
     user: Optional[User] = Relationship(back_populates="preference_profiles")
 
@@ -256,7 +256,7 @@ class WatchlistEntry(SQLModel, table=True):
         nullable=False,
         index=True,
     )
-    level: PreschoolLevels = Field(index=True)
+    level: PreschoolLevel = Field(index=True)
     enrollment_month_year: datetime = Field(index=True)
 
     centre: Optional[PreschoolCentre] = Relationship(back_populates="watchlist_entries")
