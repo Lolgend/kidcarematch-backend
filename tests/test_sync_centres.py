@@ -1014,6 +1014,191 @@ def test_sync_centres_mixed_services_normalization_and_skipping(monkeypatch, cap
         assert services_by_level[PreschoolLevels.STUDENT_CARE].fee == 600.0
 
 
+def test_sync_centres_heartbeat_lifecycle_success(monkeypatch):
+    from sqlmodel import Session, create_engine
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    centre = make_test_centre_payload(
+        centre_code="HB_CTR_01",
+        centre_name="Heartbeat Centre 1",
+        last_updated="2026-10-01",
+    )
+    service = {
+        "centre_code": "HB_CTR_01",
+        "type_of_service": "Full Day",
+        "levels_offered": "Infant Care",
+        "fees": "1200",
+        "type_of_citizenship": "SC",
+        "last_updated": "2026-10-01",
+    }
+
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [centre])
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [service])
+
+    before_sync = datetime.now(timezone.utc)
+    stats = sync_centres(db_engine=test_engine)
+    after_sync = datetime.now(timezone.utc)
+
+    assert stats["centres_inserted"] == 1
+    assert stats["services_inserted"] == 1
+
+    with Session(test_engine) as session:
+        status = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
+        assert status is not None
+        assert status.source_id == "ECDA_DATASTORE"
+        assert status.sync_state == SyncState.SUCCESS
+        assert status.last_attempted_sync is not None
+        assert before_sync <= status.last_attempted_sync <= after_sync
+        assert status.last_successful_sync is not None
+        assert before_sync <= status.last_successful_sync <= after_sync
+        assert status.records_processed == 2  # 1 centre + 1 service
+        assert status.error_message is None
+
+
+def test_sync_centres_heartbeat_lifecycle_running_state(monkeypatch):
+    from sqlmodel import Session, create_engine
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    observed_state_during_fetch: dict[str, Any] = {}
+
+    def mock_fetch_all_centres(**kwargs: Any) -> list[dict[str, Any]]:
+        # Inspect database during the fetch execution to verify RUNNING state
+        with Session(test_engine) as session:
+            status = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
+            if status:
+                observed_state_during_fetch["sync_state"] = status.sync_state
+                observed_state_during_fetch["last_attempted_sync"] = status.last_attempted_sync
+        return [make_test_centre_payload(centre_code="RUN_01", centre_name="Running Test")]
+
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", mock_fetch_all_centres)
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [])
+
+    before_sync = datetime.now(timezone.utc)
+    sync_centres(db_engine=test_engine)
+    after_sync = datetime.now(timezone.utc)
+
+    assert observed_state_during_fetch["sync_state"] == SyncState.RUNNING
+    assert observed_state_during_fetch["last_attempted_sync"] is not None
+    assert before_sync <= observed_state_during_fetch["last_attempted_sync"] <= after_sync
+
+
+def test_sync_centres_heartbeat_lifecycle_failure_on_fetch(monkeypatch):
+    from sqlmodel import Session, create_engine
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    def failing_fetch_centres(**kwargs: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("ECDA Datastore Gateway Timeout (504)")
+
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", failing_fetch_centres)
+
+    before_sync = datetime.now(timezone.utc)
+    with pytest.raises(RuntimeError, match="ECDA Datastore Gateway Timeout"):
+        sync_centres(db_engine=test_engine)
+    after_sync = datetime.now(timezone.utc)
+
+    with Session(test_engine) as session:
+        status = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
+        assert status is not None
+        assert status.sync_state == SyncState.FAILED
+        assert status.last_attempted_sync is not None
+        assert before_sync <= status.last_attempted_sync <= after_sync
+        assert status.last_successful_sync is None
+        assert status.error_message is not None
+        assert "ECDA Datastore Gateway Timeout (504)" in status.error_message
+
+
+def test_sync_centres_heartbeat_lifecycle_failure_preserves_previous_success_timestamp(monkeypatch):
+    from sqlmodel import Session, create_engine
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    centre = make_test_centre_payload(centre_code="PREV_01", centre_name="Prev Success Centre")
+
+    # Run 1: Successful sync
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [centre])
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [])
+
+    sync_centres(db_engine=test_engine)
+
+    with Session(test_engine) as session:
+        status = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
+        assert status is not None
+        assert status.sync_state == SyncState.SUCCESS
+        assert status.last_successful_sync is not None
+        initial_successful_sync = status.last_successful_sync
+        assert status.records_processed == 1
+
+    # Run 2: Failed sync
+    def failing_fetch_services(**kwargs: Any) -> list[dict[str, Any]]:
+        raise ConnectionError("Services API Connection Refused")
+
+    monkeypatch.setattr(sc_mod, "fetch_all_services", failing_fetch_services)
+
+    with pytest.raises(ConnectionError, match="Services API Connection Refused"):
+        sync_centres(db_engine=test_engine)
+
+    with Session(test_engine) as session:
+        status = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
+        assert status is not None
+        assert status.sync_state == SyncState.FAILED
+        assert status.last_attempted_sync is not None
+        assert status.last_attempted_sync >= initial_successful_sync
+        # last_successful_sync must still be preserved from Run 1
+        assert status.last_successful_sync == initial_successful_sync
+        assert status.error_message is not None
+        assert "Services API Connection Refused" in status.error_message
+
+
+def test_sync_centres_heartbeat_lifecycle_dry_run_does_not_persist_status(monkeypatch):
+    from sqlmodel import Session, create_engine
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import ExternalDataSourceStatus, init_db
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    centre = make_test_centre_payload(centre_code="DRY_01", centre_name="Dry Run Centre")
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [centre])
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [])
+
+    sync_time = datetime(2026, 10, 6, 15, 0, 0, tzinfo=timezone.utc)
+    stats = sync_centres(db_engine=test_engine, dry_run=True, sync_date=sync_time)
+
+    assert stats["centres_fetched"] == 1
+
+    with Session(test_engine) as session:
+        # Status record should not be created or left dirty in dry-run mode
+        status = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
+        assert status is None
+
+
+
+
 
 
 
