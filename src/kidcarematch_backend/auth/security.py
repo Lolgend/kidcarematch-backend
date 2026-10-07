@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from kidcarematch_backend.core.config import settings
-from kidcarematch_backend.db.db import AccountStatus, User, get_session
+from kidcarematch_backend.db.db import AccountStatus, User, UserRole, get_session
 
 
 class FirebaseTokenClaims(BaseModel):
@@ -25,14 +25,15 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 def get_firebase_app() -> firebase_admin.App:
     """Initialize or retrieve the Firebase app singleton."""
-    if not firebase_admin._apps:
+    try:
+        return firebase_admin.get_app()
+    except ValueError:
         if settings.FIREBASE_CREDENTIALS_PATH:
             cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
             return firebase_admin.initialize_app(cred)
         if settings.FIREBASE_PROJECT_ID:
             return firebase_admin.initialize_app(options={"projectId": settings.FIREBASE_PROJECT_ID})
         return firebase_admin.initialize_app()
-    return firebase_admin.get_app()
 
 
 def get_token_claims(
@@ -78,7 +79,7 @@ def get_current_user(
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User profile not found. Please complete signup onboarding.",
+            detail="User profile not found. Please complete user signup.",
         )
     if user.account_status == AccountStatus.SUSPENDED:
         raise HTTPException(
@@ -86,4 +87,16 @@ def get_current_user(
             detail="Account is suspended.",
         )
     return user
+
+
+def get_current_admin(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Validate that the current user has administrative privileges."""
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrative privileges required.",
+        )
+    return current_user
 

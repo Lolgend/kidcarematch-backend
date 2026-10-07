@@ -26,7 +26,7 @@ router = APIRouter(prefix="/api/v1/users", tags=["users"])
     "/signup",
     response_model=UserResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="User Onboarding and Signup",
+    summary="User Signup",
 )
 def signup(
     payload: UserSignupRequest,
@@ -36,8 +36,8 @@ def signup(
     """Create a new user profile using verified Firebase ID token claims."""
     if not claims.email:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email claim is missing from authentication token",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication token missing email claim",
         )
 
     existing_uid = session.exec(select(User).where(User.firebase_uid == claims.uid)).first()
@@ -57,7 +57,7 @@ def signup(
     user = User(
         firebase_uid=claims.uid,
         email=claims.email,
-        full_name=payload.full_name,
+        full_name=payload.full_name.strip(),
         role=UserRole.PARENT,
         account_status=AccountStatus.ACTIVE,
     )

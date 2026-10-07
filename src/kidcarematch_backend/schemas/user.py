@@ -2,21 +2,43 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kidcarematch_backend.db.db import AccountStatus, UserRole
 
 
 class UserSignupRequest(BaseModel):
-    """Payload for user onboarding and signup."""
+    """Payload for user signup."""
 
     full_name: str = Field(min_length=1, max_length=100)
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Full name cannot be blank or whitespace only")
+        if len(stripped) > 100:
+            raise ValueError("Full name cannot exceed 100 characters")
+        return stripped
 
 
 class UserUpdateRequest(BaseModel):
     """Payload for user profile update."""
 
     full_name: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Full name cannot be blank or whitespace only")
+        if len(stripped) > 100:
+            raise ValueError("Full name cannot exceed 100 characters")
+        return stripped
 
 
 class UserResponse(BaseModel):

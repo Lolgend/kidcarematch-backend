@@ -1,9 +1,14 @@
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlmodel import Session, create_engine, select
 from sqlmodel.pool import StaticPool
 
-from kidcarematch_backend.auth.security import FirebaseTokenClaims, get_token_claims
+from kidcarematch_backend.auth.security import (
+    FirebaseTokenClaims,
+    get_current_admin,
+    get_token_claims,
+)
 from kidcarematch_backend.db.db import (
     AccountStatus,
     User,
@@ -183,7 +188,7 @@ def test_get_me_unregistered_user_returns_404(client: TestClient):
         headers={"Authorization": "Bearer mock-token"},
     )
     assert response.status_code == 404
-    assert response.json()["detail"] == "User profile not found. Please complete signup onboarding."
+    assert response.json()["detail"] == "User profile not found. Please complete user signup."
 
 
 def test_get_me_suspended_user_returns_403(client: TestClient, test_engine):
@@ -407,6 +412,112 @@ def test_patch_me_empty_payload_leaves_profile_unchanged(client: TestClient, tes
     data = response.json()
     assert data["user_id"] == user_id
     assert data["full_name"] == "Static Name"
+
+
+def test_signup_missing_email_claim_returns_401(client: TestClient):
+    """Token missing email claim must return HTTP 401 Unauthorized."""
+    mock_claims = FirebaseTokenClaims(uid="firebase_no_email_uid", email="")
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+
+    response = client.post(
+        "/api/v1/users/signup",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"full_name": "No Email User"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Authentication token missing email claim"
+
+
+def test_signup_whitespace_only_full_name_returns_422(client: TestClient):
+    """Signup with whitespace-only full_name must return HTTP 422 Unprocessable Entity."""
+    mock_claims = FirebaseTokenClaims(uid="firebase_whitespace_uid", email="whitespace@example.com")
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+
+    response = client.post(
+        "/api/v1/users/signup",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"full_name": "   "},
+    )
+    assert response.status_code == 422
+    assert "Full name cannot be blank or whitespace only" in response.text
+
+
+def test_signup_strips_leading_and_trailing_whitespace(client: TestClient, test_engine):
+    """Signup with leading/trailing whitespace must persist and return stripped full_name."""
+    mock_claims = FirebaseTokenClaims(uid="firebase_strip_uid", email="strip@example.com")
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+
+    response = client.post(
+        "/api/v1/users/signup",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"full_name": "   Bob Tan   "},
+    )
+    assert response.status_code == 201
+    assert response.json()["full_name"] == "Bob Tan"
+
+    with Session(test_engine) as session:
+        db_user = session.exec(select(User).where(User.firebase_uid == "firebase_strip_uid")).first()
+        assert db_user is not None
+        assert db_user.full_name == "Bob Tan"
+
+
+def test_patch_me_whitespace_only_full_name_returns_422(client: TestClient, test_engine):
+    """PATCH /api/v1/users/me with whitespace-only full_name must return HTTP 422."""
+    with Session(test_engine) as session:
+        user = User(
+            firebase_uid="firebase_patch_ws_uid",
+            email="patch_ws@example.com",
+            full_name="Valid Name",
+            role=UserRole.PARENT,
+            account_status=AccountStatus.ACTIVE,
+        )
+        session.add(user)
+        session.commit()
+
+    mock_claims = FirebaseTokenClaims(
+        uid="firebase_patch_ws_uid", email="patch_ws@example.com"
+    )
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+
+    response = client.patch(
+        "/api/v1/users/me",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"full_name": "     "},
+    )
+    assert response.status_code == 422
+    assert "Full name cannot be blank or whitespace only" in response.text
+
+
+def test_get_current_admin_allows_admin():
+    """get_current_admin returns user when user role is ADMIN."""
+    admin_user = User(
+        user_id="admin_123",
+        firebase_uid="firebase_admin_uid",
+        email="admin@example.com",
+        full_name="Admin User",
+        role=UserRole.ADMIN,
+        account_status=AccountStatus.ACTIVE,
+    )
+    result = get_current_admin(current_user=admin_user)
+    assert result == admin_user
+
+
+def test_get_current_admin_rejects_parent():
+    """get_current_admin raises 403 Forbidden when user role is PARENT."""
+    parent_user = User(
+        user_id="parent_123",
+        firebase_uid="firebase_parent_uid",
+        email="parent@example.com",
+        full_name="Parent User",
+        role=UserRole.PARENT,
+        account_status=AccountStatus.ACTIVE,
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        get_current_admin(current_user=parent_user)
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "Administrative privileges required."
+
 
 
 
