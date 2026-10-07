@@ -130,54 +130,54 @@ def test_parse_vacancies_anchored_to_sync_date_ignoring_stale_last_updated():
 
 def test_normalize_preschool_level_canonical_and_free_form():
     from kidcarematch_backend.cron.sync_centres import normalize_preschool_level
-    from kidcarematch_backend.db.db import PreschoolLevels
+    from kidcarematch_backend.db.db import PreschoolLevel
 
     # Infant
-    assert normalize_preschool_level("infant") == PreschoolLevels.INFANT
-    assert normalize_preschool_level("Infant Care") == PreschoolLevels.INFANT
-    assert normalize_preschool_level("Infant Care (2 to 17 months)") == PreschoolLevels.INFANT
-    assert normalize_preschool_level("INFANT") == PreschoolLevels.INFANT
+    assert normalize_preschool_level("infant") == PreschoolLevel.INFANT
+    assert normalize_preschool_level("Infant Care") == PreschoolLevel.INFANT
+    assert normalize_preschool_level("Infant Care (2 to 17 months)") == PreschoolLevel.INFANT
+    assert normalize_preschool_level("INFANT") == PreschoolLevel.INFANT
 
     # Playgroup
-    assert normalize_preschool_level("pg") == PreschoolLevels.PG
-    assert normalize_preschool_level("Playgroup") == PreschoolLevels.PG
-    assert normalize_preschool_level("Play Group") == PreschoolLevels.PG
-    assert normalize_preschool_level("Playgroup (18 to 29 months)") == PreschoolLevels.PG
-    assert normalize_preschool_level("PG (18-30 months)") == PreschoolLevels.PG
+    assert normalize_preschool_level("pg") == PreschoolLevel.PG
+    assert normalize_preschool_level("Playgroup") == PreschoolLevel.PG
+    assert normalize_preschool_level("Play Group") == PreschoolLevel.PG
+    assert normalize_preschool_level("Playgroup (18 to 29 months)") == PreschoolLevel.PG
+    assert normalize_preschool_level("PG (18-30 months)") == PreschoolLevel.PG
 
     # Nursery 1
-    assert normalize_preschool_level("n1") == PreschoolLevels.N1
-    assert normalize_preschool_level("Nursery 1") == PreschoolLevels.N1
-    assert normalize_preschool_level("Nursery 1 (3 yrs old)") == PreschoolLevels.N1
-    assert normalize_preschool_level("Nursery1") == PreschoolLevels.N1
-    assert normalize_preschool_level("N1 (3 years old)") == PreschoolLevels.N1
+    assert normalize_preschool_level("n1") == PreschoolLevel.N1
+    assert normalize_preschool_level("Nursery 1") == PreschoolLevel.N1
+    assert normalize_preschool_level("Nursery 1 (3 yrs old)") == PreschoolLevel.N1
+    assert normalize_preschool_level("Nursery1") == PreschoolLevel.N1
+    assert normalize_preschool_level("N1 (3 years old)") == PreschoolLevel.N1
 
     # Nursery 2
-    assert normalize_preschool_level("n2") == PreschoolLevels.N2
-    assert normalize_preschool_level("Nursery 2") == PreschoolLevels.N2
-    assert normalize_preschool_level("Nursery 2 (4 yrs old)") == PreschoolLevels.N2
-    assert normalize_preschool_level("Nursery2") == PreschoolLevels.N2
-    assert normalize_preschool_level("N2 (4 years old)") == PreschoolLevels.N2
+    assert normalize_preschool_level("n2") == PreschoolLevel.N2
+    assert normalize_preschool_level("Nursery 2") == PreschoolLevel.N2
+    assert normalize_preschool_level("Nursery 2 (4 yrs old)") == PreschoolLevel.N2
+    assert normalize_preschool_level("Nursery2") == PreschoolLevel.N2
+    assert normalize_preschool_level("N2 (4 years old)") == PreschoolLevel.N2
 
     # Kindergarten 1
-    assert normalize_preschool_level("k1") == PreschoolLevels.K1
-    assert normalize_preschool_level("Kindergarten 1") == PreschoolLevels.K1
-    assert normalize_preschool_level("Kindergarten 1 (5 yrs old)") == PreschoolLevels.K1
-    assert normalize_preschool_level("Kindergarten1") == PreschoolLevels.K1
-    assert normalize_preschool_level("K1 (5 years old)") == PreschoolLevels.K1
+    assert normalize_preschool_level("k1") == PreschoolLevel.K1
+    assert normalize_preschool_level("Kindergarten 1") == PreschoolLevel.K1
+    assert normalize_preschool_level("Kindergarten 1 (5 yrs old)") == PreschoolLevel.K1
+    assert normalize_preschool_level("Kindergarten1") == PreschoolLevel.K1
+    assert normalize_preschool_level("K1 (5 years old)") == PreschoolLevel.K1
 
     # Kindergarten 2
-    assert normalize_preschool_level("k2") == PreschoolLevels.K2
-    assert normalize_preschool_level("Kindergarten 2") == PreschoolLevels.K2
-    assert normalize_preschool_level("Kindergarten 2 (6 yrs old)") == PreschoolLevels.K2
-    assert normalize_preschool_level("Kindergarten2") == PreschoolLevels.K2
-    assert normalize_preschool_level("K2 (6 years old)") == PreschoolLevels.K2
+    assert normalize_preschool_level("k2") == PreschoolLevel.K2
+    assert normalize_preschool_level("Kindergarten 2") == PreschoolLevel.K2
+    assert normalize_preschool_level("Kindergarten 2 (6 yrs old)") == PreschoolLevel.K2
+    assert normalize_preschool_level("Kindergarten2") == PreschoolLevel.K2
+    assert normalize_preschool_level("K2 (6 years old)") == PreschoolLevel.K2
 
     # Student Care
-    assert normalize_preschool_level("student_care") == PreschoolLevels.STUDENT_CARE
-    assert normalize_preschool_level("Student Care") == PreschoolLevels.STUDENT_CARE
-    assert normalize_preschool_level("Student Care (7 to 14 yrs old)") == PreschoolLevels.STUDENT_CARE
-    assert normalize_preschool_level("StudentCare") == PreschoolLevels.STUDENT_CARE
+    assert normalize_preschool_level("student_care") == PreschoolLevel.STUDENT_CARE
+    assert normalize_preschool_level("Student Care") == PreschoolLevel.STUDENT_CARE
+    assert normalize_preschool_level("Student Care (7 to 14 yrs old)") == PreschoolLevel.STUDENT_CARE
+    assert normalize_preschool_level("StudentCare") == PreschoolLevel.STUDENT_CARE
 
 
 def test_normalize_preschool_level_invalid_and_empty_returns_none(caplog):
@@ -233,7 +233,7 @@ def test_normalize_citizenship_type_mappings():
 
 def test_parse_centre_service_valid_record():
     from kidcarematch_backend.cron.sync_centres import parse_centre_service
-    from kidcarematch_backend.db.db import CitizenshipType, PreschoolLevels
+    from kidcarematch_backend.db.db import CitizenshipType, PreschoolLevel
 
     raw_rec = {
         "centre_code": "EB0001",
@@ -251,7 +251,7 @@ def test_parse_centre_service_valid_record():
     assert service is not None
     assert service.centre_id == 101
     assert service.type_of_service == "Full Day"
-    assert service.level == PreschoolLevels.K1
+    assert service.level == PreschoolLevel.K1
     assert service.fee == 1125.0
     assert service.citizenship_type == CitizenshipType.OTHERS
     assert service.last_updated == datetime(2026, 7, 17, 0, 0, tzinfo=timezone.utc)
@@ -260,7 +260,7 @@ def test_parse_centre_service_valid_record():
 
 def test_parse_centre_service_null_citizenship_defaults_to_others():
     from kidcarematch_backend.cron.sync_centres import parse_centre_service
-    from kidcarematch_backend.db.db import CitizenshipType, PreschoolLevels
+    from kidcarematch_backend.db.db import CitizenshipType, PreschoolLevel
 
     raw_rec = {
         "centre_code": "EB0001",
@@ -276,7 +276,7 @@ def test_parse_centre_service_null_citizenship_defaults_to_others():
     assert service is not None
     assert service.centre_id == 101
     assert service.type_of_service == "Full Day"
-    assert service.level == PreschoolLevels.INFANT
+    assert service.level == PreschoolLevel.INFANT
     assert service.fee == 1400.0
     assert service.citizenship_type == CitizenshipType.OTHERS
 
@@ -340,7 +340,7 @@ def test_parse_centre_service_unknown_centre_returns_none():
 
 def test_sync_centres_orchestration_with_mocks(monkeypatch):
     from kidcarematch_backend.cron.sync_centres import sync_centres
-    from kidcarematch_backend.db.db import CitizenshipType, PreschoolCentre, PreschoolLevels, PreschoolService, VacancyRecord
+    from kidcarematch_backend.db.db import CitizenshipType, PreschoolCentre, PreschoolLevel, PreschoolService, VacancyRecord
     from sqlmodel import create_engine, Session, SQLModel, select
 
     # Use in-memory SQLite for test orchestration
@@ -403,7 +403,7 @@ def test_sync_centres_orchestration_with_mocks(monkeypatch):
         services = session.exec(select(PreschoolService)).all()
         assert len(services) == 1
         assert services[0].fee == 800.0
-        assert services[0].level == PreschoolLevels.INFANT
+        assert services[0].level == PreschoolLevel.INFANT
         assert services[0].citizenship_type == CitizenshipType.SC
 
 
@@ -551,7 +551,7 @@ def test_sync_centres_rolling_cycle_preserves_historical_records(monkeypatch):
 def test_preschool_service_composite_uniqueness_constraint():
     from sqlalchemy.exc import IntegrityError
     from sqlmodel import Session, create_engine
-    from kidcarematch_backend.db.db import CitizenshipType, PreschoolCentre, PreschoolLevels, PreschoolService, init_db
+    from kidcarematch_backend.db.db import CitizenshipType, PreschoolCentre, PreschoolLevel, PreschoolService, init_db
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -565,7 +565,7 @@ def test_preschool_service_composite_uniqueness_constraint():
         service1 = PreschoolService(
             centre_id=centre.centre_id,
             type_of_service="Full Day",
-            level=PreschoolLevels.INFANT,
+            level=PreschoolLevel.INFANT,
             fee=1200.0,
             citizenship_type=CitizenshipType.SC,
         )
@@ -576,7 +576,7 @@ def test_preschool_service_composite_uniqueness_constraint():
         service2 = PreschoolService(
             centre_id=centre.centre_id,
             type_of_service="Full Day",
-            level=PreschoolLevels.INFANT,
+            level=PreschoolLevel.INFANT,
             fee=1300.0,
             citizenship_type=CitizenshipType.SC,
         )
@@ -587,7 +587,7 @@ def test_preschool_service_composite_uniqueness_constraint():
 
 def test_parse_centre_service_resolves_tp_code():
     from kidcarematch_backend.cron.sync_centres import parse_centre_service
-    from kidcarematch_backend.db.db import CitizenshipType, PreschoolLevels
+    from kidcarematch_backend.db.db import CitizenshipType, PreschoolLevel
 
     raw_rec = {
         "centre_code": "TP8888",
@@ -604,7 +604,7 @@ def test_parse_centre_service_resolves_tp_code():
     assert service is not None
     assert service.centre_id == 202
     assert service.type_of_service == "Full Day"
-    assert service.level == PreschoolLevels.PG
+    assert service.level == PreschoolLevel.PG
     assert service.fee == 950.0
     assert service.citizenship_type == CitizenshipType.SPR
 
@@ -904,7 +904,7 @@ def test_sync_centres_mixed_services_normalization_and_skipping(monkeypatch, cap
     from kidcarematch_backend.db.db import (
         CitizenshipType,
         PreschoolCentre,
-        PreschoolLevels,
+        PreschoolLevel,
         PreschoolService,
         init_db,
     )
@@ -1011,30 +1011,30 @@ def test_sync_centres_mixed_services_normalization_and_skipping(monkeypatch, cap
 
         services_by_level = {s.level: s for s in db_services}
 
-        assert PreschoolLevels.INFANT in services_by_level
-        assert services_by_level[PreschoolLevels.INFANT].citizenship_type == CitizenshipType.SC
-        assert services_by_level[PreschoolLevels.INFANT].fee == 1500.0
+        assert PreschoolLevel.INFANT in services_by_level
+        assert services_by_level[PreschoolLevel.INFANT].citizenship_type == CitizenshipType.SC
+        assert services_by_level[PreschoolLevel.INFANT].fee == 1500.0
 
-        assert PreschoolLevels.K1 in services_by_level
-        assert services_by_level[PreschoolLevels.K1].citizenship_type == CitizenshipType.OTHERS
-        assert services_by_level[PreschoolLevels.K1].fee == 1100.0
+        assert PreschoolLevel.K1 in services_by_level
+        assert services_by_level[PreschoolLevel.K1].citizenship_type == CitizenshipType.OTHERS
+        assert services_by_level[PreschoolLevel.K1].fee == 1100.0
 
-        assert PreschoolLevels.PG in services_by_level
-        assert services_by_level[PreschoolLevels.PG].citizenship_type == CitizenshipType.SPR
-        assert services_by_level[PreschoolLevels.PG].fee == 1200.0
+        assert PreschoolLevel.PG in services_by_level
+        assert services_by_level[PreschoolLevel.PG].citizenship_type == CitizenshipType.SPR
+        assert services_by_level[PreschoolLevel.PG].fee == 1200.0
 
-        assert PreschoolLevels.N2 in services_by_level
-        assert services_by_level[PreschoolLevels.N2].citizenship_type == CitizenshipType.OTHERS
-        assert services_by_level[PreschoolLevels.N2].fee == 1000.0
+        assert PreschoolLevel.N2 in services_by_level
+        assert services_by_level[PreschoolLevel.N2].citizenship_type == CitizenshipType.OTHERS
+        assert services_by_level[PreschoolLevel.N2].fee == 1000.0
 
-        assert PreschoolLevels.N1 in services_by_level
-        assert services_by_level[PreschoolLevels.N1].citizenship_type == CitizenshipType.OTHERS
-        assert services_by_level[PreschoolLevels.N1].type_of_service == "Half Day"
-        assert services_by_level[PreschoolLevels.N1].fee == 700.0
+        assert PreschoolLevel.N1 in services_by_level
+        assert services_by_level[PreschoolLevel.N1].citizenship_type == CitizenshipType.OTHERS
+        assert services_by_level[PreschoolLevel.N1].type_of_service == "Half Day"
+        assert services_by_level[PreschoolLevel.N1].fee == 700.0
 
-        assert PreschoolLevels.STUDENT_CARE in services_by_level
-        assert services_by_level[PreschoolLevels.STUDENT_CARE].citizenship_type == CitizenshipType.SC
-        assert services_by_level[PreschoolLevels.STUDENT_CARE].fee == 600.0
+        assert PreschoolLevel.STUDENT_CARE in services_by_level
+        assert services_by_level[PreschoolLevel.STUDENT_CARE].citizenship_type == CitizenshipType.SC
+        assert services_by_level[PreschoolLevel.STUDENT_CARE].fee == 600.0
 
 
 def test_sync_centres_heartbeat_lifecycle_success(monkeypatch):

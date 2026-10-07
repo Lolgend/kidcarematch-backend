@@ -15,7 +15,6 @@ from kidcarematch_backend.db.db import (
     ModerationStatus,
     PreschoolCentre,
     PreschoolLevel,
-    PreschoolLevels,
     PreschoolService,
     Review,
     SubsidyMetric,
@@ -271,7 +270,7 @@ def test_family_preference_profile_multi_creation_for_parent(test_session: Sessi
         profile_id="fpp_child1",
         user_id=parent.user_id,
         profile_name="Infant Search - Lucas",
-        level=PreschoolLevels.INFANT,
+        level=PreschoolLevel.INFANT,
         citizenship_status=CitizenshipType.SC,
         service_required="Full Day",
         home_postal_code="560123",
@@ -287,7 +286,7 @@ def test_family_preference_profile_multi_creation_for_parent(test_session: Sessi
         profile_id="fpp_child2",
         user_id=parent.user_id,
         profile_name="Playgroup Search - Lucas",
-        level=PreschoolLevels.PG,
+        level=PreschoolLevel.PG,
         citizenship_status=CitizenshipType.SC,
         service_required="Half Day",
         home_postal_code="560123",
@@ -490,7 +489,7 @@ def test_watchlist_entry_cohort_subscription_and_uniqueness(test_session: Sessio
         watchlist_id="watch_01",
         user_id=parent.user_id,
         centre_id=centre.centre_id,
-        level=PreschoolLevels.INFANT,
+        level=PreschoolLevel.INFANT,
         enrollment_month_year=datetime(2027, 3, 1, tzinfo=timezone.utc),
     )
     # 2. Watchlist subscription for Playgroup cohort in March 2027 (different level -> valid)
@@ -498,7 +497,7 @@ def test_watchlist_entry_cohort_subscription_and_uniqueness(test_session: Sessio
         watchlist_id="watch_02",
         user_id=parent.user_id,
         centre_id=centre.centre_id,
-        level=PreschoolLevels.PG,
+        level=PreschoolLevel.PG,
         enrollment_month_year=datetime(2027, 3, 1, tzinfo=timezone.utc),
     )
     # 3. Watchlist subscription for Infant cohort in April 2027 (different month -> valid)
@@ -506,7 +505,7 @@ def test_watchlist_entry_cohort_subscription_and_uniqueness(test_session: Sessio
         watchlist_id="watch_03",
         user_id=parent.user_id,
         centre_id=centre.centre_id,
-        level=PreschoolLevels.INFANT,
+        level=PreschoolLevel.INFANT,
         enrollment_month_year=datetime(2027, 4, 1, tzinfo=timezone.utc),
     )
     test_session.add_all([entry1, entry2, entry3])
@@ -522,7 +521,7 @@ def test_watchlist_entry_cohort_subscription_and_uniqueness(test_session: Sessio
         watchlist_id="watch_dup",
         user_id=parent.user_id,
         centre_id=centre.centre_id,
-        level=PreschoolLevels.INFANT,
+        level=PreschoolLevel.INFANT,
         enrollment_month_year=datetime(2027, 3, 1, tzinfo=timezone.utc),
     )
     test_session.add(duplicate_entry)
@@ -553,7 +552,7 @@ def test_bidirectional_relationships_navigation(test_session: Session):
         user_id=parent.user_id,
         profile_name="Nav Profile",
         service_required="Full Day",
-        level=PreschoolLevels.N1,
+        level=PreschoolLevel.N1,
     )
     review = Review(
         review_id="rev_nav_01",
@@ -566,7 +565,7 @@ def test_bidirectional_relationships_navigation(test_session: Session):
         watchlist_id="watch_nav_01",
         user_id=parent.user_id,
         centre_id=centre.centre_id,
-        level=PreschoolLevels.N1,
+        level=PreschoolLevel.N1,
         enrollment_month_year=datetime(2027, 5, 1, tzinfo=timezone.utc),
     )
     test_session.add_all([profile, review, watchlist])
@@ -611,14 +610,14 @@ def test_preschool_centre_cascade_deletion(test_session: Session):
     vacancy = VacancyRecord(
         record_id="CTR_CASCADE_01_infant_202610",
         centre_id=centre.centre_id,
-        level_type=PreschoolLevels.INFANT,
+        level_type=PreschoolLevel.INFANT,
         enrollment_month_year=datetime(2026, 10, 1, tzinfo=timezone.utc),
         vacancy_status="Available",
     )
     service = PreschoolService(
         centre_id=centre.centre_id,
         type_of_service="Full Day",
-        level=PreschoolLevels.INFANT,
+        level=PreschoolLevel.INFANT,
         fee=1100.0,
         citizenship_type=CitizenshipType.SC,
     )
@@ -632,7 +631,7 @@ def test_preschool_centre_cascade_deletion(test_session: Session):
         watchlist_id="watch_cascade_01",
         user_id=user.user_id,
         centre_id=centre.centre_id,
-        level=PreschoolLevels.INFANT,
+        level=PreschoolLevel.INFANT,
         enrollment_month_year=datetime(2026, 10, 1, tzinfo=timezone.utc),
     )
     test_session.add_all([vacancy, service, review, watchlist])
@@ -678,7 +677,7 @@ def test_user_cascade_deletion(test_session: Session):
         user_id=user.user_id,
         profile_name="Delete Profile",
         service_required="Full Day",
-        level=PreschoolLevels.INFANT,
+        level=PreschoolLevel.INFANT,
         citizenship_status=CitizenshipType.SC,
         household_income=5000.0,
         household_member_count=3,
@@ -695,7 +694,7 @@ def test_user_cascade_deletion(test_session: Session):
         watchlist_id="watch_user_casc_01",
         user_id=user.user_id,
         centre_id=centre.centre_id,
-        level=PreschoolLevels.INFANT,
+        level=PreschoolLevel.INFANT,
         enrollment_month_year=datetime(2026, 12, 1, tzinfo=timezone.utc),
     )
     test_session.add_all([profile, review, watchlist])
@@ -717,9 +716,9 @@ def test_user_cascade_deletion(test_session: Session):
 
 
 def test_canonical_enums_values_and_db_loading(test_session: Session):
-    # Verify PreschoolLevels canonical lowercase values
+    # Verify PreschoolLevel canonical lowercase values
     expected_levels = {"infant", "pg", "n1", "n2", "k1", "k2", "student_care"}
-    assert {level.value for level in PreschoolLevels} == expected_levels
+    assert {level.value for level in PreschoolLevel} == expected_levels
 
     # Verify CitizenshipType canonical values
     expected_citizenships = {"SC", "SPR", "OTHERS"}
@@ -745,7 +744,7 @@ def test_canonical_enums_values_and_db_loading(test_session: Session):
     vacancy = VacancyRecord(
         record_id="CTR_ENUM_01_pg_202701",
         centre_id=centre.centre_id,
-        level_type=PreschoolLevels.PG,
+        level_type=PreschoolLevel.PG,
         enrollment_month_year=datetime(2027, 1, 1, tzinfo=timezone.utc),
         vacancy_status="Available",
     )
@@ -754,7 +753,7 @@ def test_canonical_enums_values_and_db_loading(test_session: Session):
         profile_id="fpp_enum_01",
         user_id=user.user_id,
         profile_name="Enum Profile",
-        level=PreschoolLevels.N2,
+        level=PreschoolLevel.N2,
         citizenship_status=CitizenshipType.SPR,
         service_required="Full Day",
     )
@@ -763,14 +762,14 @@ def test_canonical_enums_values_and_db_loading(test_session: Session):
         watchlist_id="watch_enum_01",
         user_id=user.user_id,
         centre_id=centre.centre_id,
-        level=PreschoolLevels.K1,
+        level=PreschoolLevel.K1,
         enrollment_month_year=datetime(2027, 2, 1, tzinfo=timezone.utc),
     )
     # Load PreschoolService
     service = PreschoolService(
         centre_id=centre.centre_id,
         type_of_service="Full Day",
-        level=PreschoolLevels.STUDENT_CARE,
+        level=PreschoolLevel.STUDENT_CARE,
         fee=650.0,
         citizenship_type=CitizenshipType.OTHERS,
     )
@@ -779,7 +778,7 @@ def test_canonical_enums_values_and_db_loading(test_session: Session):
 
     loaded_vac = test_session.get(VacancyRecord, "CTR_ENUM_01_pg_202701")
     assert loaded_vac is not None
-    assert loaded_vac.level_type == PreschoolLevels.PG
+    assert loaded_vac.level_type == PreschoolLevel.PG
     assert loaded_vac.level_type.value == "pg"
 
     loaded_fpp = test_session.get(FamilyPreferenceProfile, "fpp_enum_01")
@@ -792,14 +791,14 @@ def test_canonical_enums_values_and_db_loading(test_session: Session):
 
     loaded_watch = test_session.get(WatchlistEntry, "watch_enum_01")
     assert loaded_watch is not None
-    assert loaded_watch.level == PreschoolLevels.K1
+    assert loaded_watch.level == PreschoolLevel.K1
     assert loaded_watch.level.value == "k1"
 
     loaded_svc = test_session.exec(
         select(PreschoolService).where(PreschoolService.centre_id == centre.centre_id)
     ).first()
     assert loaded_svc is not None
-    assert loaded_svc.level == PreschoolLevels.STUDENT_CARE
+    assert loaded_svc.level == PreschoolLevel.STUDENT_CARE
     assert loaded_svc.level.value == "student_care"
     assert loaded_svc.citizenship_type == CitizenshipType.OTHERS
     assert loaded_svc.citizenship_type.value == "OTHERS"
