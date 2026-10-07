@@ -24,6 +24,18 @@ _Avoid_: Forecast window, future month
 An authenticated account entity representing either a parent seeking childcare services or a system administrator, distinguished by role and account status.
 _Avoid_: Account holder, client, member
 
+**Firebase UID**:
+The immutable unique subject identifier (`sub`) assigned to a user by Firebase Authentication upon account registration.
+_Avoid_: Auth ID, Firebase ID, external user ID
+
+**Federated Authentication**:
+An identity architecture where user credential verification and token issuance are delegated to an external identity provider (Firebase Auth), eliminating local password storage.
+_Avoid_: Third-party login, social auth, SSO
+
+**User Profile Lifecycle**:
+The state and progression of a user's account in KidCareMatch, spanning initial Firebase credential registration, application onboarding profile creation, and active or suspended account status.
+_Avoid_: User onboarding flow, account lifecycle
+
 **Administrator**:
 A privileged user role authorized to manage early childhood subsidy rules, review moderation workflows, and monitor external data sync pipelines.
 _Avoid_: Superuser, mod, staff

@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
@@ -148,13 +149,24 @@ class PreschoolService(SQLModel, table=True):
 
 
 class User(SQLModel, table=True):
-    user_id: Optional[str] = Field(default=None, primary_key=True)
-    email: str = Field(index=True, unique=True)
-    password_hash: str
+    user_id: Optional[str] = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        primary_key=True,
+    )
+    firebase_uid: str = Field(unique=True, index=True, nullable=False)
+    email: str = Field(index=True, unique=True, nullable=False)
     full_name: str
     role: UserRole = Field(default=UserRole.PARENT, index=True)
     account_status: AccountStatus = Field(default=AccountStatus.ACTIVE)
     admin_level: Optional[int] = Field(default=None)
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
 
     # 1-to-many relationships
     preference_profiles: list["FamilyPreferenceProfile"] = Relationship(
