@@ -1,10 +1,10 @@
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Generator, Optional
 from pydantic import field_validator
 from sqlalchemy.orm import validates
-from sqlmodel import CheckConstraint, Field, Relationship, SQLModel, UniqueConstraint, create_engine
+from sqlmodel import CheckConstraint, Field, Relationship, Session, SQLModel, UniqueConstraint, create_engine
 
 from kidcarematch_backend.core.config import settings
 
@@ -303,3 +303,9 @@ engine = create_engine(database_url, echo=True)
 def init_db(db_engine: Any = None) -> None:
     """Create database tables."""
     SQLModel.metadata.create_all(db_engine or engine)
+
+
+def get_session() -> Generator[Session, None, None]:
+    """Yield a database session."""
+    with Session(engine) as session:
+        yield session
