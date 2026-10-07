@@ -155,3 +155,91 @@ def test_signup_ignores_email_in_request_body(client: TestClient, test_engine):
     assert response.status_code == 201
     data = response.json()
     assert data["email"] == "token_email@example.com"
+
+
+def test_get_me_missing_token_returns_401(client: TestClient):
+    """GET /api/v1/users/me with missing Authorization header must return 401."""
+    response = client.get("/api/v1/users/me")
+    assert response.status_code == 401
+    assert "detail" in response.json()
+
+
+def test_get_me_invalid_token_header_returns_401(client: TestClient):
+    """GET /api/v1/users/me with invalid authorization scheme must return 401."""
+    response = client.get(
+        "/api/v1/users/me",
+        headers={"Authorization": "Basic not-a-bearer-token"},
+    )
+    assert response.status_code == 401
+
+
+def test_get_me_unregistered_user_returns_404(client: TestClient):
+    """GET /api/v1/users/me for authenticated user not in DB must return 404."""
+    mock_claims = FirebaseTokenClaims(uid="firebase_unregistered_uid", email="newuser@example.com")
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+
+    response = client.get(
+        "/api/v1/users/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "User profile not found. Please complete signup onboarding."
+
+
+def test_get_me_suspended_user_returns_403(client: TestClient, test_engine):
+    """GET /api/v1/users/me for suspended user must return 403 Forbidden."""
+    with Session(test_engine) as session:
+        suspended_user = User(
+            firebase_uid="firebase_suspended_uid",
+            email="suspended@example.com",
+            full_name="Suspended User",
+            role=UserRole.PARENT,
+            account_status=AccountStatus.SUSPENDED,
+        )
+        session.add(suspended_user)
+        session.commit()
+
+    mock_claims = FirebaseTokenClaims(uid="firebase_suspended_uid", email="suspended@example.com")
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+
+    response = client.get(
+        "/api/v1/users/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Account is suspended."
+
+
+def test_get_me_active_user_returns_200(client: TestClient, test_engine):
+    """GET /api/v1/users/me for active user must return 200 and UserResponse."""
+    with Session(test_engine) as session:
+        active_user = User(
+            firebase_uid="firebase_active_uid",
+            email="active@example.com",
+            full_name="Active Parent",
+            role=UserRole.PARENT,
+            account_status=AccountStatus.ACTIVE,
+        )
+        session.add(active_user)
+        session.commit()
+        session.refresh(active_user)
+        user_id = active_user.user_id
+
+    mock_claims = FirebaseTokenClaims(uid="firebase_active_uid", email="active@example.com")
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+
+    response = client.get(
+        "/api/v1/users/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["user_id"] == user_id
+    assert data["firebase_uid"] == "firebase_active_uid"
+    assert data["email"] == "active@example.com"
+    assert data["full_name"] == "Active Parent"
+    assert data["role"] == "PARENT"
+    assert data["account_status"] == "ACTIVE"
+    assert "created_at" in data
+    assert "updated_at" in data
+

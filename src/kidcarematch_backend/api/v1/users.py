@@ -6,7 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from kidcarematch_backend.auth.security import FirebaseTokenClaims, get_token_claims
+from kidcarematch_backend.auth.security import (
+    FirebaseTokenClaims,
+    get_current_user,
+    get_token_claims,
+)
 from kidcarematch_backend.db.db import AccountStatus, User, UserRole, get_session
 from kidcarematch_backend.schemas.user import UserResponse, UserSignupRequest
 
@@ -65,3 +69,17 @@ def signup(
         ) from exc
 
     return user
+
+
+@router.get(
+    "/me",
+    response_model=UserResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Current User Profile",
+)
+def get_me(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Retrieve the profile of the currently authenticated user."""
+    return current_user
+

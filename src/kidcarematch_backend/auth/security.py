@@ -7,8 +7,10 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from firebase_admin import auth, credentials  # type: ignore[import-untyped]
 from pydantic import BaseModel
+from sqlmodel import Session, select
 
 from kidcarematch_backend.core.config import settings
+from kidcarematch_backend.db.db import AccountStatus, User, get_session
 
 
 class FirebaseTokenClaims(BaseModel):
@@ -65,3 +67,23 @@ def get_token_claims(
 
     email = decoded_claims.get("email", "")
     return FirebaseTokenClaims(uid=uid, email=email)
+
+
+def get_current_user(
+    claims: Annotated[FirebaseTokenClaims, Depends(get_token_claims)],
+    session: Annotated[Session, Depends(get_session)],
+) -> User:
+    """Retrieve the current user from database by verified Firebase UID."""
+    user = session.exec(select(User).where(User.firebase_uid == claims.uid)).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User profile not found. Please complete signup onboarding.",
+        )
+    if user.account_status == AccountStatus.SUSPENDED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is suspended.",
+        )
+    return user
+
