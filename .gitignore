@@ -20,3 +20,5 @@ wheels/
 .mypy_cache
 .pytest_cache
 .scratch/
+.ruff_cache
+specs/

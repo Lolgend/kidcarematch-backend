@@ -128,8 +128,112 @@ def test_parse_vacancies_anchored_to_sync_date_ignoring_stale_last_updated():
     assert not any("2025" in r.record_id for r in records)
 
 
+def test_normalize_preschool_level_canonical_and_free_form():
+    from kidcarematch_backend.cron.sync_centres import normalize_preschool_level
+    from kidcarematch_backend.db.db import PreschoolLevel
+
+    # Infant
+    assert normalize_preschool_level("infant") == PreschoolLevel.INFANT
+    assert normalize_preschool_level("Infant Care") == PreschoolLevel.INFANT
+    assert normalize_preschool_level("Infant Care (2 to 17 months)") == PreschoolLevel.INFANT
+    assert normalize_preschool_level("INFANT") == PreschoolLevel.INFANT
+
+    # Playgroup
+    assert normalize_preschool_level("pg") == PreschoolLevel.PG
+    assert normalize_preschool_level("Playgroup") == PreschoolLevel.PG
+    assert normalize_preschool_level("Play Group") == PreschoolLevel.PG
+    assert normalize_preschool_level("Playgroup (18 to 29 months)") == PreschoolLevel.PG
+    assert normalize_preschool_level("PG (18-30 months)") == PreschoolLevel.PG
+
+    # Nursery 1
+    assert normalize_preschool_level("n1") == PreschoolLevel.N1
+    assert normalize_preschool_level("Nursery 1") == PreschoolLevel.N1
+    assert normalize_preschool_level("Nursery 1 (3 yrs old)") == PreschoolLevel.N1
+    assert normalize_preschool_level("Nursery1") == PreschoolLevel.N1
+    assert normalize_preschool_level("N1 (3 years old)") == PreschoolLevel.N1
+
+    # Nursery 2
+    assert normalize_preschool_level("n2") == PreschoolLevel.N2
+    assert normalize_preschool_level("Nursery 2") == PreschoolLevel.N2
+    assert normalize_preschool_level("Nursery 2 (4 yrs old)") == PreschoolLevel.N2
+    assert normalize_preschool_level("Nursery2") == PreschoolLevel.N2
+    assert normalize_preschool_level("N2 (4 years old)") == PreschoolLevel.N2
+
+    # Kindergarten 1
+    assert normalize_preschool_level("k1") == PreschoolLevel.K1
+    assert normalize_preschool_level("Kindergarten 1") == PreschoolLevel.K1
+    assert normalize_preschool_level("Kindergarten 1 (5 yrs old)") == PreschoolLevel.K1
+    assert normalize_preschool_level("Kindergarten1") == PreschoolLevel.K1
+    assert normalize_preschool_level("K1 (5 years old)") == PreschoolLevel.K1
+
+    # Kindergarten 2
+    assert normalize_preschool_level("k2") == PreschoolLevel.K2
+    assert normalize_preschool_level("Kindergarten 2") == PreschoolLevel.K2
+    assert normalize_preschool_level("Kindergarten 2 (6 yrs old)") == PreschoolLevel.K2
+    assert normalize_preschool_level("Kindergarten2") == PreschoolLevel.K2
+    assert normalize_preschool_level("K2 (6 years old)") == PreschoolLevel.K2
+
+    # Student Care
+    assert normalize_preschool_level("student_care") == PreschoolLevel.STUDENT_CARE
+    assert normalize_preschool_level("Student Care") == PreschoolLevel.STUDENT_CARE
+    assert normalize_preschool_level("Student Care (7 to 14 yrs old)") == PreschoolLevel.STUDENT_CARE
+    assert normalize_preschool_level("StudentCare") == PreschoolLevel.STUDENT_CARE
+
+
+def test_normalize_preschool_level_invalid_and_empty_returns_none(caplog):
+    import logging
+    from kidcarematch_backend.cron.sync_centres import normalize_preschool_level
+
+    with caplog.at_level(logging.WARNING):
+        assert normalize_preschool_level(None) is None
+        assert normalize_preschool_level("") is None
+        assert normalize_preschool_level("   ") is None
+        assert normalize_preschool_level("na") is None
+        assert normalize_preschool_level("Unknown Level") is None
+        assert normalize_preschool_level("Senior Daycare") is None
+
+    assert any("Empty or blank preschool service level" in record.message for record in caplog.records)
+    assert any("Unmapped preschool service level" in record.message for record in caplog.records)
+
+
+def test_normalize_citizenship_type_mappings():
+    from kidcarematch_backend.cron.sync_centres import normalize_citizenship_type
+    from kidcarematch_backend.db.db import CitizenshipType
+
+    # SC
+    assert normalize_citizenship_type("SC") == CitizenshipType.SC
+    assert normalize_citizenship_type("sc") == CitizenshipType.SC
+    assert normalize_citizenship_type("Singapore Citizen") == CitizenshipType.SC
+    assert normalize_citizenship_type("Singaporean") == CitizenshipType.SC
+    assert normalize_citizenship_type("Citizen") == CitizenshipType.SC
+    assert normalize_citizenship_type("SC (Singapore Citizen)") == CitizenshipType.SC
+
+    # SPR
+    assert normalize_citizenship_type("SPR") == CitizenshipType.SPR
+    assert normalize_citizenship_type("spr") == CitizenshipType.SPR
+    assert normalize_citizenship_type("PR") == CitizenshipType.SPR
+    assert normalize_citizenship_type("pr") == CitizenshipType.SPR
+    assert normalize_citizenship_type("Permanent Resident") == CitizenshipType.SPR
+    assert normalize_citizenship_type("Singapore Permanent Resident") == CitizenshipType.SPR
+
+    # OTHERS
+    assert normalize_citizenship_type("Others") == CitizenshipType.OTHERS
+    assert normalize_citizenship_type("OTHERS") == CitizenshipType.OTHERS
+    assert normalize_citizenship_type("others") == CitizenshipType.OTHERS
+    assert normalize_citizenship_type("Foreigner") == CitizenshipType.OTHERS
+    assert normalize_citizenship_type("Non-resident") == CitizenshipType.OTHERS
+    assert normalize_citizenship_type("Non-PR") == CitizenshipType.OTHERS
+    assert normalize_citizenship_type("Non-Citizen") == CitizenshipType.OTHERS
+    assert normalize_citizenship_type("Not Singaporean") == CitizenshipType.OTHERS
+    assert normalize_citizenship_type(None) == CitizenshipType.OTHERS
+    assert normalize_citizenship_type("") == CitizenshipType.OTHERS
+    assert normalize_citizenship_type("na") == CitizenshipType.OTHERS
+    assert normalize_citizenship_type("unlisted_category") == CitizenshipType.OTHERS
+
+
 def test_parse_centre_service_valid_record():
     from kidcarematch_backend.cron.sync_centres import parse_centre_service
+    from kidcarematch_backend.db.db import CitizenshipType, PreschoolLevel
 
     raw_rec = {
         "centre_code": "EB0001",
@@ -147,11 +251,76 @@ def test_parse_centre_service_valid_record():
     assert service is not None
     assert service.centre_id == 101
     assert service.type_of_service == "Full Day"
-    assert service.level == "Kindergarten 1 (5 yrs old)"
+    assert service.level == PreschoolLevel.K1
     assert service.fee == 1125.0
-    assert service.citizenship_type == "Others"
+    assert service.citizenship_type == CitizenshipType.OTHERS
     assert service.last_updated == datetime(2026, 7, 17, 0, 0, tzinfo=timezone.utc)
     assert service.remarks is None  # 'na' is normalized to None
+
+
+def test_parse_centre_service_null_citizenship_defaults_to_others():
+    from kidcarematch_backend.cron.sync_centres import parse_centre_service
+    from kidcarematch_backend.db.db import CitizenshipType, PreschoolLevel
+
+    raw_rec = {
+        "centre_code": "EB0001",
+        "type_of_service": "Full Day",
+        "levels_offered": "Infant Care",
+        "fees": "1400",
+        "type_of_citizenship": None,
+    }
+    centre_map = {"EB0001": 101}
+
+    service = parse_centre_service(raw_rec, centre_map)
+
+    assert service is not None
+    assert service.centre_id == 101
+    assert service.type_of_service == "Full Day"
+    assert service.level == PreschoolLevel.INFANT
+    assert service.fee == 1400.0
+    assert service.citizenship_type == CitizenshipType.OTHERS
+
+
+def test_parse_centre_service_unmapped_level_returns_none(caplog):
+    import logging
+    from kidcarematch_backend.cron.sync_centres import parse_centre_service
+
+    raw_rec = {
+        "centre_code": "EB0001",
+        "type_of_service": "Full Day",
+        "levels_offered": "Senior Activity Program",
+        "fees": "500",
+        "type_of_citizenship": "SC",
+    }
+    centre_map = {"EB0001": 101}
+
+    with caplog.at_level(logging.WARNING):
+        service = parse_centre_service(raw_rec, centre_map)
+
+    assert service is None
+    assert any("Unmapped preschool service level" in record.message for record in caplog.records)
+
+
+def test_parse_centre_service_empty_or_blank_level_logs_warning_and_returns_none(caplog):
+    import logging
+    from kidcarematch_backend.cron.sync_centres import parse_centre_service
+
+    for empty_level in ("", "   ", None, "NA"):
+        raw_rec = {
+            "centre_code": "EB0001",
+            "type_of_service": "Full Day",
+            "levels_offered": empty_level,
+            "fees": "500",
+            "type_of_citizenship": "SC",
+        }
+        centre_map = {"EB0001": 101}
+
+        with caplog.at_level(logging.WARNING):
+            service = parse_centre_service(raw_rec, centre_map)
+
+        assert service is None
+        assert any("Empty or blank preschool service level" in record.message for record in caplog.records)
+        caplog.clear()
 
 
 def test_parse_centre_service_unknown_centre_returns_none():
@@ -171,7 +340,7 @@ def test_parse_centre_service_unknown_centre_returns_none():
 
 def test_sync_centres_orchestration_with_mocks(monkeypatch):
     from kidcarematch_backend.cron.sync_centres import sync_centres
-    from kidcarematch_backend.db.db import PreschoolCentre, VacancyRecord, PreschoolService
+    from kidcarematch_backend.db.db import CitizenshipType, PreschoolCentre, PreschoolLevel, PreschoolService, VacancyRecord
     from sqlmodel import create_engine, Session, SQLModel, select
 
     # Use in-memory SQLite for test orchestration
@@ -234,6 +403,8 @@ def test_sync_centres_orchestration_with_mocks(monkeypatch):
         services = session.exec(select(PreschoolService)).all()
         assert len(services) == 1
         assert services[0].fee == 800.0
+        assert services[0].level == PreschoolLevel.INFANT
+        assert services[0].citizenship_type == CitizenshipType.SC
 
 
 def test_sync_centres_multi_centre_horizon_alignment(monkeypatch):
@@ -380,7 +551,7 @@ def test_sync_centres_rolling_cycle_preserves_historical_records(monkeypatch):
 def test_preschool_service_composite_uniqueness_constraint():
     from sqlalchemy.exc import IntegrityError
     from sqlmodel import Session, create_engine
-    from kidcarematch_backend.db.db import PreschoolCentre, PreschoolService, init_db
+    from kidcarematch_backend.db.db import CitizenshipType, PreschoolCentre, PreschoolLevel, PreschoolService, init_db
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -394,9 +565,9 @@ def test_preschool_service_composite_uniqueness_constraint():
         service1 = PreschoolService(
             centre_id=centre.centre_id,
             type_of_service="Full Day",
-            level="Infant Care",
+            level=PreschoolLevel.INFANT,
             fee=1200.0,
-            citizenship_type="SC",
+            citizenship_type=CitizenshipType.SC,
         )
         session.add(service1)
         session.commit()
@@ -405,9 +576,9 @@ def test_preschool_service_composite_uniqueness_constraint():
         service2 = PreschoolService(
             centre_id=centre.centre_id,
             type_of_service="Full Day",
-            level="Infant Care",
+            level=PreschoolLevel.INFANT,
             fee=1300.0,
-            citizenship_type="SC",
+            citizenship_type=CitizenshipType.SC,
         )
         session.add(service2)
         with pytest.raises(IntegrityError):
@@ -416,6 +587,7 @@ def test_preschool_service_composite_uniqueness_constraint():
 
 def test_parse_centre_service_resolves_tp_code():
     from kidcarematch_backend.cron.sync_centres import parse_centre_service
+    from kidcarematch_backend.db.db import CitizenshipType, PreschoolLevel
 
     raw_rec = {
         "centre_code": "TP8888",
@@ -432,9 +604,9 @@ def test_parse_centre_service_resolves_tp_code():
     assert service is not None
     assert service.centre_id == 202
     assert service.type_of_service == "Full Day"
-    assert service.level == "Playgroup"
+    assert service.level == PreschoolLevel.PG
     assert service.fee == 950.0
-    assert service.citizenship_type == "PR"
+    assert service.citizenship_type == CitizenshipType.SPR
 
 
 def test_sync_centres_resolves_services_for_tp_code_centres(monkeypatch):
@@ -719,11 +891,335 @@ def test_code_transition_migrates_historical_vacancies_without_duplicates(monkey
         assert hist_sep is not None
         assert hist_sep.enrollment_month_year == datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
 
-        # Services under tp_code resolved to EC1234
         services = session.exec(select(PreschoolService)).all()
         assert len(services) == 1
         assert services[0].centre_id == centres[0].centre_id
         assert services[0].fee == 1300.0
+
+
+def test_sync_centres_mixed_services_normalization_and_skipping(monkeypatch, caplog):
+    import logging
+    from sqlmodel import Session, create_engine, select
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import (
+        CitizenshipType,
+        PreschoolCentre,
+        PreschoolLevel,
+        PreschoolService,
+        init_db,
+    )
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    centre = make_test_centre_payload(
+        centre_code="PC_MIXED",
+        centre_name="Mixed Services Centre",
+        last_updated="2026-10-01",
+    )
+
+    mixed_services = [
+        # 1. Infant Care + SC
+        {
+            "centre_code": "PC_MIXED",
+            "type_of_service": "Full Day",
+            "levels_offered": "Infant Care",
+            "fees": "1500",
+            "type_of_citizenship": "SC",
+            "last_updated": "2026-10-01",
+        },
+        # 2. Kindergarten 1 (5 yrs old) + Others
+        {
+            "centre_code": "PC_MIXED",
+            "type_of_service": "Full Day",
+            "levels_offered": "Kindergarten 1 (5 yrs old)",
+            "fees": "1100",
+            "type_of_citizenship": "Others",
+            "last_updated": "2026-10-01",
+        },
+        # 3. Playgroup (18 to 29 months) + PR
+        {
+            "centre_code": "PC_MIXED",
+            "type_of_service": "Full Day",
+            "levels_offered": "Playgroup (18 to 29 months)",
+            "fees": "1200",
+            "type_of_citizenship": "PR",
+            "last_updated": "2026-10-01",
+        },
+        # 4. Nursery 2 + None citizenship -> defaults to OTHERS
+        {
+            "centre_code": "PC_MIXED",
+            "type_of_service": "Full Day",
+            "levels_offered": "Nursery 2",
+            "fees": "1000",
+            "type_of_citizenship": None,
+            "last_updated": "2026-10-01",
+        },
+        # 5. Nursery 1 + Non-resident -> OTHERS
+        {
+            "centre_code": "PC_MIXED",
+            "type_of_service": "Half Day",
+            "levels_offered": "Nursery 1",
+            "fees": "700",
+            "type_of_citizenship": "Non-resident",
+            "last_updated": "2026-10-01",
+        },
+        # 6. Student Care + Singapore Citizen -> SC
+        {
+            "centre_code": "PC_MIXED",
+            "type_of_service": "Full Day",
+            "levels_offered": "Student Care (7 to 14 yrs old)",
+            "fees": "600",
+            "type_of_citizenship": "Singapore Citizen",
+            "last_updated": "2026-10-01",
+        },
+        # 7. Unmapped level -> should skip and log warning
+        {
+            "centre_code": "PC_MIXED",
+            "type_of_service": "Full Day",
+            "levels_offered": "Adult Learning Care",
+            "fees": "500",
+            "type_of_citizenship": "SC",
+            "last_updated": "2026-10-01",
+        },
+        # 8. Non-existent centre -> should skip
+        {
+            "centre_code": "NON_EXISTENT_CTR",
+            "type_of_service": "Full Day",
+            "levels_offered": "Infant Care",
+            "fees": "1500",
+            "type_of_citizenship": "SC",
+        },
+    ]
+
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [centre])
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: mixed_services)
+
+    with caplog.at_level(logging.WARNING):
+        stats = sync_centres(db_engine=test_engine)
+
+    assert stats["centres_inserted"] == 1
+    assert stats["services_inserted"] == 6
+    assert stats["services_skipped"] == 2
+    assert any("Unmapped preschool service level" in record.message for record in caplog.records)
+
+    with Session(test_engine) as session:
+        db_services = session.exec(select(PreschoolService)).all()
+        assert len(db_services) == 6
+
+        services_by_level = {s.level: s for s in db_services}
+
+        assert PreschoolLevel.INFANT in services_by_level
+        assert services_by_level[PreschoolLevel.INFANT].citizenship_type == CitizenshipType.SC
+        assert services_by_level[PreschoolLevel.INFANT].fee == 1500.0
+
+        assert PreschoolLevel.K1 in services_by_level
+        assert services_by_level[PreschoolLevel.K1].citizenship_type == CitizenshipType.OTHERS
+        assert services_by_level[PreschoolLevel.K1].fee == 1100.0
+
+        assert PreschoolLevel.PG in services_by_level
+        assert services_by_level[PreschoolLevel.PG].citizenship_type == CitizenshipType.SPR
+        assert services_by_level[PreschoolLevel.PG].fee == 1200.0
+
+        assert PreschoolLevel.N2 in services_by_level
+        assert services_by_level[PreschoolLevel.N2].citizenship_type == CitizenshipType.OTHERS
+        assert services_by_level[PreschoolLevel.N2].fee == 1000.0
+
+        assert PreschoolLevel.N1 in services_by_level
+        assert services_by_level[PreschoolLevel.N1].citizenship_type == CitizenshipType.OTHERS
+        assert services_by_level[PreschoolLevel.N1].type_of_service == "Half Day"
+        assert services_by_level[PreschoolLevel.N1].fee == 700.0
+
+        assert PreschoolLevel.STUDENT_CARE in services_by_level
+        assert services_by_level[PreschoolLevel.STUDENT_CARE].citizenship_type == CitizenshipType.SC
+        assert services_by_level[PreschoolLevel.STUDENT_CARE].fee == 600.0
+
+
+def test_sync_centres_heartbeat_lifecycle_success(monkeypatch):
+    from sqlmodel import Session, create_engine
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    centre = make_test_centre_payload(
+        centre_code="HB_CTR_01",
+        centre_name="Heartbeat Centre 1",
+        last_updated="2026-10-01",
+    )
+    service = {
+        "centre_code": "HB_CTR_01",
+        "type_of_service": "Full Day",
+        "levels_offered": "Infant Care",
+        "fees": "1200",
+        "type_of_citizenship": "SC",
+        "last_updated": "2026-10-01",
+    }
+
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [centre])
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [service])
+
+    before_sync = datetime.now(timezone.utc)
+    stats = sync_centres(db_engine=test_engine)
+    after_sync = datetime.now(timezone.utc)
+
+    assert stats["centres_inserted"] == 1
+    assert stats["services_inserted"] == 1
+
+    with Session(test_engine) as session:
+        status = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
+        assert status is not None
+        assert status.source_id == "ECDA_DATASTORE"
+        assert status.sync_state == SyncState.SUCCESS
+        assert status.last_attempted_sync is not None
+        assert before_sync <= status.last_attempted_sync <= after_sync
+        assert status.last_successful_sync is not None
+        assert before_sync <= status.last_successful_sync <= after_sync
+        assert status.records_processed == 2  # 1 centre + 1 service
+        assert status.error_message is None
+
+
+def test_sync_centres_heartbeat_lifecycle_running_state(monkeypatch):
+    from sqlmodel import Session, create_engine
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    observed_state_during_fetch: dict[str, Any] = {}
+
+    def mock_fetch_all_centres(**kwargs: Any) -> list[dict[str, Any]]:
+        # Inspect database during the fetch execution to verify RUNNING state
+        with Session(test_engine) as session:
+            status = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
+            if status:
+                observed_state_during_fetch["sync_state"] = status.sync_state
+                observed_state_during_fetch["last_attempted_sync"] = status.last_attempted_sync
+        return [make_test_centre_payload(centre_code="RUN_01", centre_name="Running Test")]
+
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", mock_fetch_all_centres)
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [])
+
+    before_sync = datetime.now(timezone.utc)
+    sync_centres(db_engine=test_engine)
+    after_sync = datetime.now(timezone.utc)
+
+    assert observed_state_during_fetch["sync_state"] == SyncState.RUNNING
+    assert observed_state_during_fetch["last_attempted_sync"] is not None
+    assert before_sync <= observed_state_during_fetch["last_attempted_sync"] <= after_sync
+
+
+def test_sync_centres_heartbeat_lifecycle_failure_on_fetch(monkeypatch):
+    from sqlmodel import Session, create_engine
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    def failing_fetch_centres(**kwargs: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("ECDA Datastore Gateway Timeout (504)")
+
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", failing_fetch_centres)
+
+    before_sync = datetime.now(timezone.utc)
+    with pytest.raises(RuntimeError, match="ECDA Datastore Gateway Timeout"):
+        sync_centres(db_engine=test_engine)
+    after_sync = datetime.now(timezone.utc)
+
+    with Session(test_engine) as session:
+        status = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
+        assert status is not None
+        assert status.sync_state == SyncState.FAILED
+        assert status.last_attempted_sync is not None
+        assert before_sync <= status.last_attempted_sync <= after_sync
+        assert status.last_successful_sync is None
+        assert status.error_message is not None
+        assert "ECDA Datastore Gateway Timeout (504)" in status.error_message
+
+
+def test_sync_centres_heartbeat_lifecycle_failure_preserves_previous_success_timestamp(monkeypatch):
+    from sqlmodel import Session, create_engine
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    centre = make_test_centre_payload(centre_code="PREV_01", centre_name="Prev Success Centre")
+
+    # Run 1: Successful sync
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [centre])
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [])
+
+    sync_centres(db_engine=test_engine)
+
+    with Session(test_engine) as session:
+        status = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
+        assert status is not None
+        assert status.sync_state == SyncState.SUCCESS
+        assert status.last_successful_sync is not None
+        initial_successful_sync = status.last_successful_sync
+        assert status.records_processed == 1
+
+    # Run 2: Failed sync
+    def failing_fetch_services(**kwargs: Any) -> list[dict[str, Any]]:
+        raise ConnectionError("Services API Connection Refused")
+
+    monkeypatch.setattr(sc_mod, "fetch_all_services", failing_fetch_services)
+
+    with pytest.raises(ConnectionError, match="Services API Connection Refused"):
+        sync_centres(db_engine=test_engine)
+
+    with Session(test_engine) as session:
+        status = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
+        assert status is not None
+        assert status.sync_state == SyncState.FAILED
+        assert status.last_attempted_sync is not None
+        assert status.last_attempted_sync >= initial_successful_sync
+        # last_successful_sync must still be preserved from Run 1
+        assert status.last_successful_sync == initial_successful_sync
+        assert status.error_message is not None
+        assert "Services API Connection Refused" in status.error_message
+
+
+def test_sync_centres_heartbeat_lifecycle_dry_run_does_not_persist_status(monkeypatch):
+    from sqlmodel import Session, create_engine
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import ExternalDataSourceStatus, init_db
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    centre = make_test_centre_payload(centre_code="DRY_01", centre_name="Dry Run Centre")
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [centre])
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [])
+
+    sync_time = datetime(2026, 10, 6, 15, 0, 0, tzinfo=timezone.utc)
+    stats = sync_centres(db_engine=test_engine, dry_run=True, sync_date=sync_time)
+
+    assert stats["centres_fetched"] == 1
+
+    with Session(test_engine) as session:
+        # Status record should not be created or left dirty in dry-run mode
+        status = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
+        assert status is None
+
+
 
 
 
