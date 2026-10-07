@@ -13,6 +13,12 @@ class UserSignupRequest(BaseModel):
     full_name: str = Field(min_length=1, max_length=100)
 
 
+class UserUpdateRequest(BaseModel):
+    """Payload for user profile update."""
+
+    full_name: str | None = Field(default=None, min_length=1, max_length=100)
+
+
 class UserResponse(BaseModel):
     """Public user profile response."""
 

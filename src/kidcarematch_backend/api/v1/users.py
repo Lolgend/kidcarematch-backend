@@ -1,5 +1,6 @@
 """User API endpoints."""
 
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -12,7 +13,11 @@ from kidcarematch_backend.auth.security import (
     get_token_claims,
 )
 from kidcarematch_backend.db.db import AccountStatus, User, UserRole, get_session
-from kidcarematch_backend.schemas.user import UserResponse, UserSignupRequest
+from kidcarematch_backend.schemas.user import (
+    UserResponse,
+    UserSignupRequest,
+    UserUpdateRequest,
+)
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
 
@@ -82,4 +87,27 @@ def get_me(
 ) -> User:
     """Retrieve the profile of the currently authenticated user."""
     return current_user
+
+
+@router.patch(
+    "/me",
+    response_model=UserResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update Current User Profile",
+)
+def update_me(
+    payload: UserUpdateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
+) -> User:
+    """Update profile fields of the currently authenticated user."""
+    if payload.full_name is not None:
+        current_user.full_name = payload.full_name.strip()
+        current_user.updated_at = datetime.now(timezone.utc)
+        session.add(current_user)
+        session.commit()
+        session.refresh(current_user)
+
+    return current_user
+
 

@@ -243,3 +243,170 @@ def test_get_me_active_user_returns_200(client: TestClient, test_engine):
     assert "created_at" in data
     assert "updated_at" in data
 
+
+def test_patch_me_missing_token_returns_401(client: TestClient):
+    """PATCH /api/v1/users/me without Authorization header must return 401."""
+    response = client.patch(
+        "/api/v1/users/me",
+        json={"full_name": "Updated Name"},
+    )
+    assert response.status_code == 401
+    assert "detail" in response.json()
+
+
+def test_patch_me_invalid_token_header_returns_401(client: TestClient):
+    """PATCH /api/v1/users/me with invalid authorization scheme must return 401."""
+    response = client.patch(
+        "/api/v1/users/me",
+        headers={"Authorization": "Basic not-a-bearer-token"},
+        json={"full_name": "Updated Name"},
+    )
+    assert response.status_code == 401
+
+
+def test_patch_me_suspended_user_returns_403(client: TestClient, test_engine):
+    """PATCH /api/v1/users/me for suspended user must return 403 Forbidden."""
+    with Session(test_engine) as session:
+        suspended_user = User(
+            firebase_uid="firebase_suspended_patch_uid",
+            email="suspended_patch@example.com",
+            full_name="Suspended User",
+            role=UserRole.PARENT,
+            account_status=AccountStatus.SUSPENDED,
+        )
+        session.add(suspended_user)
+        session.commit()
+
+    mock_claims = FirebaseTokenClaims(
+        uid="firebase_suspended_patch_uid", email="suspended_patch@example.com"
+    )
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+
+    response = client.patch(
+        "/api/v1/users/me",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"full_name": "Attempted Name Change"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Account is suspended."
+
+
+def test_patch_me_success_updates_full_name_and_refreshes_updated_at(
+    client: TestClient, test_engine
+):
+    """PATCH /api/v1/users/me updates full_name, refreshes updated_at, and returns 200."""
+    with Session(test_engine) as session:
+        user = User(
+            firebase_uid="firebase_patch_uid",
+            email="parent@example.com",
+            full_name="Original Name",
+            role=UserRole.PARENT,
+            account_status=AccountStatus.ACTIVE,
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        original_updated_at = user.updated_at
+        user_id = user.user_id
+
+    mock_claims = FirebaseTokenClaims(uid="firebase_patch_uid", email="parent@example.com")
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+
+    response = client.patch(
+        "/api/v1/users/me",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"full_name": "   Updated Name   "},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["user_id"] == user_id
+    assert data["full_name"] == "Updated Name"
+    assert data["email"] == "parent@example.com"
+
+    # Verify updated in DB
+    with Session(test_engine) as session:
+        db_user = session.exec(
+            select(User).where(User.firebase_uid == "firebase_patch_uid")
+        ).first()
+        assert db_user is not None
+        assert db_user.full_name == "Updated Name"
+        assert db_user.updated_at >= original_updated_at
+
+
+def test_patch_me_immutable_fields_remain_unchanged(client: TestClient, test_engine):
+    """PATCH /api/v1/users/me ignores or rejects any email/role/status fields in request payload."""
+    with Session(test_engine) as session:
+        user = User(
+            firebase_uid="firebase_immutable_uid",
+            email="keep_original@example.com",
+            full_name="Original Name",
+            role=UserRole.PARENT,
+            account_status=AccountStatus.ACTIVE,
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        user_id = user.user_id
+
+    mock_claims = FirebaseTokenClaims(
+        uid="firebase_immutable_uid", email="keep_original@example.com"
+    )
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+
+    response = client.patch(
+        "/api/v1/users/me",
+        headers={"Authorization": "Bearer mock-token"},
+        json={
+            "full_name": "New Display Name",
+            "email": "hacker@evil.com",
+            "role": "ADMIN",
+            "account_status": "SUSPENDED",
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["user_id"] == user_id
+    assert data["full_name"] == "New Display Name"
+    assert data["email"] == "keep_original@example.com"
+    assert data["role"] == "PARENT"
+    assert data["account_status"] == "ACTIVE"
+
+    # Verify database values remain untouched
+    with Session(test_engine) as session:
+        db_user = session.exec(select(User).where(User.user_id == user_id)).first()
+        assert db_user is not None
+        assert db_user.email == "keep_original@example.com"
+        assert db_user.role == UserRole.PARENT
+        assert db_user.account_status == AccountStatus.ACTIVE
+
+
+def test_patch_me_empty_payload_leaves_profile_unchanged(client: TestClient, test_engine):
+    """PATCH /api/v1/users/me with empty payload leaves fields unchanged and returns 200."""
+    with Session(test_engine) as session:
+        user = User(
+            firebase_uid="firebase_noop_uid",
+            email="noop@example.com",
+            full_name="Static Name",
+            role=UserRole.PARENT,
+            account_status=AccountStatus.ACTIVE,
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        user_id = user.user_id
+
+    mock_claims = FirebaseTokenClaims(uid="firebase_noop_uid", email="noop@example.com")
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+
+    response = client.patch(
+        "/api/v1/users/me",
+        headers={"Authorization": "Bearer mock-token"},
+        json={},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["user_id"] == user_id
+    assert data["full_name"] == "Static Name"
+
+
+
