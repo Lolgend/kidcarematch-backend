@@ -977,7 +977,7 @@ def test_get_centre_by_code_success(client: TestClient, test_engine):
 def test_get_centre_endpoints_public_access_without_authentication(
     client: TestClient, test_engine
 ):
-    """GET /api/v1/centres/{centre_id} and /code/{centre_code} do not require authentication."""
+    """GET /api/v1/centres/{centre_id}, /code/{centre_code}, and /{centre_id}/reviews do not require authentication."""
     with Session(test_engine) as session:
         centre = PreschoolCentre(
             centre_code="PC_PUB",
@@ -993,6 +993,356 @@ def test_get_centre_endpoints_public_access_without_authentication(
 
     r_code = client.get("/api/v1/centres/code/PC_PUB")
     assert r_code.status_code == 200
+
+    r_rev = client.get(f"/api/v1/centres/{centre_id}/reviews")
+    assert r_rev.status_code == 200
+
+
+
+def test_get_centre_reviews_not_found_returns_404(client: TestClient):
+    """GET /api/v1/centres/{centre_id}/reviews returns HTTP 404 if centre does not exist."""
+    response = client.get("/api/v1/centres/99999/reviews")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Preschool centre not found"
+
+
+def test_get_centre_reviews_empty_returns_200_envelope(
+    client: TestClient, test_engine
+):
+    """GET /api/v1/centres/{centre_id}/reviews returns 200 with empty items list and default pagination metadata."""
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC_REV_0",
+            centre_name="Empty Reviews Centre",
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+        centre_id = centre.centre_id
+
+    response = client.get(f"/api/v1/centres/{centre_id}/reviews")
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [],
+        "total": 0,
+        "limit": 20,
+        "offset": 0,
+    }
+
+
+def test_get_centre_reviews_strictly_filters_approved_and_sanitizes_anonymity(
+    client: TestClient, test_engine
+):
+    """GET /api/v1/centres/{centre_id}/reviews strictly returns approved reviews for the target centre only,
+
+    exposing sanitized fields (review_id, rating, comment, created_at) without parent identifiers.
+    """
+    dt1 = datetime(2026, 10, 10, 12, 0, 0, tzinfo=timezone.utc)
+    dt2 = datetime(2026, 10, 11, 14, 0, 0, tzinfo=timezone.utc)
+
+    with Session(test_engine) as session:
+        target_centre = PreschoolCentre(
+            centre_code="PC_REV_TARGET",
+            centre_name="Target Review Centre",
+        )
+        other_centre = PreschoolCentre(
+            centre_code="PC_REV_OTHER",
+            centre_name="Other Review Centre",
+        )
+        session.add_all([target_centre, other_centre])
+        session.commit()
+        session.refresh(target_centre)
+        session.refresh(other_centre)
+
+        users = [
+            User(
+                user_id=f"parent_{i}",
+                firebase_uid=f"fb_parent_{i}",
+                email=f"parent_{i}@example.com",
+                full_name=f"Parent Name {i}",
+            )
+            for i in range(1, 6)
+        ]
+        session.add_all(users)
+        session.commit()
+
+        # Target centre reviews:
+        # 1. Approved with comment (dt2)
+        # 2. Approved without comment (dt1)
+        # 3. Pending review (should be excluded)
+        # 4. Rejected review (should be excluded)
+        # Other centre review:
+        # 5. Approved review for other centre (should be excluded)
+        session.add_all(
+            [
+                Review(
+                    review_id="REV_APP_1",
+                    centre_id=target_centre.centre_id,  # type: ignore[arg-type]
+                    user_id="parent_1",
+                    rating=5,
+                    review_description="Outstanding teachers and nurturing environment!",
+                    moderation_status=ModerationStatus.APPROVED,
+                    created_at=dt2,
+                ),
+                Review(
+                    review_id="REV_APP_2",
+                    centre_id=target_centre.centre_id,  # type: ignore[arg-type]
+                    user_id="parent_2",
+                    rating=4,
+                    review_description=None,
+                    moderation_status=ModerationStatus.APPROVED,
+                    created_at=dt1,
+                ),
+                Review(
+                    review_id="REV_PEND_3",
+                    centre_id=target_centre.centre_id,  # type: ignore[arg-type]
+                    user_id="parent_3",
+                    rating=2,
+                    review_description="Pending moderation feedback",
+                    moderation_status=ModerationStatus.PENDING,
+                    created_at=dt2,
+                ),
+                Review(
+                    review_id="REV_REJ_4",
+                    centre_id=target_centre.centre_id,  # type: ignore[arg-type]
+                    user_id="parent_4",
+                    rating=1,
+                    review_description="Inappropriate rejected text",
+                    moderation_status=ModerationStatus.REJECTED,
+                    created_at=dt2,
+                ),
+                Review(
+                    review_id="REV_OTHER_5",
+                    centre_id=other_centre.centre_id,  # type: ignore[arg-type]
+                    user_id="parent_5",
+                    rating=5,
+                    review_description="Great other centre",
+                    moderation_status=ModerationStatus.APPROVED,
+                    created_at=dt2,
+                ),
+            ]
+        )
+        session.commit()
+        centre_id = target_centre.centre_id
+
+    response = client.get(f"/api/v1/centres/{centre_id}/reviews")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["total"] == 2
+    assert data["limit"] == 20
+    assert data["offset"] == 0
+    assert len(data["items"]) == 2
+
+    # Verify first review (dt2 is newer)
+    item_1 = data["items"][0]
+    assert item_1["review_id"] == "REV_APP_1"
+    assert item_1["rating"] == 5
+    assert item_1["comment"] == "Outstanding teachers and nurturing environment!"
+    assert item_1["created_at"] == "2026-10-11T14:00:00Z"
+
+    # Verify second review (dt1 is older, null comment)
+    item_2 = data["items"][1]
+    assert item_2["review_id"] == "REV_APP_2"
+    assert item_2["rating"] == 4
+    assert item_2["comment"] is None
+    assert item_2["created_at"] == "2026-10-10T12:00:00Z"
+
+    # Strict anonymity assertion: verify none of the items expose parent/internal keys
+    forbidden_keys = {
+        "user_id",
+        "user",
+        "parent",
+        "parent_id",
+        "email",
+        "full_name",
+        "firebase_uid",
+        "moderation_status",
+        "moderated_by",
+        "moderated_at",
+        "review_description",
+    }
+    for item in data["items"]:
+        item_keys = set(item.keys())
+        assert item_keys == {"review_id", "rating", "comment", "created_at"}
+        assert forbidden_keys.isdisjoint(item_keys)
+
+
+def test_get_centre_reviews_ordered_chronologically_desc(
+    client: TestClient, test_engine
+):
+    """GET /api/v1/centres/{centre_id}/reviews orders reviews chronologically with most recent first."""
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC_REV_ORDER",
+            centre_name="Order Test Centre",
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+
+        users = [
+            User(
+                user_id=f"order_parent_{i}",
+                firebase_uid=f"order_fb_{i}",
+                email=f"order_{i}@example.com",
+                full_name=f"Order Parent {i}",
+            )
+            for i in range(1, 5)
+        ]
+        session.add_all(users)
+        session.commit()
+
+        # Insert out of chronological order:
+        # A: Oct 1, B: Oct 5, C: Oct 3, D: Oct 9
+        session.add_all(
+            [
+                Review(
+                    review_id="REV_A",
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    user_id="order_parent_1",
+                    rating=3,
+                    moderation_status=ModerationStatus.APPROVED,
+                    created_at=datetime(2026, 10, 1, 10, 0, 0, tzinfo=timezone.utc),
+                ),
+                Review(
+                    review_id="REV_B",
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    user_id="order_parent_2",
+                    rating=4,
+                    moderation_status=ModerationStatus.APPROVED,
+                    created_at=datetime(2026, 10, 5, 10, 0, 0, tzinfo=timezone.utc),
+                ),
+                Review(
+                    review_id="REV_C",
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    user_id="order_parent_3",
+                    rating=5,
+                    moderation_status=ModerationStatus.APPROVED,
+                    created_at=datetime(2026, 10, 3, 10, 0, 0, tzinfo=timezone.utc),
+                ),
+                Review(
+                    review_id="REV_D",
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    user_id="order_parent_4",
+                    rating=5,
+                    moderation_status=ModerationStatus.APPROVED,
+                    created_at=datetime(2026, 10, 9, 10, 0, 0, tzinfo=timezone.utc),
+                ),
+            ]
+        )
+        session.commit()
+        centre_id = centre.centre_id
+
+    response = client.get(f"/api/v1/centres/{centre_id}/reviews")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["total"] == 4
+    review_ids = [item["review_id"] for item in data["items"]]
+    assert review_ids == ["REV_D", "REV_B", "REV_C", "REV_A"]
+
+
+def test_get_centre_reviews_pagination_defaults_and_custom_offsets(
+    client: TestClient, test_engine
+):
+    """GET /api/v1/centres/{centre_id}/reviews returns correct envelope with default and custom pagination parameters."""
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC_REV_PAGE",
+            centre_name="Pagination Test Centre",
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+
+        users = [
+            User(
+                user_id=f"page_user_{i}",
+                firebase_uid=f"page_fb_{i}",
+                email=f"page_user_{i}@example.com",
+                full_name=f"Page User {i}",
+            )
+            for i in range(1, 26)
+        ]
+        session.add_all(users)
+        session.commit()
+
+        # Create 25 approved reviews with sequential timestamps
+        reviews = [
+            Review(
+                review_id=f"REV_PG_{i:02d}",
+                centre_id=centre.centre_id,  # type: ignore[arg-type]
+                user_id=f"page_user_{i}",
+                rating=4,
+                review_description=f"Review number {i}",
+                moderation_status=ModerationStatus.APPROVED,
+                created_at=datetime(2026, 10, 1, 0, i, 0, tzinfo=timezone.utc),
+            )
+            for i in range(1, 26)
+        ]
+        session.add_all(reviews)
+        session.commit()
+        centre_id = centre.centre_id
+
+    # 1. Default pagination: limit=20, offset=0
+    response_default = client.get(f"/api/v1/centres/{centre_id}/reviews")
+    assert response_default.status_code == 200
+    data_default = response_default.json()
+
+    assert data_default["total"] == 25
+    assert data_default["limit"] == 20
+    assert data_default["offset"] == 0
+    assert len(data_default["items"]) == 20
+    # First item is newest (minute 25 -> REV_PG_25)
+    assert data_default["items"][0]["review_id"] == "REV_PG_25"
+    assert data_default["items"][19]["review_id"] == "REV_PG_06"
+
+    # 2. Custom pagination: limit=5, offset=10
+    response_custom = client.get(
+        f"/api/v1/centres/{centre_id}/reviews?limit=5&offset=10"
+    )
+    assert response_custom.status_code == 200
+    data_custom = response_custom.json()
+
+    assert data_custom["total"] == 25
+    assert data_custom["limit"] == 5
+    assert data_custom["offset"] == 10
+    assert len(data_custom["items"]) == 5
+    # Sequence offset 10 to 14: REV_PG_15, REV_PG_14, REV_PG_13, REV_PG_12, REV_PG_11
+    assert [item["review_id"] for item in data_custom["items"]] == [
+        "REV_PG_15",
+        "REV_PG_14",
+        "REV_PG_13",
+        "REV_PG_12",
+        "REV_PG_11",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("param", "val"),
+    [
+        ("limit", 0),
+        ("limit", -1),
+        ("limit", 101),
+        ("limit", "not_an_int"),
+        ("offset", -1),
+        ("offset", "not_an_int"),
+    ],
+)
+def test_get_centre_reviews_invalid_pagination_returns_422(
+    client: TestClient, param: str, val: object
+):
+    """GET /api/v1/centres/{centre_id}/reviews returns HTTP 422 for invalid limit or offset values."""
+    response = client.get(f"/api/v1/centres/1/reviews?{param}={val}")
+    assert response.status_code == 422
+
+
+
+
+
+
+
 
 
 

@@ -1,6 +1,8 @@
 """Pydantic schemas for API request and response models."""
 
 from kidcarematch_backend.schemas.centre import (
+    CentreReviewItem,
+    CentreReviewListResponse,
     CentreSummaryResponse,
     PreschoolCentreDetailResponse,
     PreschoolCentreItem,
@@ -17,6 +19,8 @@ from kidcarematch_backend.schemas.user import (
 )
 
 __all__ = [
+    "CentreReviewItem",
+    "CentreReviewListResponse",
     "CentreSummaryResponse",
     "PreschoolCentreDetailResponse",
     "PreschoolCentreItem",
@@ -29,4 +33,5 @@ __all__ = [
     "UserUpdateRequest",
     "VacancyRecordResponse",
 ]
+
 

@@ -17,6 +17,8 @@ from kidcarematch_backend.db.db import (
     get_session,
 )
 from kidcarematch_backend.schemas.centre import (
+    CentreReviewItem,
+    CentreReviewListResponse,
     CentreSummaryResponse,
     PreschoolCentreDetailResponse,
     PreschoolCentreItem,
@@ -273,6 +275,74 @@ def get_centre_by_code(
             detail="Preschool centre not found",
         )
     return _build_centre_detail_response(centre, session)
+
+
+@router.get(
+    "/{centre_id}/reviews",
+    response_model=CentreReviewListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List Preschool Centre Reviews",
+)
+def list_centre_reviews(
+    centre_id: int,
+    session: Annotated[Session, Depends(get_session)],
+    limit: Annotated[
+        int,
+        Query(ge=1, le=100, description="Number of reviews to return"),
+    ] = 20,
+    offset: Annotated[
+        int,
+        Query(ge=0, description="Offset index for pagination"),
+    ] = 0,
+) -> CentreReviewListResponse:
+    """Retrieve a paginated list of approved community reviews for a preschool centre."""
+    centre = session.exec(
+        select(PreschoolCentre.centre_id).where(
+            col(PreschoolCentre.centre_id) == centre_id
+        )
+    ).first()
+    if not centre:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Preschool centre not found",
+        )
+
+    base_filter = [
+        col(Review.centre_id) == centre_id,
+        col(Review.moderation_status) == ModerationStatus.APPROVED,
+    ]
+
+    total = (
+        session.exec(
+            select(func.count(col(Review.review_id))).where(*base_filter)
+        ).one()
+        or 0
+    )
+
+    reviews = session.exec(
+        select(Review)
+        .where(*base_filter)
+        .order_by(col(Review.created_at).desc(), col(Review.review_id).desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+
+    items = [
+        CentreReviewItem(
+            review_id=r.review_id or "",
+            rating=r.rating,
+            comment=r.review_description,
+            created_at=r.created_at,
+        )
+        for r in reviews
+    ]
+
+    return CentreReviewListResponse(
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get(
