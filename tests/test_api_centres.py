@@ -219,3 +219,383 @@ def test_get_centre_summary_no_open_vacancies_and_null_sync(
         "centres_with_vacancies_count": 0,
         "last_sync_time": None,
     }
+
+
+def test_get_centres_empty_database_returns_empty_envelope(client: TestClient):
+    """GET /api/v1/centres on an empty database returns 200 with empty items list and default pagination."""
+    response = client.get("/api/v1/centres")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data == {
+        "items": [],
+        "total": 0,
+        "limit": 20,
+        "offset": 0,
+    }
+
+
+def test_get_centres_default_pagination(client: TestClient, test_engine):
+    """GET /api/v1/centres returns default limit=20 and total count across pages."""
+    with Session(test_engine) as session:
+        centres = [
+            PreschoolCentre(
+                centre_code=f"PC{i:03d}",
+                centre_name=f"Preschool Centre {i:03d}",
+                postal=f"560{i:03d}",
+                address=f"Block {i} Ang Mo Kio Ave {i % 10}",
+                spark_certified=(i % 2 == 0),
+                gov_subsidy=(i % 3 == 0),
+            )
+            for i in range(1, 26)
+        ]
+        session.add_all(centres)
+        session.commit()
+
+    response = client.get("/api/v1/centres")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 25
+    assert data["limit"] == 20
+    assert data["offset"] == 0
+    assert len(data["items"]) == 20
+
+    first_item = data["items"][0]
+    assert first_item["centre_code"] == "PC001"
+    assert first_item["centre_name"] == "Preschool Centre 001"
+    assert "spark_certified" in first_item
+    assert "gov_subsidy" in first_item
+    assert "postal" in first_item
+    assert "address" in first_item
+
+
+def test_get_centres_custom_limit_and_offset(client: TestClient, test_engine):
+    """GET /api/v1/centres respects custom limit and offset query parameters."""
+    with Session(test_engine) as session:
+        centres = [
+            PreschoolCentre(
+                centre_code=f"PAGE{i:02d}",
+                centre_name=f"Centre Number {i:02d}",
+            )
+            for i in range(1, 16)
+        ]
+        session.add_all(centres)
+        session.commit()
+
+    response = client.get("/api/v1/centres?limit=5&offset=10")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 15
+    assert data["limit"] == 5
+    assert data["offset"] == 10
+    assert len(data["items"]) == 5
+    assert [item["centre_code"] for item in data["items"]] == [
+        "PAGE11",
+        "PAGE12",
+        "PAGE13",
+        "PAGE14",
+        "PAGE15",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("param", "val"),
+    [
+        ("limit", 0),
+        ("limit", -1),
+        ("limit", 101),
+        ("limit", "invalid"),
+        ("offset", -1),
+        ("offset", "invalid"),
+        ("spark_certified", "not_a_bool"),
+        ("gov_subsidy", "not_a_bool"),
+        ("level", "invalid_level"),
+    ],
+)
+def test_get_centres_invalid_parameters_return_422(
+    client: TestClient, param: str, val: object
+):
+    """Invalid query parameter types or boundaries return HTTP 422 Unprocessable Entity."""
+    response = client.get(f"/api/v1/centres?{param}={val}")
+    assert response.status_code == 422
+
+
+def test_get_centres_filter_by_query_name_and_address(
+    client: TestClient, test_engine
+):
+    """Query parameter 'query' performs case-insensitive substring search across centre name and address."""
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_code="C01",
+            centre_name="Little Skool-House On-the-Green",
+            address="1 Jurong West Central 3",
+        )
+        c2 = PreschoolCentre(
+            centre_code="C02",
+            centre_name="PCF Sparkletots Preschool",
+            address="Block 220 Jurong East St 21",
+        )
+        c3 = PreschoolCentre(
+            centre_code="C03",
+            centre_name="My First Skool",
+            address="Block 505 Tampines Ave 5",
+        )
+        session.add_all([c1, c2, c3])
+        session.commit()
+
+    # Search matching centre_name
+    r1 = client.get("/api/v1/centres?query=skool")
+    assert r1.status_code == 200
+    data1 = r1.json()
+    assert data1["total"] == 2
+    codes1 = {item["centre_code"] for item in data1["items"]}
+    assert codes1 == {"C01", "C03"}
+
+    # Search matching address (case-insensitive)
+    r2 = client.get("/api/v1/centres?query=JURONG")
+    assert r2.status_code == 200
+    data2 = r2.json()
+    assert data2["total"] == 2
+    codes2 = {item["centre_code"] for item in data2["items"]}
+    assert codes2 == {"C01", "C02"}
+
+    # Search with no match
+    r3 = client.get("/api/v1/centres?query=woodlands")
+    assert r3.status_code == 200
+    data3 = r3.json()
+    assert data3["total"] == 0
+    assert data3["items"] == []
+
+
+def test_get_centres_filter_by_postal_prefix(client: TestClient, test_engine):
+    """Query parameter 'postal_prefix' filters centres whose postal code starts with the prefix."""
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_code="P01",
+            centre_name="Centre Ang Mo Kio",
+            postal="560123",
+        )
+        c2 = PreschoolCentre(
+            centre_code="P02",
+            centre_name="Centre Bishan",
+            postal="570456",
+        )
+        c3 = PreschoolCentre(
+            centre_code="P03",
+            centre_name="Centre Tampines",
+            postal="520789",
+        )
+        c4 = PreschoolCentre(
+            centre_code="P04",
+            centre_name="Centre Without Postal",
+            postal=None,
+        )
+        session.add_all([c1, c2, c3, c4])
+        session.commit()
+
+    r1 = client.get("/api/v1/centres?postal_prefix=56")
+    assert r1.status_code == 200
+    data1 = r1.json()
+    assert data1["total"] == 1
+    assert data1["items"][0]["centre_code"] == "P01"
+
+    r2 = client.get("/api/v1/centres?postal_prefix=5")
+    assert r2.status_code == 200
+    data2 = r2.json()
+    assert data2["total"] == 3
+    codes = {item["centre_code"] for item in data2["items"]}
+    assert codes == {"P01", "P02", "P03"}
+
+    r3 = client.get("/api/v1/centres?postal_prefix=99")
+    assert r3.status_code == 200
+    assert r3.json()["total"] == 0
+
+
+def test_get_centres_filter_by_boolean_flags(client: TestClient, test_engine):
+    """Query parameters 'spark_certified' and 'gov_subsidy' filter by boolean flags."""
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_code="B01",
+            centre_name="Certified and Subsidized",
+            spark_certified=True,
+            gov_subsidy=True,
+        )
+        c2 = PreschoolCentre(
+            centre_code="B02",
+            centre_name="Certified Only",
+            spark_certified=True,
+            gov_subsidy=False,
+        )
+        c3 = PreschoolCentre(
+            centre_code="B03",
+            centre_name="Subsidized Only",
+            spark_certified=False,
+            gov_subsidy=True,
+        )
+        c4 = PreschoolCentre(
+            centre_code="B04",
+            centre_name="Neither",
+            spark_certified=False,
+            gov_subsidy=False,
+        )
+        session.add_all([c1, c2, c3, c4])
+        session.commit()
+
+    r_spark_true = client.get("/api/v1/centres?spark_certified=true")
+    assert r_spark_true.status_code == 200
+    assert {i["centre_code"] for i in r_spark_true.json()["items"]} == {"B01", "B02"}
+
+    r_spark_false = client.get("/api/v1/centres?spark_certified=false")
+    assert r_spark_false.status_code == 200
+    assert {i["centre_code"] for i in r_spark_false.json()["items"]} == {"B03", "B04"}
+
+    r_sub_true = client.get("/api/v1/centres?gov_subsidy=true")
+    assert r_sub_true.status_code == 200
+    assert {i["centre_code"] for i in r_sub_true.json()["items"]} == {"B01", "B03"}
+
+    r_sub_false = client.get("/api/v1/centres?gov_subsidy=false")
+    assert r_sub_false.status_code == 200
+    assert {i["centre_code"] for i in r_sub_false.json()["items"]} == {"B02", "B04"}
+
+
+def test_get_centres_filter_by_level_vacancies(client: TestClient, test_engine):
+    """Query parameter 'level' filters centres that have open ('Immediate' or 'Available') vacancies for that cohort."""
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(centre_code="L01", centre_name="Centre Infant Immediate")
+        c2 = PreschoolCentre(centre_code="L02", centre_name="Centre Infant Available")
+        c3 = PreschoolCentre(centre_code="L03", centre_name="Centre Infant Full")
+        c4 = PreschoolCentre(centre_code="L04", centre_name="Centre PG Available")
+        session.add_all([c1, c2, c3, c4])
+        session.commit()
+        for c in (c1, c2, c3, c4):
+            session.refresh(c)
+
+        session.add_all(
+            [
+                VacancyRecord(
+                    record_id="V_L01",
+                    centre_id=c1.centre_id,  # type: ignore[arg-type]
+                    level_type=PreschoolLevel.INFANT,
+                    enrollment_month_year=datetime(2026, 11, 1, tzinfo=timezone.utc),
+                    vacancy_status="Immediate",
+                ),
+                VacancyRecord(
+                    record_id="V_L02",
+                    centre_id=c2.centre_id,  # type: ignore[arg-type]
+                    level_type=PreschoolLevel.INFANT,
+                    enrollment_month_year=datetime(2026, 12, 1, tzinfo=timezone.utc),
+                    vacancy_status="available",
+                ),
+                VacancyRecord(
+                    record_id="V_L03",
+                    centre_id=c3.centre_id,  # type: ignore[arg-type]
+                    level_type=PreschoolLevel.INFANT,
+                    enrollment_month_year=datetime(2026, 11, 1, tzinfo=timezone.utc),
+                    vacancy_status="Not Available",
+                ),
+                VacancyRecord(
+                    record_id="V_L04",
+                    centre_id=c4.centre_id,  # type: ignore[arg-type]
+                    level_type=PreschoolLevel.PG,
+                    enrollment_month_year=datetime(2026, 11, 1, tzinfo=timezone.utc),
+                    vacancy_status="Available",
+                ),
+            ]
+        )
+        session.commit()
+
+    # Infant filter should return L01 (Immediate) and L02 (available), but not L03 (Not Available) or L04 (PG only)
+    r_infant = client.get("/api/v1/centres?level=infant")
+    assert r_infant.status_code == 200
+    data_infant = r_infant.json()
+    assert data_infant["total"] == 2
+    assert {i["centre_code"] for i in data_infant["items"]} == {"L01", "L02"}
+
+    # PG filter should return L04
+    r_pg = client.get("/api/v1/centres?level=pg")
+    assert r_pg.status_code == 200
+    data_pg = r_pg.json()
+    assert data_pg["total"] == 1
+    assert data_pg["items"][0]["centre_code"] == "L04"
+
+    # N1 filter with no vacancies should return empty list
+    r_n1 = client.get("/api/v1/centres?level=n1")
+    assert r_n1.status_code == 200
+    assert r_n1.json()["total"] == 0
+    assert r_n1.json()["items"] == []
+
+
+def test_get_centres_multi_criteria_filtering(client: TestClient, test_engine):
+    """Combine multiple filter criteria (keyword, postal prefix, certification, subsidy, and level)."""
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_code="MC01",
+            centre_name="Super Skool Jurong West",
+            address="123 Jurong West Ave 1",
+            postal="640123",
+            spark_certified=True,
+            gov_subsidy=True,
+        )
+        c2 = PreschoolCentre(
+            centre_code="MC02",
+            centre_name="Super Skool Tampines",
+            address="456 Tampines St 42",
+            postal="520456",
+            spark_certified=True,
+            gov_subsidy=True,
+        )
+        c3 = PreschoolCentre(
+            centre_code="MC03",
+            centre_name="Super Skool Jurong East",
+            address="789 Jurong East St 13",
+            postal="600789",
+            spark_certified=False,  # Not certified
+            gov_subsidy=True,
+        )
+        session.add_all([c1, c2, c3])
+        session.commit()
+        for c in (c1, c2, c3):
+            session.refresh(c)
+
+        session.add_all(
+            [
+                VacancyRecord(
+                    record_id="V_MC01",
+                    centre_id=c1.centre_id,  # type: ignore[arg-type]
+                    level_type=PreschoolLevel.N2,
+                    enrollment_month_year=datetime(2026, 11, 1, tzinfo=timezone.utc),
+                    vacancy_status="Available",
+                ),
+                VacancyRecord(
+                    record_id="V_MC02",
+                    centre_id=c2.centre_id,  # type: ignore[arg-type]
+                    level_type=PreschoolLevel.N2,
+                    enrollment_month_year=datetime(2026, 11, 1, tzinfo=timezone.utc),
+                    vacancy_status="Available",
+                ),
+            ]
+        )
+        session.commit()
+
+    # Search: query="jurong", postal_prefix="64", spark_certified=true, gov_subsidy=true, level="n2"
+    params = {
+        "query": "jurong",
+        "postal_prefix": "64",
+        "spark_certified": "true",
+        "gov_subsidy": "true",
+        "level": "n2",
+    }
+    response = client.get("/api/v1/centres", params=params)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert data["items"][0]["centre_code"] == "MC01"
+
+
+def test_get_centres_public_access_without_authentication(client: TestClient):
+    """GET /api/v1/centres does not require Authorization header and returns 200."""
+    response = client.get("/api/v1/centres")
+    assert response.status_code == 200
+
