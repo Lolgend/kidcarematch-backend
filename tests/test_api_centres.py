@@ -6,10 +6,15 @@ from sqlmodel import Session, create_engine
 from sqlmodel.pool import StaticPool
 
 from kidcarematch_backend.db.db import (
+    CitizenshipType,
     ExternalDataSourceStatus,
+    ModerationStatus,
     PreschoolCentre,
     PreschoolLevel,
+    PreschoolService,
+    Review,
     SyncState,
+    User,
     VacancyRecord,
     get_session,
     init_db,
@@ -598,4 +603,398 @@ def test_get_centres_public_access_without_authentication(client: TestClient):
     """GET /api/v1/centres does not require Authorization header and returns 200."""
     response = client.get("/api/v1/centres")
     assert response.status_code == 200
+
+
+def test_get_centre_by_id_not_found_returns_404(client: TestClient):
+    """GET /api/v1/centres/{centre_id} returns HTTP 404 if centre does not exist."""
+    response = client.get("/api/v1/centres/99999")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Preschool centre not found"
+
+
+def test_get_centre_by_id_success(client: TestClient, test_engine):
+    """GET /api/v1/centres/{centre_id} returns 200 and detailed metadata with default empty relations."""
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC100",
+            centre_name="Maple Bear Early Learning",
+            contact="61234567",
+            email="maple@example.com",
+            postal="123456",
+            website_url="https://maplebear.sg",
+            food_offered="Halal Certified",
+            address="10 Orchard Road, #01-01",
+            second_languages="Chinese, Malay",
+            spark_certified=True,
+            weekday_full_day_hours="7:00 am - 7:00 pm",
+            saturday_hours="7:00 am - 2:00 pm",
+            extended_operating_hours=True,
+            transport_provided=True,
+            gov_subsidy=True,
+            last_updated=datetime(2026, 10, 1, 10, 0, 0, tzinfo=timezone.utc),
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+        centre_id = centre.centre_id
+
+    response = client.get(f"/api/v1/centres/{centre_id}")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["centre_id"] == centre_id
+    assert data["centre_code"] == "PC100"
+    assert data["centre_name"] == "Maple Bear Early Learning"
+    assert data["contact"] == "61234567"
+    assert data["email"] == "maple@example.com"
+    assert data["postal"] == "123456"
+    assert data["website_url"] == "https://maplebear.sg"
+    assert data["food_offered"] == "Halal Certified"
+    assert data["address"] == "10 Orchard Road, #01-01"
+    assert data["second_languages"] == "Chinese, Malay"
+    assert data["spark_certified"] is True
+    assert data["weekday_full_day_hours"] == "7:00 am - 7:00 pm"
+    assert data["saturday_hours"] == "7:00 am - 2:00 pm"
+    assert data["extended_operating_hours"] is True
+    assert data["transport_provided"] is True
+    assert data["gov_subsidy"] is True
+    assert data["last_updated"] == "2026-10-01T10:00:00Z"
+    assert data["vacancies"] == []
+    assert data["services"] == []
+    assert data["review_summary"] == {
+        "average_rating": None,
+        "total_reviews": 0,
+    }
+
+
+def test_get_centre_by_id_vacancies_and_services_ordered(
+    client: TestClient, test_engine
+):
+    """GET /api/v1/centres/{centre_id} returns correctly ordered vacancies and services."""
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC200",
+            centre_name="EtonHouse International",
+        )
+        other_centre = PreschoolCentre(
+            centre_code="PC999",
+            centre_name="Other Centre",
+        )
+        session.add_all([centre, other_centre])
+        session.commit()
+        session.refresh(centre)
+        session.refresh(other_centre)
+
+        # Vacancies inserted out-of-order:
+        # Expected order:
+        # 1. 2026-11-01, infant
+        # 2. 2026-11-01, n1
+        # 3. 2026-12-01, infant
+        # 4. 2026-12-01, pg
+        session.add_all(
+            [
+                VacancyRecord(
+                    record_id="V2",
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    level_type=PreschoolLevel.PG,
+                    enrollment_month_year=datetime(2026, 12, 1, tzinfo=timezone.utc),
+                    vacancy_status="Available",
+                ),
+                VacancyRecord(
+                    record_id="V1",
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    level_type=PreschoolLevel.INFANT,
+                    enrollment_month_year=datetime(2026, 12, 1, tzinfo=timezone.utc),
+                    vacancy_status="Immediate",
+                ),
+                VacancyRecord(
+                    record_id="V3",
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    level_type=PreschoolLevel.N1,
+                    enrollment_month_year=datetime(2026, 11, 1, tzinfo=timezone.utc),
+                    vacancy_status="Full",
+                ),
+                VacancyRecord(
+                    record_id="V4",
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    level_type=PreschoolLevel.INFANT,
+                    enrollment_month_year=datetime(2026, 11, 1, tzinfo=timezone.utc),
+                    vacancy_status="Available",
+                ),
+                VacancyRecord(
+                    record_id="V_OTHER",
+                    centre_id=other_centre.centre_id,  # type: ignore[arg-type]
+                    level_type=PreschoolLevel.INFANT,
+                    enrollment_month_year=datetime(2026, 11, 1, tzinfo=timezone.utc),
+                    vacancy_status="Immediate",
+                ),
+            ]
+        )
+
+        # Services inserted out-of-order:
+        # Expected order: level ASC, citizenship_type ASC
+        # level: infant ("infant") < n1 ("n1") < n2 ("n2")
+        # For infant: OTHERS ("OTHERS") < SC ("SC") < SPR ("SPR")
+        session.add_all(
+            [
+                PreschoolService(
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    type_of_service="Full Day",
+                    level=PreschoolLevel.N2,
+                    fee=1200.0,
+                    citizenship_type=CitizenshipType.OTHERS,
+                    remarks="Foreigner tier",
+                ),
+                PreschoolService(
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    type_of_service="Full Day",
+                    level=PreschoolLevel.INFANT,
+                    fee=950.0,
+                    citizenship_type=CitizenshipType.SPR,
+                    remarks="SPR tier",
+                ),
+                PreschoolService(
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    type_of_service="Full Day",
+                    level=PreschoolLevel.INFANT,
+                    fee=750.0,
+                    citizenship_type=CitizenshipType.SC,
+                    remarks="SC tier",
+                ),
+                PreschoolService(
+                    centre_id=other_centre.centre_id,  # type: ignore[arg-type]
+                    type_of_service="Full Day",
+                    level=PreschoolLevel.INFANT,
+                    fee=500.0,
+                    citizenship_type=CitizenshipType.SC,
+                ),
+            ]
+        )
+        session.commit()
+        centre_id = centre.centre_id
+
+    response = client.get(f"/api/v1/centres/{centre_id}")
+    assert response.status_code == 200
+    data = response.json()
+
+    # Verify vacancies count and ordered sequence
+    vacancies = data["vacancies"]
+    assert len(vacancies) == 4
+    assert [
+        (v["enrollment_month_year"][:10], v["level_type"], v["record_id"])
+        for v in vacancies
+    ] == [
+        ("2026-11-01", "infant", "V4"),
+        ("2026-11-01", "n1", "V3"),
+        ("2026-12-01", "infant", "V1"),
+        ("2026-12-01", "pg", "V2"),
+    ]
+
+    # Verify services count and ordered sequence (level ASC, citizenship_type ASC)
+    services = data["services"]
+    assert len(services) == 3
+    assert [
+        (s["level"], s["citizenship_type"], s["fee"])
+        for s in services
+    ] == [
+        ("infant", "SC", 750.0),
+        ("infant", "SPR", 950.0),
+        ("n2", "OTHERS", 1200.0),
+    ]
+
+
+def test_get_centre_by_id_review_summary_strictly_approved(
+    client: TestClient, test_engine
+):
+    """Review summary counts and averages only reviews with ModerationStatus.APPROVED."""
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC300",
+            centre_name="Review Target Centre",
+        )
+        other_centre = PreschoolCentre(
+            centre_code="PC301",
+            centre_name="Other Review Centre",
+        )
+        session.add_all([centre, other_centre])
+        session.commit()
+        session.refresh(centre)
+        session.refresh(other_centre)
+
+        users = [
+            User(
+                user_id=f"u_{i}",
+                firebase_uid=f"fb_{i}",
+                email=f"user_{i}@example.com",
+                full_name=f"Parent {i}",
+            )
+            for i in range(1, 6)
+        ]
+        session.add_all(users)
+        session.commit()
+
+        # Centre 1 reviews:
+        # User 1: 5 stars, APPROVED
+        # User 2: 5 stars, APPROVED
+        # User 3: 4 stars, APPROVED  -> (5 + 5 + 4) / 3 = 14 / 3 = 4.67
+        # User 4: 1 star, PENDING (excluded)
+        # User 5: 1 star, REJECTED (excluded)
+        session.add_all(
+            [
+                Review(
+                    review_id="REV_1",
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    user_id="u_1",
+                    rating=5,
+                    moderation_status=ModerationStatus.APPROVED,
+                ),
+                Review(
+                    review_id="REV_2",
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    user_id="u_2",
+                    rating=5,
+                    moderation_status=ModerationStatus.APPROVED,
+                ),
+                Review(
+                    review_id="REV_3",
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    user_id="u_3",
+                    rating=4,
+                    moderation_status=ModerationStatus.APPROVED,
+                ),
+                Review(
+                    review_id="REV_4",
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    user_id="u_4",
+                    rating=1,
+                    moderation_status=ModerationStatus.PENDING,
+                ),
+                Review(
+                    review_id="REV_5",
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    user_id="u_5",
+                    rating=1,
+                    moderation_status=ModerationStatus.REJECTED,
+                ),
+            ]
+        )
+        session.commit()
+        centre_id = centre.centre_id
+
+    response = client.get(f"/api/v1/centres/{centre_id}")
+    assert response.status_code == 200
+    data = response.json()
+
+    review_summary = data["review_summary"]
+    assert review_summary["total_reviews"] == 3
+    assert review_summary["average_rating"] == 4.67
+
+
+def test_get_centre_by_code_not_found_returns_404(client: TestClient):
+    """GET /api/v1/centres/code/{centre_code} returns HTTP 404 when centre_code does not exist."""
+    response = client.get("/api/v1/centres/code/NONEXISTENT_CODE")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Preschool centre not found"
+
+
+def test_get_centre_by_code_success(client: TestClient, test_engine):
+    """GET /api/v1/centres/code/{centre_code} returns identical payload structure to by_id."""
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="ECDA-0042",
+            centre_name="Superstar Montessori",
+            contact="65551234",
+            email="superstar@example.com",
+            postal="543210",
+            spark_certified=True,
+            gov_subsidy=True,
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+
+        session.add(
+            VacancyRecord(
+                record_id="VR_CODE_1",
+                centre_id=centre.centre_id,  # type: ignore[arg-type]
+                level_type=PreschoolLevel.K1,
+                enrollment_month_year=datetime(2026, 11, 1, tzinfo=timezone.utc),
+                vacancy_status="Immediate",
+            )
+        )
+        session.add(
+            PreschoolService(
+                centre_id=centre.centre_id,  # type: ignore[arg-type]
+                type_of_service="Full Day",
+                level=PreschoolLevel.K1,
+                fee=800.0,
+                citizenship_type=CitizenshipType.SC,
+            )
+        )
+
+        user = User(
+            user_id="u_code",
+            firebase_uid="fb_code",
+            email="parent_code@example.com",
+            full_name="Parent Code",
+        )
+        session.add(user)
+        session.commit()
+
+        session.add(
+            Review(
+                review_id="REV_CODE_1",
+                centre_id=centre.centre_id,  # type: ignore[arg-type]
+                user_id="u_code",
+                rating=5,
+                moderation_status=ModerationStatus.APPROVED,
+            )
+        )
+        session.commit()
+        centre_id = centre.centre_id
+
+    response_by_code = client.get("/api/v1/centres/code/ECDA-0042")
+    assert response_by_code.status_code == 200
+    data_by_code = response_by_code.json()
+
+    response_by_id = client.get(f"/api/v1/centres/{centre_id}")
+    assert response_by_id.status_code == 200
+    data_by_id = response_by_id.json()
+
+    # Verify payloads are identical
+    assert data_by_code == data_by_id
+    assert data_by_code["centre_code"] == "ECDA-0042"
+    assert len(data_by_code["vacancies"]) == 1
+    assert data_by_code["vacancies"][0]["level_type"] == "k1"
+    assert len(data_by_code["services"]) == 1
+    assert data_by_code["services"][0]["fee"] == 800.0
+    assert data_by_code["review_summary"] == {
+        "average_rating": 5.0,
+        "total_reviews": 1,
+    }
+
+
+def test_get_centre_endpoints_public_access_without_authentication(
+    client: TestClient, test_engine
+):
+    """GET /api/v1/centres/{centre_id} and /code/{centre_code} do not require authentication."""
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC_PUB",
+            centre_name="Public Access Test Centre",
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+        centre_id = centre.centre_id
+
+    r_id = client.get(f"/api/v1/centres/{centre_id}")
+    assert r_id.status_code == 200
+
+    r_code = client.get("/api/v1/centres/code/PC_PUB")
+    assert r_code.status_code == 200
+
+
+
+
 
