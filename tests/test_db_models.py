@@ -1,9 +1,10 @@
 from datetime import datetime, timezone
+
 import pytest
+from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, create_engine, select
 
-from pydantic import ValidationError
 from kidcarematch_backend.db.db import (
     AccountStatus,
     ApplicantStatus,
@@ -39,16 +40,16 @@ def test_session():
 def test_create_parent_and_admin_users(test_session: Session):
     parent = User(
         user_id="user_parent_01",
+        firebase_uid="firebase_parent_01",
         email="parent@example.com",
-        password_hash="hashed_pw_123",
         full_name="Jane Doe",
         role=UserRole.PARENT,
         account_status=AccountStatus.ACTIVE,
     )
     admin = User(
         user_id="user_admin_01",
+        firebase_uid="firebase_admin_01",
         email="admin@example.com",
-        password_hash="hashed_admin_pw",
         full_name="Admin John",
         role=UserRole.ADMIN,
         account_status=AccountStatus.ACTIVE,
@@ -61,25 +62,34 @@ def test_create_parent_and_admin_users(test_session: Session):
     saved_parent = test_session.exec(select(User).where(User.email == "parent@example.com")).first()
     assert saved_parent is not None
     assert saved_parent.user_id == "user_parent_01"
+    assert saved_parent.firebase_uid == "firebase_parent_01"
     assert saved_parent.full_name == "Jane Doe"
     assert saved_parent.role == UserRole.PARENT
     assert saved_parent.account_status == AccountStatus.ACTIVE
     assert saved_parent.admin_level is None
+    assert saved_parent.created_at is not None
+    assert saved_parent.created_at.tzinfo == timezone.utc
+    assert saved_parent.updated_at is not None
+    assert saved_parent.updated_at.tzinfo == timezone.utc
+    assert "password_hash" not in type(saved_parent).model_fields
 
     saved_admin = test_session.exec(select(User).where(User.email == "admin@example.com")).first()
     assert saved_admin is not None
     assert saved_admin.user_id == "user_admin_01"
+    assert saved_admin.firebase_uid == "firebase_admin_01"
     assert saved_admin.full_name == "Admin John"
     assert saved_admin.role == UserRole.ADMIN
     assert saved_admin.account_status == AccountStatus.ACTIVE
     assert saved_admin.admin_level == 1
+    assert saved_admin.created_at is not None
+    assert saved_admin.updated_at is not None
 
 
 def test_user_email_unique_constraint(test_session: Session):
     user1 = User(
         user_id="user_01",
+        firebase_uid="fb_uid_01",
         email="duplicate@example.com",
-        password_hash="pw1",
         full_name="User One",
         role=UserRole.PARENT,
         account_status=AccountStatus.ACTIVE,
@@ -89,8 +99,8 @@ def test_user_email_unique_constraint(test_session: Session):
 
     user2 = User(
         user_id="user_02",
+        firebase_uid="fb_uid_02",
         email="duplicate@example.com",
-        password_hash="pw2",
         full_name="User Two",
         role=UserRole.PARENT,
         account_status=AccountStatus.ACTIVE,
@@ -98,6 +108,52 @@ def test_user_email_unique_constraint(test_session: Session):
     test_session.add(user2)
     with pytest.raises(IntegrityError):
         test_session.commit()
+
+
+def test_user_firebase_uid_unique_constraint(test_session: Session):
+    user1 = User(
+        user_id="user_fb_01",
+        firebase_uid="same_firebase_uid",
+        email="fb1@example.com",
+        full_name="User One",
+    )
+    test_session.add(user1)
+    test_session.commit()
+
+    user2 = User(
+        user_id="user_fb_02",
+        firebase_uid="same_firebase_uid",
+        email="fb2@example.com",
+        full_name="User Two",
+    )
+    test_session.add(user2)
+    with pytest.raises(IntegrityError):
+        test_session.commit()
+
+
+def test_user_default_id_factory_and_timestamps(test_session: Session):
+    import uuid
+
+    user = User(
+        firebase_uid="fb_default_01",
+        email="default_factory@example.com",
+        full_name="Default Factory User",
+    )
+    test_session.add(user)
+    test_session.commit()
+
+    saved = test_session.exec(select(User).where(User.firebase_uid == "fb_default_01")).first()
+    assert saved is not None
+    assert saved.user_id is not None
+    # Validate user_id is a valid UUID string
+    uuid_obj = uuid.UUID(saved.user_id)
+    assert str(uuid_obj) == saved.user_id
+    assert saved.role == UserRole.PARENT
+    assert saved.account_status == AccountStatus.ACTIVE
+    assert saved.created_at is not None
+    assert saved.created_at.tzinfo == timezone.utc
+    assert saved.updated_at is not None
+    assert saved.updated_at.tzinfo == timezone.utc
 
 
 def test_create_and_query_subsidy_rules(test_session: Session):
@@ -256,8 +312,8 @@ def test_external_data_source_status_lifecycle(test_session: Session):
 def test_family_preference_profile_multi_creation_for_parent(test_session: Session):
     parent = User(
         user_id="parent_usr_01",
+        firebase_uid="fb_parent_usr_01",
         email="parent1@example.com",
-        password_hash="pw_hash_1",
         full_name="Sarah Tan",
         role=UserRole.PARENT,
     )
@@ -277,6 +333,7 @@ def test_family_preference_profile_multi_creation_for_parent(test_session: Sessi
         workplace_postal_code="018989",
         location_preference=LocationPreference.HOME,
         household_income=6500.0,
+        household_member_count=3,
         budget_max=1500.0,
         enrollment_month_year=datetime(2027, 1, 1, tzinfo=timezone.utc),
         cost_weight=0.7,
@@ -293,6 +350,7 @@ def test_family_preference_profile_multi_creation_for_parent(test_session: Sessi
         workplace_postal_code=None,
         location_preference=LocationPreference.EITHER,
         household_income=6500.0,
+        household_member_count=3,
         budget_max=900.0,
         enrollment_month_year=datetime(2027, 6, 1, tzinfo=timezone.utc),
         cost_weight=0.4,
@@ -319,8 +377,8 @@ def test_review_creation_and_rating_validation(test_session: Session):
     )
     parent = User(
         user_id="parent_rev_01",
+        firebase_uid="fb_parent_rev_01",
         email="parent_rev@example.com",
-        password_hash="pw_hash_2",
         full_name="David Lim",
         role=UserRole.PARENT,
     )
@@ -373,8 +431,8 @@ def test_review_single_per_centre_user_uniqueness(test_session: Session):
     )
     parent = User(
         user_id="parent_rev_02",
+        firebase_uid="fb_parent_rev_02",
         email="parent_rev2@example.com",
-        password_hash="pw_hash_3",
         full_name="Karen Koh",
         role=UserRole.PARENT,
     )
@@ -416,15 +474,15 @@ def test_review_moderation_workflow_audit(test_session: Session):
     )
     parent = User(
         user_id="parent_rev_03",
+        firebase_uid="fb_parent_rev_03",
         email="parent_rev3@example.com",
-        password_hash="pw_hash_4",
         full_name="Alex Tan",
         role=UserRole.PARENT,
     )
     admin = User(
         user_id="admin_auditor_01",
+        firebase_uid="fb_admin_auditor_01",
         email="admin_auditor@example.com",
-        password_hash="admin_pw_1",
         full_name="Admin Clara",
         role=UserRole.ADMIN,
         admin_level=2,
@@ -474,8 +532,8 @@ def test_watchlist_entry_cohort_subscription_and_uniqueness(test_session: Sessio
     )
     parent = User(
         user_id="parent_watch_01",
+        firebase_uid="fb_parent_watch_01",
         email="parent_watch@example.com",
-        password_hash="pw_hash_5",
         full_name="Rachel Green",
         role=UserRole.PARENT,
     )
@@ -536,8 +594,8 @@ def test_bidirectional_relationships_navigation(test_session: Session):
     )
     parent = User(
         user_id="parent_nav_01",
+        firebase_uid="fb_parent_nav_01",
         email="parent_nav@example.com",
-        password_hash="pw_hash_6",
         full_name="Nav Tester",
         role=UserRole.PARENT,
     )
@@ -553,6 +611,11 @@ def test_bidirectional_relationships_navigation(test_session: Session):
         profile_name="Nav Profile",
         service_required="Full Day",
         level=PreschoolLevel.N1,
+        home_postal_code="560123",
+        household_income=5000.0,
+        household_member_count=3,
+        budget_max=1200.0,
+        enrollment_month_year=datetime(2027, 5, 1, tzinfo=timezone.utc),
     )
     review = Review(
         review_id="rev_nav_01",
@@ -598,8 +661,8 @@ def test_preschool_centre_cascade_deletion(test_session: Session):
     )
     user = User(
         user_id="user_cascade_01",
+        firebase_uid="fb_user_cascade_01",
         email="cascade@example.com",
-        password_hash="pw_hash_cascade",
         full_name="Cascade User",
     )
     test_session.add_all([centre, user])
@@ -663,8 +726,8 @@ def test_user_cascade_deletion(test_session: Session):
     )
     user = User(
         user_id="user_to_delete_01",
+        firebase_uid="fb_del_01",
         email="delete_me@example.com",
-        password_hash="pw_del_123",
         full_name="Delete Me",
     )
     test_session.add_all([centre, user])
@@ -679,8 +742,10 @@ def test_user_cascade_deletion(test_session: Session):
         service_required="Full Day",
         level=PreschoolLevel.INFANT,
         citizenship_status=CitizenshipType.SC,
+        home_postal_code="654321",
         household_income=5000.0,
         household_member_count=3,
+        budget_max=1000.0,
         enrollment_month_year=datetime(2027, 1, 1, tzinfo=timezone.utc),
     )
     review = Review(
@@ -731,8 +796,8 @@ def test_canonical_enums_values_and_db_loading(test_session: Session):
     )
     user = User(
         user_id="user_enum_01",
+        firebase_uid="fb_enum_01",
         email="enum_user@example.com",
-        password_hash="pw_enum",
         full_name="Enum User",
     )
     test_session.add_all([centre, user])
@@ -756,6 +821,11 @@ def test_canonical_enums_values_and_db_loading(test_session: Session):
         level=PreschoolLevel.N2,
         citizenship_status=CitizenshipType.SPR,
         service_required="Full Day",
+        home_postal_code="560123",
+        household_income=4000.0,
+        household_member_count=4,
+        budget_max=800.0,
+        enrollment_month_year=datetime(2027, 1, 1, tzinfo=timezone.utc),
     )
     # Load WatchlistEntry
     watchlist = WatchlistEntry(

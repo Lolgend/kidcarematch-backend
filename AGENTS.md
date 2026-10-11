@@ -21,3 +21,7 @@ Use `git ls-files` rather than recursive file searches.
 - Run tests: `uv run pytest`
 - Type check: `uv run mypy src tests`
 - Lint / format: `ruff check .`
+
+### Pull Request (PR)
+
+Use `pr` to form PR body before marking it ready for review.
