@@ -2,21 +2,28 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_
 from sqlmodel import Session, col, select
 
 from kidcarematch_backend.db.db import (
     ExternalDataSourceStatus,
+    ModerationStatus,
     PreschoolCentre,
     PreschoolLevel,
+    PreschoolService,
+    Review,
     VacancyRecord,
     get_session,
 )
 from kidcarematch_backend.schemas.centre import (
     CentreSummaryResponse,
+    PreschoolCentreDetailResponse,
     PreschoolCentreItem,
     PreschoolCentreListResponse,
+    PreschoolServiceResponse,
+    ReviewSummaryResponse,
+    VacancyRecordResponse,
 )
 
 router = APIRouter(prefix="/api/v1/centres", tags=["centres"])
@@ -176,4 +183,117 @@ def list_centres(
         limit=limit,
         offset=offset,
     )
+
+
+def _build_centre_detail_response(
+    centre: PreschoolCentre,
+    session: Session,
+) -> PreschoolCentreDetailResponse:
+    """Construct a detailed centre profile response including ordered vacancies, services, and review aggregates."""
+    vacancies = session.exec(
+        select(VacancyRecord)
+        .where(col(VacancyRecord.centre_id) == centre.centre_id)
+        .order_by(
+            col(VacancyRecord.enrollment_month_year).asc(),
+            col(VacancyRecord.level_type).asc(),
+        )
+    ).all()
+
+    services = session.exec(
+        select(PreschoolService)
+        .where(col(PreschoolService.centre_id) == centre.centre_id)
+        .order_by(
+            col(PreschoolService.level).asc(),
+            col(PreschoolService.citizenship_type).asc(),
+        )
+    ).all()
+
+    review_stats = session.exec(
+        select(
+            func.count(col(Review.review_id)),
+            func.avg(col(Review.rating)),
+        ).where(
+            col(Review.centre_id) == centre.centre_id,
+            col(Review.moderation_status) == ModerationStatus.APPROVED,
+        )
+    ).one()
+
+    total_reviews = review_stats[0] or 0
+    raw_avg = review_stats[1]
+    average_rating = (
+        round(float(raw_avg), 2)
+        if (raw_avg is not None and total_reviews > 0)
+        else None
+    )
+
+    return PreschoolCentreDetailResponse(
+        centre_id=centre.centre_id,  # type: ignore[arg-type]
+        centre_code=centre.centre_code,
+        centre_name=centre.centre_name,
+        contact=centre.contact,
+        email=centre.email,
+        postal=centre.postal,
+        website_url=centre.website_url,
+        food_offered=centre.food_offered,
+        address=centre.address,
+        second_languages=centre.second_languages,
+        spark_certified=centre.spark_certified,
+        weekday_full_day_hours=centre.weekday_full_day_hours,
+        saturday_hours=centre.saturday_hours,
+        extended_operating_hours=centre.extended_operating_hours,
+        transport_provided=centre.transport_provided,
+        gov_subsidy=centre.gov_subsidy,
+        last_updated=centre.last_updated,
+        vacancies=[VacancyRecordResponse.model_validate(v) for v in vacancies],
+        services=[PreschoolServiceResponse.model_validate(s) for s in services],
+        review_summary=ReviewSummaryResponse(
+            average_rating=average_rating,
+            total_reviews=total_reviews,
+        ),
+    )
+
+
+@router.get(
+    "/code/{centre_code}",
+    response_model=PreschoolCentreDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Preschool Centre Profile by Code",
+)
+def get_centre_by_code(
+    centre_code: str,
+    session: Annotated[Session, Depends(get_session)],
+) -> PreschoolCentreDetailResponse:
+    """Retrieve detailed profile of a preschool centre by its natural ECDA code."""
+    centre = session.exec(
+        select(PreschoolCentre).where(col(PreschoolCentre.centre_code) == centre_code)
+    ).first()
+    if not centre:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Preschool centre not found",
+        )
+    return _build_centre_detail_response(centre, session)
+
+
+@router.get(
+    "/{centre_id}",
+    response_model=PreschoolCentreDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Preschool Centre Profile by ID",
+)
+def get_centre_by_id(
+    centre_id: int,
+    session: Annotated[Session, Depends(get_session)],
+) -> PreschoolCentreDetailResponse:
+    """Retrieve detailed profile of a preschool centre by its internal integer ID."""
+    centre = session.exec(
+        select(PreschoolCentre).where(col(PreschoolCentre.centre_id) == centre_id)
+    ).first()
+    if not centre:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Preschool centre not found",
+        )
+    return _build_centre_detail_response(centre, session)
+
 
