@@ -99,3 +99,24 @@ class PreschoolCentreDetailResponse(PreschoolCentreItem):
     review_summary: ReviewSummaryResponse
 
 
+class CentreReviewItem(BaseModel):
+    """Sanitized public review item for a preschool centre."""
+
+    review_id: str
+    rating: int
+    comment: str | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CentreReviewListResponse(BaseModel):
+    """Pagination envelope for preschool centre reviews."""
+
+    items: list[CentreReviewItem]
+    total: int
+    limit: int
+    offset: int
+
+
+
