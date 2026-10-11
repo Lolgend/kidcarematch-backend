@@ -1,5 +1,6 @@
 """Preschool centre API endpoints."""
 
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -7,6 +8,7 @@ from sqlalchemy import func, or_
 from sqlmodel import Session, col, select
 
 from kidcarematch_backend.db.db import (
+    CitizenshipType,
     ExternalDataSourceStatus,
     ModerationStatus,
     PreschoolCentre,
@@ -29,6 +31,47 @@ from kidcarematch_backend.schemas.centre import (
 )
 
 router = APIRouter(prefix="/api/v1/centres", tags=["centres"])
+
+OPEN_VACANCY_STATUSES = ("immediate", "available")
+
+DEVELOPMENTAL_LEVEL_ORDER: dict[str, int] = {
+    PreschoolLevel.INFANT.value: 0,
+    PreschoolLevel.PG.value: 1,
+    PreschoolLevel.N1.value: 2,
+    PreschoolLevel.N2.value: 3,
+    PreschoolLevel.K1.value: 4,
+    PreschoolLevel.K2.value: 5,
+    PreschoolLevel.STUDENT_CARE.value: 6,
+}
+
+CITIZENSHIP_PRIORITY_ORDER: dict[str, int] = {
+    CitizenshipType.SC.value: 0,
+    CitizenshipType.SPR.value: 1,
+    CitizenshipType.OTHERS.value: 2,
+}
+
+
+def _level_order_key(level: PreschoolLevel | str) -> int:
+    val = level.value if isinstance(level, PreschoolLevel) else str(level)
+    return DEVELOPMENTAL_LEVEL_ORDER.get(val, 99)
+
+
+def _citizenship_order_key(citizenship: CitizenshipType | str) -> int:
+    val = citizenship.value if isinstance(citizenship, CitizenshipType) else str(citizenship)
+    return CITIZENSHIP_PRIORITY_ORDER.get(val, 99)
+
+
+def get_centre_or_404(centre_id: int, session: Session) -> PreschoolCentre:
+    """Retrieve a preschool centre by ID or raise HTTP 404."""
+    centre = session.exec(
+        select(PreschoolCentre).where(col(PreschoolCentre.centre_id) == centre_id)
+    ).first()
+    if not centre:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Preschool centre not found",
+        )
+    return centre
 
 
 @router.get(
@@ -64,15 +107,24 @@ def get_centre_summary(
         session.exec(
             select(func.count(func.distinct(col(VacancyRecord.centre_id)))).where(
                 func.lower(col(VacancyRecord.vacancy_status)).in_(
-                    ["immediate", "available"]
+                    OPEN_VACANCY_STATUSES
                 )
             )
         ).one()
         or 0
     )
-    last_sync_time = session.exec(
-        select(func.max(col(ExternalDataSourceStatus.last_successful_sync)))
-    ).one()
+    ecda_status = session.exec(
+        select(ExternalDataSourceStatus).where(
+            col(ExternalDataSourceStatus.source_id) == "ECDA_DATASTORE"
+        )
+    ).first()
+    last_sync_time: datetime | None
+    if ecda_status is not None and ecda_status.last_successful_sync is not None:
+        last_sync_time = ecda_status.last_successful_sync
+    else:
+        last_sync_time = session.exec(
+            select(func.max(col(ExternalDataSourceStatus.last_successful_sync)))
+        ).one()
 
     return CentreSummaryResponse(
         total_centres=total_centres,
@@ -155,7 +207,7 @@ def list_centres(
             .where(
                 col(VacancyRecord.level_type) == level,
                 func.lower(col(VacancyRecord.vacancy_status)).in_(
-                    ["immediate", "available"]
+                    OPEN_VACANCY_STATUSES
                 ),
             )
             .distinct()
@@ -193,22 +245,26 @@ def _build_centre_detail_response(
 ) -> PreschoolCentreDetailResponse:
     """Construct a detailed centre profile response including ordered vacancies, services, and review aggregates."""
     vacancies = session.exec(
-        select(VacancyRecord)
-        .where(col(VacancyRecord.centre_id) == centre.centre_id)
-        .order_by(
-            col(VacancyRecord.enrollment_month_year).asc(),
-            col(VacancyRecord.level_type).asc(),
-        )
+        select(VacancyRecord).where(col(VacancyRecord.centre_id) == centre.centre_id)
     ).all()
+    sorted_vacancies = sorted(
+        vacancies,
+        key=lambda v: (
+            v.enrollment_month_year,
+            _level_order_key(v.level_type),
+        ),
+    )
 
     services = session.exec(
-        select(PreschoolService)
-        .where(col(PreschoolService.centre_id) == centre.centre_id)
-        .order_by(
-            col(PreschoolService.level).asc(),
-            col(PreschoolService.citizenship_type).asc(),
-        )
+        select(PreschoolService).where(col(PreschoolService.centre_id) == centre.centre_id)
     ).all()
+    sorted_services = sorted(
+        services,
+        key=lambda s: (
+            _level_order_key(s.level),
+            _citizenship_order_key(s.citizenship_type),
+        ),
+    )
 
     review_stats = session.exec(
         select(
@@ -228,26 +284,12 @@ def _build_centre_detail_response(
         else None
     )
 
+    centre_item = PreschoolCentreItem.model_validate(centre)
+
     return PreschoolCentreDetailResponse(
-        centre_id=centre.centre_id,  # type: ignore[arg-type]
-        centre_code=centre.centre_code,
-        centre_name=centre.centre_name,
-        contact=centre.contact,
-        email=centre.email,
-        postal=centre.postal,
-        website_url=centre.website_url,
-        food_offered=centre.food_offered,
-        address=centre.address,
-        second_languages=centre.second_languages,
-        spark_certified=centre.spark_certified,
-        weekday_full_day_hours=centre.weekday_full_day_hours,
-        saturday_hours=centre.saturday_hours,
-        extended_operating_hours=centre.extended_operating_hours,
-        transport_provided=centre.transport_provided,
-        gov_subsidy=centre.gov_subsidy,
-        last_updated=centre.last_updated,
-        vacancies=[VacancyRecordResponse.model_validate(v) for v in vacancies],
-        services=[PreschoolServiceResponse.model_validate(s) for s in services],
+        **centre_item.model_dump(),
+        vacancies=[VacancyRecordResponse.model_validate(v) for v in sorted_vacancies],
+        services=[PreschoolServiceResponse.model_validate(s) for s in sorted_services],
         review_summary=ReviewSummaryResponse(
             average_rating=average_rating,
             total_reviews=total_reviews,
@@ -296,16 +338,7 @@ def list_centre_reviews(
     ] = 0,
 ) -> CentreReviewListResponse:
     """Retrieve a paginated list of approved community reviews for a preschool centre."""
-    centre = session.exec(
-        select(PreschoolCentre.centre_id).where(
-            col(PreschoolCentre.centre_id) == centre_id
-        )
-    ).first()
-    if not centre:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preschool centre not found",
-        )
+    get_centre_or_404(centre_id, session)
 
     base_filter = [
         col(Review.centre_id) == centre_id,
@@ -356,14 +389,7 @@ def get_centre_by_id(
     session: Annotated[Session, Depends(get_session)],
 ) -> PreschoolCentreDetailResponse:
     """Retrieve detailed profile of a preschool centre by its internal integer ID."""
-    centre = session.exec(
-        select(PreschoolCentre).where(col(PreschoolCentre.centre_id) == centre_id)
-    ).first()
-    if not centre:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preschool centre not found",
-        )
+    centre = get_centre_or_404(centre_id, session)
     return _build_centre_detail_response(centre, session)
 
 

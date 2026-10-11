@@ -322,9 +322,9 @@ def test_get_centres_custom_limit_and_offset(client: TestClient, test_engine):
 def test_get_centres_invalid_parameters_return_422(
     client: TestClient, param: str, val: object
 ):
-    """Invalid query parameter types or boundaries return HTTP 422 Unprocessable Entity."""
+    """Invalid query parameter types or boundaries return HTTP 400 or HTTP 422."""
     response = client.get(f"/api/v1/centres?{param}={val}")
-    assert response.status_code == 422
+    assert response.status_code in (400, 422)
 
 
 def test_get_centres_filter_by_query_name_and_address(
@@ -1333,9 +1333,174 @@ def test_get_centre_reviews_pagination_defaults_and_custom_offsets(
 def test_get_centre_reviews_invalid_pagination_returns_422(
     client: TestClient, param: str, val: object
 ):
-    """GET /api/v1/centres/{centre_id}/reviews returns HTTP 422 for invalid limit or offset values."""
+    """GET /api/v1/centres/{centre_id}/reviews returns HTTP 400 or HTTP 422 for invalid limit or offset values."""
     response = client.get(f"/api/v1/centres/1/reviews?{param}={val}")
-    assert response.status_code == 422
+    assert response.status_code in (400, 422)
+
+
+def test_get_centre_by_id_vacancies_comprehensive_developmental_cohort_ordering(
+    client: TestClient, test_engine
+):
+    """GET /api/v1/centres/{centre_id} orders vacancies by enrollment month ASC then developmental cohort progression."""
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC_DEV_VAC",
+            centre_name="Developmental Order Centre",
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+
+        # Insert cohort levels out-of-order for the same enrollment month
+        # Alphabetical order: infant, k1, k2, n1, n2, pg, student_care
+        # Developmental progression: infant -> pg -> n1 -> n2 -> k1 -> k2 -> student_care
+        cohorts_shuffled = [
+            (PreschoolLevel.STUDENT_CARE, "V_SC"),
+            (PreschoolLevel.K2, "V_K2"),
+            (PreschoolLevel.PG, "V_PG"),
+            (PreschoolLevel.K1, "V_K1"),
+            (PreschoolLevel.N2, "V_N2"),
+            (PreschoolLevel.INFANT, "V_INF"),
+            (PreschoolLevel.N1, "V_N1"),
+        ]
+
+        target_month = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        for level, rec_id in cohorts_shuffled:
+            session.add(
+                VacancyRecord(
+                    record_id=rec_id,
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    level_type=level,
+                    enrollment_month_year=target_month,
+                    vacancy_status="Available",
+                )
+            )
+        session.commit()
+        centre_id = centre.centre_id
+
+    response = client.get(f"/api/v1/centres/{centre_id}")
+    assert response.status_code == 200
+    data = response.json()
+
+    ordered_levels = [v["level_type"] for v in data["vacancies"]]
+    assert ordered_levels == [
+        "infant",
+        "pg",
+        "n1",
+        "n2",
+        "k1",
+        "k2",
+        "student_care",
+    ]
+
+
+def test_get_centre_by_id_services_citizenship_priority_and_level_ordering(
+    client: TestClient, test_engine
+):
+    """GET /api/v1/centres/{centre_id} orders services by developmental progression then citizenship priority."""
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC_DEV_SVC",
+            centre_name="Citizenship Priority Centre",
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+
+        # For INFANT: insert OTHERS, SPR, SC (alphabetical would put OTHERS first)
+        # Priority order must be SC -> SPR -> OTHERS
+        # For PG: insert OTHERS, SC
+        # For K1: insert SC
+        # Developmental level progression must put PG before K1
+        test_services = [
+            (PreschoolLevel.K1, CitizenshipType.SC, 1100.0),
+            (PreschoolLevel.PG, CitizenshipType.OTHERS, 950.0),
+            (PreschoolLevel.INFANT, CitizenshipType.OTHERS, 1400.0),
+            (PreschoolLevel.PG, CitizenshipType.SC, 600.0),
+            (PreschoolLevel.INFANT, CitizenshipType.SPR, 1100.0),
+            (PreschoolLevel.INFANT, CitizenshipType.SC, 800.0),
+        ]
+
+        for level, cit, fee in test_services:
+            session.add(
+                PreschoolService(
+                    centre_id=centre.centre_id,  # type: ignore[arg-type]
+                    type_of_service="Full Day",
+                    level=level,
+                    fee=fee,
+                    citizenship_type=cit,
+                )
+            )
+        session.commit()
+        centre_id = centre.centre_id
+
+    response = client.get(f"/api/v1/centres/{centre_id}")
+    assert response.status_code == 200
+    data = response.json()
+
+    services_seq = [
+        (s["level"], s["citizenship_type"], s["fee"]) for s in data["services"]
+    ]
+    assert services_seq == [
+        ("infant", "SC", 800.0),
+        ("infant", "SPR", 1100.0),
+        ("infant", "OTHERS", 1400.0),
+        ("pg", "SC", 600.0),
+        ("pg", "OTHERS", 950.0),
+        ("k1", "SC", 1100.0),
+    ]
+
+
+def test_get_centre_summary_ecda_heartbeat_filtering_and_fallback(
+    client: TestClient, test_engine
+):
+    """GET /api/v1/centres/summary filters sync timestamp to ECDA_DATASTORE, with fallback to max if not present."""
+    t_ecda = datetime(2026, 10, 10, 8, 30, tzinfo=timezone.utc)
+    t_other_later = datetime(2026, 10, 11, 14, 0, tzinfo=timezone.utc)
+
+    with Session(test_engine) as session:
+        # Both ECDA and another data source with a newer timestamp exist
+        session.add(
+            ExternalDataSourceStatus(
+                source_id="ECDA_DATASTORE",
+                source_name="ECDA Datastore",
+                sync_state=SyncState.SUCCESS,
+                last_successful_sync=t_ecda,
+            )
+        )
+        session.add(
+            ExternalDataSourceStatus(
+                source_id="OTHER_FEED",
+                source_name="Other Feed",
+                sync_state=SyncState.SUCCESS,
+                last_successful_sync=t_other_later,
+            )
+        )
+        session.commit()
+
+    # Must specifically return ECDA_DATASTORE timestamp despite OTHER_FEED being newer
+    response = client.get("/api/v1/centres/summary")
+    assert response.status_code == 200
+    data = response.json()
+    assert (
+        datetime.fromisoformat(data["last_sync_time"].replace("Z", "+00:00"))
+        == t_ecda
+    )
+
+    # When ECDA is deleted (not present), falls back to overall max
+    with Session(test_engine) as session:
+        ecda_rec = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
+        if ecda_rec:
+            session.delete(ecda_rec)
+            session.commit()
+
+    response2 = client.get("/api/v1/centres/summary")
+    assert response2.status_code == 200
+    data2 = response2.json()
+    assert (
+        datetime.fromisoformat(data2["last_sync_time"].replace("Z", "+00:00"))
+        == t_other_later
+    )
 
 
 

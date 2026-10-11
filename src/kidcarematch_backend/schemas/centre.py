@@ -43,7 +43,6 @@ class PreschoolCentreItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-PreschoolCentreResponse = PreschoolCentreItem
 
 
 class PreschoolCentreListResponse(BaseModel):
