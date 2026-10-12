@@ -270,7 +270,10 @@ class WatchlistEntry(SQLModel, table=True):
         ),
     )
 
-    watchlist_id: str | None = Field(default=None, primary_key=True)
+    watchlist_id: str | None = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        primary_key=True,
+    )
     user_id: str = Field(foreign_key="user.user_id", ondelete="CASCADE", nullable=False, index=True)
     centre_id: int = Field(
         foreign_key="preschoolcentre.centre_id",
