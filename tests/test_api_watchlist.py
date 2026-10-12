@@ -1043,3 +1043,258 @@ def test_get_my_watchlist_invalid_pagination_returns_422(
         headers={"Authorization": "Bearer mock-token"},
     )
     assert response.status_code == 422
+
+
+@pytest.fixture
+def second_centre(test_engine) -> PreschoolCentre:
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC_TEST_02",
+            centre_name="Sunny Smiles Academy",
+            postal="650456",
+            address="456 Sunny Ridge",
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+        return centre
+
+
+# ==============================================================================
+# GET /api/v1/centres/{centre_id}/watchlist Tests (Ticket #36)
+# ==============================================================================
+
+
+def test_centre_watchlist_status_missing_auth_returns_401(
+    client: TestClient, sample_centre: PreschoolCentre
+):
+    """Inspecting centre watchlist status without Authorization header returns 401."""
+    response = client.get(f"/api/v1/centres/{sample_centre.centre_id}/watchlist")
+    assert response.status_code == 401
+    assert "detail" in response.json()
+
+
+def test_centre_watchlist_status_invalid_auth_scheme_returns_401(
+    client: TestClient, sample_centre: PreschoolCentre
+):
+    """Inspecting centre watchlist status with non-Bearer auth scheme returns 401."""
+    response = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/watchlist",
+        headers={"Authorization": "Basic not-a-bearer-token"},
+    )
+    assert response.status_code == 401
+
+
+def test_centre_watchlist_status_suspended_user_returns_403(
+    client: TestClient, sample_centre: PreschoolCentre, suspended_user: User
+):
+    """Inspecting centre watchlist status with suspended user returns 403."""
+    set_mock_auth(suspended_user)
+    response = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Account is suspended."
+
+
+def test_centre_watchlist_status_centre_not_found_returns_404(
+    client: TestClient, sample_user: User
+):
+    """Inspecting watchlist status for non-existent centre_id returns 404."""
+    set_mock_auth(sample_user)
+    response = client.get(
+        "/api/v1/centres/99999/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Preschool centre not found"
+
+
+def test_centre_watchlist_status_not_watched_returns_false_and_empty_list(
+    client: TestClient, sample_centre: PreschoolCentre, sample_user: User
+):
+    """Returns is_watched: false and empty list when authenticated parent has no subscriptions."""
+    set_mock_auth(sample_user)
+    response = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["centre_id"] == sample_centre.centre_id
+    assert data["is_watched"] is False
+    assert data["watched_entries"] == []
+
+
+def test_centre_watchlist_status_other_user_watched_returns_false(
+    client: TestClient,
+    sample_centre: PreschoolCentre,
+    sample_user: User,
+    second_user: User,
+):
+    """Enforces user isolation: does not return is_watched: true if only another user watches."""
+    # second_user subscribes to sample_centre
+    set_mock_auth(second_user)
+    post_resp = client.post(
+        "/api/v1/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+        json={
+            "centre_id": sample_centre.centre_id,
+            "level": "infant",
+            "enrollment_month_year": "2027-03-01T00:00:00Z",
+        },
+    )
+    assert post_resp.status_code == 201
+
+    # sample_user inspects sample_centre
+    set_mock_auth(sample_user)
+    response = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["centre_id"] == sample_centre.centre_id
+    assert data["is_watched"] is False
+    assert data["watched_entries"] == []
+
+
+def test_centre_watchlist_status_watched_returns_true_and_populated_entries(
+    client: TestClient, sample_centre: PreschoolCentre, sample_user: User
+):
+    """Returns is_watched: true and populated watched_entries when authenticated parent watches."""
+    set_mock_auth(sample_user)
+    create_resp = client.post(
+        "/api/v1/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+        json={
+            "centre_id": sample_centre.centre_id,
+            "level": "pg",
+            "enrollment_month_year": "2027-05-01T00:00:00Z",
+        },
+    )
+    assert create_resp.status_code == 201
+    created_entry = create_resp.json()
+
+    response = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["centre_id"] == sample_centre.centre_id
+    assert data["is_watched"] is True
+    assert len(data["watched_entries"]) == 1
+    entry_item = data["watched_entries"][0]
+    assert entry_item["watchlist_id"] == created_entry["watchlist_id"]
+    assert entry_item["centre_id"] == sample_centre.centre_id
+    assert entry_item["level"] == "pg"
+    assert entry_item["enrollment_month_year"].startswith("2027-05-01")
+
+
+def test_centre_watchlist_status_multiple_cohorts_returns_all_sorted_entries(
+    client: TestClient, sample_centre: PreschoolCentre, sample_user: User
+):
+    """Returns all subscribed cohorts for the centre, sorted chronologically."""
+    set_mock_auth(sample_user)
+    # Add June entry first, then March entry
+    resp_jun = client.post(
+        "/api/v1/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+        json={
+            "centre_id": sample_centre.centre_id,
+            "level": "n1",
+            "enrollment_month_year": "2027-06-01T00:00:00Z",
+        },
+    )
+    assert resp_jun.status_code == 201
+
+    resp_mar = client.post(
+        "/api/v1/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+        json={
+            "centre_id": sample_centre.centre_id,
+            "level": "infant",
+            "enrollment_month_year": "2027-03-01T00:00:00Z",
+        },
+    )
+    assert resp_mar.status_code == 201
+
+    response = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["centre_id"] == sample_centre.centre_id
+    assert data["is_watched"] is True
+    assert len(data["watched_entries"]) == 2
+
+    # Should be sorted chronologically: March before June
+    assert data["watched_entries"][0]["watchlist_id"] == resp_mar.json()["watchlist_id"]
+    assert data["watched_entries"][0]["level"] == "infant"
+    assert data["watched_entries"][0]["enrollment_month_year"].startswith("2027-03-01")
+
+    assert data["watched_entries"][1]["watchlist_id"] == resp_jun.json()["watchlist_id"]
+    assert data["watched_entries"][1]["level"] == "n1"
+    assert data["watched_entries"][1]["enrollment_month_year"].startswith("2027-06-01")
+
+
+def test_centre_watchlist_status_scoped_to_queried_centre_only(
+    client: TestClient,
+    sample_centre: PreschoolCentre,
+    second_centre: PreschoolCentre,
+    sample_user: User,
+):
+    """Introspection only returns entries belonging to the specific queried centre."""
+    set_mock_auth(sample_user)
+    # Watch sample_centre
+    resp_centre1 = client.post(
+        "/api/v1/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+        json={
+            "centre_id": sample_centre.centre_id,
+            "level": "infant",
+            "enrollment_month_year": "2027-03-01T00:00:00Z",
+        },
+    )
+    assert resp_centre1.status_code == 201
+
+    # Watch second_centre
+    resp_centre2 = client.post(
+        "/api/v1/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+        json={
+            "centre_id": second_centre.centre_id,
+            "level": "k1",
+            "enrollment_month_year": "2027-09-01T00:00:00Z",
+        },
+    )
+    assert resp_centre2.status_code == 201
+
+    # Check sample_centre: only sample_centre entries returned
+    response1 = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response1.status_code == 200
+    data1 = response1.json()
+    assert data1["centre_id"] == sample_centre.centre_id
+    assert data1["is_watched"] is True
+    assert len(data1["watched_entries"]) == 1
+    assert data1["watched_entries"][0]["centre_id"] == sample_centre.centre_id
+    assert data1["watched_entries"][0]["watchlist_id"] == resp_centre1.json()["watchlist_id"]
+
+    # Check second_centre: only second_centre entries returned
+    response2 = client.get(
+        f"/api/v1/centres/{second_centre.centre_id}/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response2.status_code == 200
+    data2 = response2.json()
+    assert data2["centre_id"] == second_centre.centre_id
+    assert data2["is_watched"] is True
+    assert len(data2["watched_entries"]) == 1
+    assert data2["watched_entries"][0]["centre_id"] == second_centre.centre_id
+    assert data2["watched_entries"][0]["watchlist_id"] == resp_centre2.json()["watchlist_id"]
