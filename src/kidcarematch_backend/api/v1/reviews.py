@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func
 from sqlmodel import Session, col, select
 
@@ -147,3 +147,39 @@ def update_review(
     session.refresh(review)
 
     return review
+
+
+@router.delete(
+    "/{review_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete Preschool Centre Review",
+)
+def delete_review(
+    review_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
+) -> Response:
+    """Permanently delete an authored preschool centre review.
+
+    Requires an authenticated active user session.
+    Enforces author ownership: only the user who created the review may delete it.
+    Returns HTTP 204 No Content upon successful hard-deletion.
+    """
+    review = session.get(Review, review_id)
+    if not review:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Review not found",
+        )
+
+    if review.user_id != current_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to delete this review",
+        )
+
+    session.delete(review)
+    session.commit()
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
