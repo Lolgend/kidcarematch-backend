@@ -387,3 +387,324 @@ def test_create_review_immediately_reflected_in_public_endpoints(
     assert data_list["items"][0]["review_id"] == created_review_id
     assert data_list["items"][0]["rating"] == 5
     assert data_list["items"][0]["comment"] == "Immediate public feedback!"
+
+
+@pytest.fixture
+def other_user(test_engine) -> User:
+    with Session(test_engine) as session:
+        user = User(
+            user_id="usr_parent_02",
+            firebase_uid="firebase_parent_02",
+            email="parent2@example.com",
+            full_name="Bob Tan",
+            role=UserRole.PARENT,
+            account_status=AccountStatus.ACTIVE,
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        return user
+
+
+@pytest.fixture
+def sample_review(test_engine, sample_centre: PreschoolCentre, sample_user: User) -> Review:
+    assert sample_centre.centre_id is not None
+    assert sample_user.user_id is not None
+    with Session(test_engine) as session:
+        review = Review(
+            review_id=str(uuid.uuid4()),
+            centre_id=sample_centre.centre_id,
+            user_id=sample_user.user_id,
+            rating=4,
+            review_description="Initial great experience.",
+            moderation_status=ModerationStatus.APPROVED,
+        )
+        session.add(review)
+        session.commit()
+        session.refresh(review)
+        return review
+
+
+# ==============================================================================
+# GET /api/v1/reviews/{review_id} Tests
+# ==============================================================================
+
+
+def test_get_review_by_id_success(
+    client: TestClient, sample_review: Review
+):
+    """Retrieving an existing review by ID returns 200 OK with ReviewResponse without authentication."""
+    response = client.get(f"/api/v1/reviews/{sample_review.review_id}")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["review_id"] == sample_review.review_id
+    assert data["centre_id"] == sample_review.centre_id
+    assert data["user_id"] == sample_review.user_id
+    assert data["rating"] == sample_review.rating
+    assert data["review_description"] == sample_review.review_description
+    assert data["moderation_status"] == ModerationStatus.APPROVED.value
+    assert "created_at" in data
+
+
+def test_get_review_by_id_not_found_returns_404(client: TestClient):
+    """Querying a non-existent review ID returns HTTP 404 Not Found."""
+    response = client.get("/api/v1/reviews/non-existent-review-id")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Review not found"
+
+
+# ==============================================================================
+# PATCH /api/v1/reviews/{review_id} Tests
+# ==============================================================================
+
+
+def test_patch_review_missing_auth_token_returns_401(
+    client: TestClient, sample_review: Review
+):
+    """Updating a review without Authorization header returns HTTP 401 Unauthorized."""
+    response = client.patch(
+        f"/api/v1/reviews/{sample_review.review_id}",
+        json={"rating": 5},
+    )
+    assert response.status_code == 401
+    assert "detail" in response.json()
+
+
+def test_patch_review_invalid_auth_scheme_returns_401(
+    client: TestClient, sample_review: Review
+):
+    """Updating a review with invalid auth header returns HTTP 401 Unauthorized."""
+    response = client.patch(
+        f"/api/v1/reviews/{sample_review.review_id}",
+        headers={"Authorization": "Basic invalid-token"},
+        json={"rating": 5},
+    )
+    assert response.status_code == 401
+
+
+def test_patch_review_suspended_user_returns_403(
+    client: TestClient, sample_centre: PreschoolCentre, suspended_user: User, test_engine
+):
+    """A suspended user attempting to update a review returns HTTP 403 Forbidden."""
+    assert sample_centre.centre_id is not None
+    assert suspended_user.user_id is not None
+    with Session(test_engine) as session:
+        rev = Review(
+            review_id=str(uuid.uuid4()),
+            centre_id=sample_centre.centre_id,
+            user_id=suspended_user.user_id,
+            rating=3,
+            review_description="Suspended user review.",
+            moderation_status=ModerationStatus.APPROVED,
+        )
+        session.add(rev)
+        session.commit()
+        session.refresh(rev)
+
+    set_mock_auth(suspended_user)
+    response = client.patch(
+        f"/api/v1/reviews/{rev.review_id}",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": 4},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Account is suspended."
+
+
+def test_patch_review_not_found_returns_404(
+    client: TestClient, sample_user: User
+):
+    """Updating a non-existent review returns HTTP 404 Not Found."""
+    set_mock_auth(sample_user)
+    response = client.patch(
+        "/api/v1/reviews/non-existent-review-id",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": 5},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Review not found"
+
+
+def test_patch_review_unauthorized_other_user_returns_403(
+    client: TestClient, sample_review: Review, other_user: User
+):
+    """A user attempting to update another user's review returns HTTP 403 Forbidden."""
+    set_mock_auth(other_user)
+    response = client.patch(
+        f"/api/v1/reviews/{sample_review.review_id}",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": 2, "review_description": "Tampered description."},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "You do not have permission to edit this review"
+
+
+def test_patch_review_success_update_rating_only(
+    client: TestClient, sample_review: Review, sample_user: User, test_engine
+):
+    """Author successfully updates only the rating; description remains unchanged and status remains APPROVED."""
+    set_mock_auth(sample_user)
+    response = client.patch(
+        f"/api/v1/reviews/{sample_review.review_id}",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": 5},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["review_id"] == sample_review.review_id
+    assert data["rating"] == 5
+    assert data["review_description"] == sample_review.review_description
+    assert data["moderation_status"] == ModerationStatus.APPROVED.value
+
+    # Verify database state
+    with Session(test_engine) as session:
+        updated = session.get(Review, sample_review.review_id)
+        assert updated is not None
+        assert updated.rating == 5
+        assert updated.review_description == sample_review.review_description
+        assert updated.moderation_status == ModerationStatus.APPROVED
+
+
+def test_patch_review_success_update_description_only(
+    client: TestClient, sample_review: Review, sample_user: User, test_engine
+):
+    """Author successfully updates only the description; rating remains unchanged."""
+    set_mock_auth(sample_user)
+    new_desc = "Updated comprehensive review notes."
+    response = client.patch(
+        f"/api/v1/reviews/{sample_review.review_id}",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"review_description": new_desc},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["review_id"] == sample_review.review_id
+    assert data["rating"] == sample_review.rating
+    assert data["review_description"] == new_desc
+    assert data["moderation_status"] == ModerationStatus.APPROVED.value
+
+    # Verify database state
+    with Session(test_engine) as session:
+        updated = session.get(Review, sample_review.review_id)
+        assert updated is not None
+        assert updated.rating == sample_review.rating
+        assert updated.review_description == new_desc
+
+
+def test_patch_review_success_update_both_fields(
+    client: TestClient, sample_review: Review, sample_user: User, test_engine
+):
+    """Author successfully updates both rating and description simultaneously."""
+    set_mock_auth(sample_user)
+    response = client.patch(
+        f"/api/v1/reviews/{sample_review.review_id}",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": 1, "review_description": "Service deteriorated significantly."},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["rating"] == 1
+    assert data["review_description"] == "Service deteriorated significantly."
+    assert data["moderation_status"] == ModerationStatus.APPROVED.value
+
+    # Verify database state
+    with Session(test_engine) as session:
+        updated = session.get(Review, sample_review.review_id)
+        assert updated is not None
+        assert updated.rating == 1
+        assert updated.review_description == "Service deteriorated significantly."
+
+
+def test_patch_review_success_clear_description(
+    client: TestClient, sample_review: Review, sample_user: User, test_engine
+):
+    """Author explicitly sets review_description to null, clearing it."""
+    set_mock_auth(sample_user)
+    response = client.patch(
+        f"/api/v1/reviews/{sample_review.review_id}",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"review_description": None},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["rating"] == sample_review.rating
+    assert data["review_description"] is None
+
+    # Verify database state
+    with Session(test_engine) as session:
+        updated = session.get(Review, sample_review.review_id)
+        assert updated is not None
+        assert updated.review_description is None
+
+
+@pytest.mark.parametrize("invalid_rating", [0, -1, 6, 10, 100])
+def test_patch_review_out_of_bounds_rating_returns_422(
+    client: TestClient, sample_review: Review, sample_user: User, invalid_rating: int, test_engine
+):
+    """Submitting rating outside 1..5 range returns HTTP 422 and does not modify the review."""
+    set_mock_auth(sample_user)
+    response = client.patch(
+        f"/api/v1/reviews/{sample_review.review_id}",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": invalid_rating},
+    )
+    assert response.status_code == 422
+
+    with Session(test_engine) as session:
+        unchanged = session.get(Review, sample_review.review_id)
+        assert unchanged is not None
+        assert unchanged.rating == sample_review.rating
+
+
+@pytest.mark.parametrize("invalid_rating_type", ["five", 4.5, None])
+def test_patch_review_invalid_rating_type_returns_422(
+    client: TestClient, sample_review: Review, sample_user: User, invalid_rating_type: object, test_engine
+):
+    """Submitting non-integer or null rating returns HTTP 422 and does not modify the review."""
+    set_mock_auth(sample_user)
+    response = client.patch(
+        f"/api/v1/reviews/{sample_review.review_id}",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": invalid_rating_type},
+    )
+    assert response.status_code == 422
+
+    with Session(test_engine) as session:
+        unchanged = session.get(Review, sample_review.review_id)
+        assert unchanged is not None
+        assert unchanged.rating == sample_review.rating
+
+
+def test_patch_review_recalculates_centre_aggregate_rating(
+    client: TestClient, sample_centre: PreschoolCentre, sample_user: User
+):
+    """Updating a review's rating immediately affects the public centre summary average rating."""
+    set_mock_auth(sample_user)
+
+    # 1. Create initial review with rating 4
+    r_post = client.post(
+        f"/api/v1/centres/{sample_centre.centre_id}/reviews",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": 4, "review_description": "Initial rating 4."},
+    )
+    assert r_post.status_code == 201
+    rev_id = r_post.json()["review_id"]
+
+    # Verify centre summary has 4.0
+    r_centre1 = client.get(f"/api/v1/centres/{sample_centre.centre_id}")
+    assert r_centre1.status_code == 200
+    assert r_centre1.json()["review_summary"]["average_rating"] == 4.0
+
+    # 2. Patch rating to 2
+    r_patch = client.patch(
+        f"/api/v1/reviews/{rev_id}",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": 2},
+    )
+    assert r_patch.status_code == 200
+
+    # 3. Verify centre summary immediately reflects 2.0
+    r_centre2 = client.get(f"/api/v1/centres/{sample_centre.centre_id}")
+    assert r_centre2.status_code == 200
+    assert r_centre2.json()["review_summary"]["average_rating"] == 2.0
+
