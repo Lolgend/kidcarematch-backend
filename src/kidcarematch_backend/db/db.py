@@ -210,7 +210,10 @@ class Review(SQLModel, table=True):
         CheckConstraint(f"moderation_status IN {tuple(status.value for status in ModerationStatus)}", name="ck_review_moderation_status"),
     )
 
-    review_id: Optional[str] = Field(default=None, primary_key=True)
+    review_id: str | None = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        primary_key=True,
+    )
     centre_id: int = Field(
         foreign_key="preschoolcentre.centre_id",
         ondelete="CASCADE",

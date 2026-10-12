@@ -1,12 +1,15 @@
 """Preschool centre API endpoints."""
 
+import uuid
 from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
+from kidcarematch_backend.auth.security import get_current_user
 from kidcarematch_backend.db.db import (
     CitizenshipType,
     ExternalDataSourceStatus,
@@ -15,6 +18,7 @@ from kidcarematch_backend.db.db import (
     PreschoolLevel,
     PreschoolService,
     Review,
+    User,
     VacancyRecord,
     get_session,
 )
@@ -28,6 +32,10 @@ from kidcarematch_backend.schemas.centre import (
     PreschoolServiceResponse,
     ReviewSummaryResponse,
     VacancyRecordResponse,
+)
+from kidcarematch_backend.schemas.review import (
+    ReviewCreateRequest,
+    ReviewResponse,
 )
 
 router = APIRouter(prefix="/api/v1/centres", tags=["centres"])
@@ -376,6 +384,68 @@ def list_centre_reviews(
         limit=limit,
         offset=offset,
     )
+
+
+@router.post(
+    "/{centre_id}/reviews",
+    response_model=ReviewResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Submit Preschool Centre Review",
+)
+def create_centre_review(
+    centre_id: int,
+    payload: ReviewCreateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
+) -> Review:
+    """Submit a 1-to-5 star rating and optional commentary for a preschool centre.
+
+    Requires an authenticated active user session.
+    Defaults newly submitted reviews to APPROVED moderation status (reactive moderation).
+    Enforces composite uniqueness per user and preschool centre (uq_review_centre_user).
+    """
+    get_centre_or_404(centre_id, session)
+
+    if not current_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User ID is missing from profile",
+        )
+
+    # Check composite uniqueness: one review per centre per user
+    existing_review = session.exec(
+        select(Review).where(
+            col(Review.centre_id) == centre_id,
+            col(Review.user_id) == current_user.user_id,
+        )
+    ).first()
+    if existing_review:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You have already submitted a review for this preschool centre",
+        )
+
+    review = Review(
+        review_id=str(uuid.uuid4()),
+        centre_id=centre_id,
+        user_id=current_user.user_id,
+        rating=payload.rating,
+        review_description=payload.review_description,
+        moderation_status=ModerationStatus.APPROVED,
+    )
+
+    try:
+        session.add(review)
+        session.commit()
+        session.refresh(review)
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You have already submitted a review for this preschool centre",
+        ) from exc
+
+    return review
 
 
 @router.get(
