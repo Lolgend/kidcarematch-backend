@@ -1117,3 +1117,268 @@ def test_patch_review_recalculates_centre_aggregate_rating(
     assert r_centre2.status_code == 200
     assert r_centre2.json()["review_summary"]["average_rating"] == 2.0
 
+
+# ==============================================================================
+# DELETE /api/v1/reviews/{review_id} Tests
+# ==============================================================================
+
+
+def test_delete_review_missing_auth_token_returns_401(
+    client: TestClient, sample_review: Review
+):
+    """Deleting a review without Authorization header returns HTTP 401 Unauthorized."""
+    response = client.delete(f"/api/v1/reviews/{sample_review.review_id}")
+    assert response.status_code == 401
+    assert "detail" in response.json()
+
+
+def test_delete_review_invalid_auth_scheme_returns_401(
+    client: TestClient, sample_review: Review
+):
+    """Deleting a review with invalid auth scheme returns HTTP 401 Unauthorized."""
+    response = client.delete(
+        f"/api/v1/reviews/{sample_review.review_id}",
+        headers={"Authorization": "Basic invalid-token"},
+    )
+    assert response.status_code == 401
+
+
+def test_delete_review_suspended_user_returns_403(
+    client: TestClient, sample_centre: PreschoolCentre, suspended_user: User, test_engine
+):
+    """A suspended user attempting to delete a review returns HTTP 403 Forbidden."""
+    assert sample_centre.centre_id is not None
+    assert suspended_user.user_id is not None
+    with Session(test_engine) as session:
+        rev = Review(
+            review_id=str(uuid.uuid4()),
+            centre_id=sample_centre.centre_id,
+            user_id=suspended_user.user_id,
+            rating=3,
+            review_description="Suspended user review.",
+            moderation_status=ModerationStatus.APPROVED,
+        )
+        session.add(rev)
+        session.commit()
+        session.refresh(rev)
+
+    set_mock_auth(suspended_user)
+    response = client.delete(
+        f"/api/v1/reviews/{rev.review_id}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Account is suspended."
+
+
+def test_delete_review_not_found_returns_404(
+    client: TestClient, sample_user: User
+):
+    """Deleting a non-existent review returns HTTP 404 Not Found."""
+    set_mock_auth(sample_user)
+    response = client.delete(
+        "/api/v1/reviews/non-existent-review-id",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Review not found"
+
+
+def test_delete_review_unauthorized_other_user_returns_403(
+    client: TestClient, sample_review: Review, other_user: User, test_engine
+):
+    """A user attempting to delete another user's review returns HTTP 403 Forbidden."""
+    set_mock_auth(other_user)
+    response = client.delete(
+        f"/api/v1/reviews/{sample_review.review_id}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "You do not have permission to delete this review"
+
+    # Confirm review is NOT deleted
+    with Session(test_engine) as session:
+        review_in_db = session.get(Review, sample_review.review_id)
+        assert review_in_db is not None
+
+
+def test_delete_review_success_returns_204_and_removes_from_db(
+    client: TestClient, sample_review: Review, sample_user: User, test_engine
+):
+    """Author successfully deletes their own review, returning HTTP 204 No Content and hard-deleting the record."""
+    set_mock_auth(sample_user)
+    response = client.delete(
+        f"/api/v1/reviews/{sample_review.review_id}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 204
+    assert response.content == b""
+
+    # Confirm record is permanently removed from the database
+    with Session(test_engine) as session:
+        review_in_db = session.get(Review, sample_review.review_id)
+        assert review_in_db is None
+
+
+def test_delete_review_removes_from_all_queries(
+    client: TestClient, sample_centre: PreschoolCentre, sample_user: User
+):
+    """After deletion, review is no longer accessible via single retrieval, user portfolio, or centre listings."""
+    set_mock_auth(sample_user)
+
+    # 1. Create a review
+    r_post = client.post(
+        f"/api/v1/centres/{sample_centre.centre_id}/reviews",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": 5, "review_description": "Top-notch centre!"},
+    )
+    assert r_post.status_code == 201
+    rev_id = r_post.json()["review_id"]
+
+    # Verify visible in single get
+    assert client.get(f"/api/v1/reviews/{rev_id}").status_code == 200
+
+    # Verify visible in /reviews/me
+    r_me = client.get("/api/v1/reviews/me", headers={"Authorization": "Bearer mock-token"})
+    assert r_me.status_code == 200
+    assert r_me.json()["total"] == 1
+    assert any(item["review_id"] == rev_id for item in r_me.json()["items"])
+
+    # Verify visible in /centres/{centre_id}/reviews
+    r_c_revs = client.get(f"/api/v1/centres/{sample_centre.centre_id}/reviews")
+    assert r_c_revs.status_code == 200
+    assert r_c_revs.json()["total"] == 1
+
+    # Verify visible in /centres/{centre_id}/reviews/mine
+    r_mine = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/reviews/mine",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert r_mine.status_code == 200
+
+    # 2. Delete the review
+    r_del = client.delete(
+        f"/api/v1/reviews/{rev_id}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert r_del.status_code == 204
+
+    # 3. Verify inaccessible everywhere
+    # GET /api/v1/reviews/{rev_id} -> 404
+    assert client.get(f"/api/v1/reviews/{rev_id}").status_code == 404
+
+    # GET /api/v1/reviews/me -> total 0
+    r_me_after = client.get("/api/v1/reviews/me", headers={"Authorization": "Bearer mock-token"})
+    assert r_me_after.status_code == 200
+    assert r_me_after.json()["total"] == 0
+    assert r_me_after.json()["items"] == []
+
+    # GET /api/v1/centres/{centre_id}/reviews -> total 0
+    r_c_after = client.get(f"/api/v1/centres/{sample_centre.centre_id}/reviews")
+    assert r_c_after.status_code == 200
+    assert r_c_after.json()["total"] == 0
+    assert r_c_after.json()["items"] == []
+
+    # GET /api/v1/centres/{centre_id}/reviews/mine -> 404
+    r_mine_after = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/reviews/mine",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert r_mine_after.status_code == 404
+
+
+def test_delete_review_recalculates_centre_aggregates(
+    client: TestClient, sample_centre: PreschoolCentre, sample_user: User, other_user: User
+):
+    """Deleting a review immediately recalculates public centre average_rating and total_reviews."""
+    # User 1 posts 5-star review
+    set_mock_auth(sample_user)
+    r1 = client.post(
+        f"/api/v1/centres/{sample_centre.centre_id}/reviews",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": 5, "review_description": "Awesome"},
+    )
+    assert r1.status_code == 201
+    rev1_id = r1.json()["review_id"]
+
+    # User 2 posts 3-star review
+    set_mock_auth(other_user)
+    r2 = client.post(
+        f"/api/v1/centres/{sample_centre.centre_id}/reviews",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": 3, "review_description": "Average"},
+    )
+    assert r2.status_code == 201
+    rev2_id = r2.json()["review_id"]
+
+    # Public summary has 2 reviews, average 4.0
+    summary = client.get(f"/api/v1/centres/{sample_centre.centre_id}").json()["review_summary"]
+    assert summary["total_reviews"] == 2
+    assert summary["average_rating"] == 4.0
+
+    # User 2 deletes their 3-star review
+    del_r = client.delete(
+        f"/api/v1/reviews/{rev2_id}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert del_r.status_code == 204
+
+    # Public summary immediately updates: total 1, average 5.0
+    summary_after = client.get(f"/api/v1/centres/{sample_centre.centre_id}").json()["review_summary"]
+    assert summary_after["total_reviews"] == 1
+    assert summary_after["average_rating"] == 5.0
+
+    # User 1 deletes their 5-star review
+    set_mock_auth(sample_user)
+    del_r1 = client.delete(
+        f"/api/v1/reviews/{rev1_id}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert del_r1.status_code == 204
+
+    # Public summary immediately updates: total 0, average None
+    summary_empty = client.get(f"/api/v1/centres/{sample_centre.centre_id}").json()["review_summary"]
+    assert summary_empty["total_reviews"] == 0
+    assert summary_empty["average_rating"] is None
+
+
+def test_delete_review_allows_author_to_resubmit_review(
+    client: TestClient, sample_centre: PreschoolCentre, sample_user: User
+):
+    """After deleting their review, the author can post a new review for the same centre without 409 Conflict."""
+    set_mock_auth(sample_user)
+    # 1. Post initial review
+    r_post1 = client.post(
+        f"/api/v1/centres/{sample_centre.centre_id}/reviews",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": 2, "review_description": "Initial bad review"},
+    )
+    assert r_post1.status_code == 201
+    rev_id = r_post1.json()["review_id"]
+
+    # 2. Duplicate submission fails with 409
+    r_dup = client.post(
+        f"/api/v1/centres/{sample_centre.centre_id}/reviews",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": 5, "review_description": "Another review"},
+    )
+    assert r_dup.status_code == 409
+
+    # 3. Delete initial review
+    r_del = client.delete(
+        f"/api/v1/reviews/{rev_id}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert r_del.status_code == 204
+
+    # 4. Post fresh review now succeeds with 201
+    r_post2 = client.post(
+        f"/api/v1/centres/{sample_centre.centre_id}/reviews",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": 5, "review_description": "Brand new fresh review"},
+    )
+    assert r_post2.status_code == 201
+    assert r_post2.json()["rating"] == 5
+    assert r_post2.json()["review_description"] == "Brand new fresh review"
+
+
