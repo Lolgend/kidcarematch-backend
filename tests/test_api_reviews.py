@@ -1,6 +1,7 @@
 """Tests for Preschool Centre Review Submission and Review API endpoints."""
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -387,3 +388,411 @@ def test_create_review_immediately_reflected_in_public_endpoints(
     assert data_list["items"][0]["review_id"] == created_review_id
     assert data_list["items"][0]["rating"] == 5
     assert data_list["items"][0]["comment"] == "Immediate public feedback!"
+
+
+# ==============================================================================
+# GET /api/v1/centres/{centre_id}/reviews/mine Tests
+# ==============================================================================
+
+
+def test_get_centre_review_mine_missing_auth_returns_401(
+    client: TestClient, sample_centre: PreschoolCentre
+):
+    """Retrieving author review without Authorization header must return HTTP 401 Unauthorized."""
+    response = client.get(f"/api/v1/centres/{sample_centre.centre_id}/reviews/mine")
+    assert response.status_code == 401
+
+
+def test_get_centre_review_mine_suspended_user_returns_403(
+    client: TestClient, sample_centre: PreschoolCentre, suspended_user: User
+):
+    """Retrieving author review by a suspended user must return HTTP 403 Forbidden."""
+    set_mock_auth(suspended_user)
+    response = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/reviews/mine",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Account is suspended."
+
+
+def test_get_centre_review_mine_centre_not_found_returns_404(
+    client: TestClient, sample_user: User
+):
+    """Retrieving author review for non-existent centre must return HTTP 404 Not Found."""
+    set_mock_auth(sample_user)
+    response = client.get(
+        "/api/v1/centres/99999/reviews/mine",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Preschool centre not found"
+
+
+def test_get_centre_review_mine_no_review_exists_returns_404(
+    client: TestClient, sample_centre: PreschoolCentre, sample_user: User
+):
+    """Retrieving author review when no review was submitted must return HTTP 404 Not Found."""
+    set_mock_auth(sample_user)
+    response = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/reviews/mine",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Review not found"
+
+
+def test_get_centre_review_mine_success(
+    client: TestClient, sample_centre: PreschoolCentre, sample_user: User, test_engine
+):
+    """Retrieving author review when review exists returns HTTP 200 OK with ReviewResponse."""
+    assert sample_centre.centre_id is not None
+    assert sample_user.user_id is not None
+
+    with Session(test_engine) as session:
+        review = Review(
+            review_id=str(uuid.uuid4()),
+            centre_id=sample_centre.centre_id,
+            user_id=sample_user.user_id,
+            rating=5,
+            review_description="Loved this centre!",
+            moderation_status=ModerationStatus.APPROVED,
+        )
+        session.add(review)
+        session.commit()
+        session.refresh(review)
+        review_id = review.review_id
+
+    set_mock_auth(sample_user)
+    response = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/reviews/mine",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["review_id"] == review_id
+    assert data["centre_id"] == sample_centre.centre_id
+    assert data["user_id"] == sample_user.user_id
+    assert data["rating"] == 5
+    assert data["review_description"] == "Loved this centre!"
+    assert data["moderation_status"] == ModerationStatus.APPROVED.value
+
+
+def test_get_centre_review_mine_does_not_return_other_user_review(
+    client: TestClient, sample_centre: PreschoolCentre, sample_user: User, test_engine
+):
+    """Retrieving author review isolates reviews per user, not leaking other users' reviews."""
+    assert sample_centre.centre_id is not None
+
+    with Session(test_engine) as session:
+        other_user = User(
+            user_id="usr_other_01",
+            firebase_uid="fb_other_01",
+            email="other@example.com",
+            full_name="Bob Other",
+            role=UserRole.PARENT,
+            account_status=AccountStatus.ACTIVE,
+        )
+        session.add(other_user)
+        session.commit()
+        session.refresh(other_user)
+        assert other_user.user_id is not None
+
+        review = Review(
+            review_id=str(uuid.uuid4()),
+            centre_id=sample_centre.centre_id,
+            user_id=other_user.user_id,
+            rating=4,
+            review_description="Other user review",
+            moderation_status=ModerationStatus.APPROVED,
+        )
+        session.add(review)
+        session.commit()
+
+    # Querying as sample_user should return 404 since sample_user hasn't reviewed
+    set_mock_auth(sample_user)
+    response = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/reviews/mine",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Review not found"
+
+
+def test_get_centre_review_mine_returns_own_review_regardless_of_moderation_status(
+    client: TestClient, sample_centre: PreschoolCentre, sample_user: User, test_engine
+):
+    """Author can retrieve their own review even if moderation_status is PENDING or REJECTED."""
+    assert sample_centre.centre_id is not None
+    assert sample_user.user_id is not None
+
+    with Session(test_engine) as session:
+        review = Review(
+            review_id=str(uuid.uuid4()),
+            centre_id=sample_centre.centre_id,
+            user_id=sample_user.user_id,
+            rating=2,
+            review_description="Under review commentary",
+            moderation_status=ModerationStatus.PENDING,
+        )
+        session.add(review)
+        session.commit()
+        session.refresh(review)
+        review_id = review.review_id
+
+    set_mock_auth(sample_user)
+    response = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/reviews/mine",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["review_id"] == review_id
+    assert data["moderation_status"] == ModerationStatus.PENDING.value
+
+
+# ==============================================================================
+# GET /api/v1/reviews/me Tests
+# ==============================================================================
+
+
+def test_get_my_reviews_missing_auth_returns_401(client: TestClient):
+    """Accessing parent review portfolio without auth header must return HTTP 401 Unauthorized."""
+    response = client.get("/api/v1/reviews/me")
+    assert response.status_code == 401
+
+
+def test_get_my_reviews_suspended_user_returns_403(
+    client: TestClient, suspended_user: User
+):
+    """Accessing parent review portfolio with suspended account must return HTTP 403 Forbidden."""
+    set_mock_auth(suspended_user)
+    response = client.get(
+        "/api/v1/reviews/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Account is suspended."
+
+
+def test_get_my_reviews_empty_returns_200(client: TestClient, sample_user: User):
+    """When parent has not authored any reviews, returns 200 OK with empty items list and total 0."""
+    set_mock_auth(sample_user)
+    response = client.get(
+        "/api/v1/reviews/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["items"] == []
+    assert data["total"] == 0
+    assert data["limit"] == 20
+    assert data["offset"] == 0
+
+
+def test_get_my_reviews_success_with_centre_metadata(
+    client: TestClient, sample_user: User, test_engine
+):
+    """Returns parent portfolio reviews enriched with centre metadata (centre_name)."""
+    assert sample_user.user_id is not None
+
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(centre_code="CTR_P_01", centre_name="Sunflower Montessori")
+        c2 = PreschoolCentre(centre_code="CTR_P_02", centre_name="Rainbow Preschool")
+        session.add_all([c1, c2])
+        session.commit()
+        session.refresh(c1)
+        session.refresh(c2)
+        assert c1.centre_id is not None
+        assert c2.centre_id is not None
+
+        r1 = Review(
+            review_id=str(uuid.uuid4()),
+            centre_id=c1.centre_id,
+            user_id=sample_user.user_id,
+            rating=5,
+            review_description="Outstanding teachers!",
+            moderation_status=ModerationStatus.APPROVED,
+            created_at=datetime.now(timezone.utc) - timedelta(days=2),
+        )
+        r2 = Review(
+            review_id=str(uuid.uuid4()),
+            centre_id=c2.centre_id,
+            user_id=sample_user.user_id,
+            rating=3,
+            review_description="Average facilities.",
+            moderation_status=ModerationStatus.PENDING,
+            created_at=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        session.add_all([r1, r2])
+        session.commit()
+
+    set_mock_auth(sample_user)
+    response = client.get(
+        "/api/v1/reviews/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 2
+    assert len(data["items"]) == 2
+
+    # Newest created_at should be first (r2 was created 1 day ago, r1 was created 2 days ago)
+    assert data["items"][0]["centre_name"] == "Rainbow Preschool"
+    assert data["items"][0]["rating"] == 3
+    assert data["items"][0]["review_description"] == "Average facilities."
+    assert data["items"][0]["moderation_status"] == ModerationStatus.PENDING.value
+
+    assert data["items"][1]["centre_name"] == "Sunflower Montessori"
+    assert data["items"][1]["rating"] == 5
+    assert data["items"][1]["review_description"] == "Outstanding teachers!"
+    assert data["items"][1]["moderation_status"] == ModerationStatus.APPROVED.value
+
+
+def test_get_my_reviews_user_isolation(
+    client: TestClient, sample_user: User, test_engine
+):
+    """Parent portfolio only returns reviews written by current authenticated user."""
+    assert sample_user.user_id is not None
+
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(centre_code="CTR_ISO_01", centre_name="Isolation Centre")
+        other_user = User(
+            user_id="usr_iso_other",
+            firebase_uid="fb_iso_other",
+            email="iso_other@example.com",
+            full_name="Other Parent",
+            role=UserRole.PARENT,
+            account_status=AccountStatus.ACTIVE,
+        )
+        session.add_all([centre, other_user])
+        session.commit()
+        session.refresh(centre)
+        session.refresh(other_user)
+        assert centre.centre_id is not None
+        assert other_user.user_id is not None
+
+        r_mine = Review(
+            review_id=str(uuid.uuid4()),
+            centre_id=centre.centre_id,
+            user_id=sample_user.user_id,
+            rating=4,
+            review_description="My review",
+            moderation_status=ModerationStatus.APPROVED,
+        )
+        r_other = Review(
+            review_id=str(uuid.uuid4()),
+            centre_id=centre.centre_id,
+            user_id=other_user.user_id,
+            rating=1,
+            review_description="Other's review",
+            moderation_status=ModerationStatus.APPROVED,
+        )
+        session.add_all([r_mine, r_other])
+        session.commit()
+
+    set_mock_auth(sample_user)
+    response = client.get(
+        "/api/v1/reviews/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert len(data["items"]) == 1
+    assert data["items"][0]["review_description"] == "My review"
+
+
+def test_get_my_reviews_pagination_and_ordering(
+    client: TestClient, sample_user: User, test_engine
+):
+    """Reviews pagination supports limit and offset parameters and orders desc by created_at."""
+    assert sample_user.user_id is not None
+
+    with Session(test_engine) as session:
+        centres = []
+        for i in range(5):
+            c = PreschoolCentre(centre_code=f"CTR_PAG_{i}", centre_name=f"Centre {i}")
+            session.add(c)
+            centres.append(c)
+        session.commit()
+        for c in centres:
+            session.refresh(c)
+
+        now = datetime.now(timezone.utc)
+        reviews = []
+        for i, c in enumerate(centres):
+            assert c.centre_id is not None
+            r = Review(
+                review_id=f"rev_pag_{i}",
+                centre_id=c.centre_id,
+                user_id=sample_user.user_id,
+                rating=i + 1,
+                review_description=f"Review #{i}",
+                moderation_status=ModerationStatus.APPROVED,
+                created_at=now + timedelta(minutes=i),
+            )
+            reviews.append(r)
+            session.add(r)
+        session.commit()
+
+    set_mock_auth(sample_user)
+
+    # Page 1: limit=2, offset=0 (should have reviews 4 and 3)
+    r_page1 = client.get(
+        "/api/v1/reviews/me?limit=2&offset=0",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert r_page1.status_code == 200
+    d1 = r_page1.json()
+    assert d1["total"] == 5
+    assert d1["limit"] == 2
+    assert d1["offset"] == 0
+    assert len(d1["items"]) == 2
+    assert d1["items"][0]["review_id"] == "rev_pag_4"
+    assert d1["items"][1]["review_id"] == "rev_pag_3"
+
+    # Page 2: limit=2, offset=2 (should have reviews 2 and 1)
+    r_page2 = client.get(
+        "/api/v1/reviews/me?limit=2&offset=2",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert r_page2.status_code == 200
+    d2 = r_page2.json()
+    assert d2["total"] == 5
+    assert len(d2["items"]) == 2
+    assert d2["items"][0]["review_id"] == "rev_pag_2"
+    assert d2["items"][1]["review_id"] == "rev_pag_1"
+
+    # Page 3: limit=2, offset=4 (should have review 0)
+    r_page3 = client.get(
+        "/api/v1/reviews/me?limit=2&offset=4",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert r_page3.status_code == 200
+    d3 = r_page3.json()
+    assert d3["total"] == 5
+    assert len(d3["items"]) == 1
+    assert d3["items"][0]["review_id"] == "rev_pag_0"
+
+
+@pytest.mark.parametrize(
+    "invalid_param",
+    [
+        "limit=0",
+        "limit=-5",
+        "limit=101",
+        "offset=-1",
+    ],
+)
+def test_get_my_reviews_pagination_validation(
+    client: TestClient, sample_user: User, invalid_param: str
+):
+    """Invalid limit (<1 or >100) or offset (<0) returns HTTP 422 Unprocessable Entity."""
+    set_mock_auth(sample_user)
+    response = client.get(
+        f"/api/v1/reviews/me?{invalid_param}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 422
+
