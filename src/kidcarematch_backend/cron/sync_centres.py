@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from sqlmodel import Session, SQLModel, select
+from sqlmodel import Session, select
 
 from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.db.db import (
@@ -107,7 +107,7 @@ def parse_datetime(val: Any) -> datetime | None:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
-    except Exception:
+    except (ValueError, TypeError):
         logger.warning("Could not parse datetime value: %r", val)
         return None
 
@@ -594,8 +594,7 @@ def sync_centres(
                                     )
                                 )
                         session.flush()
-                        if old_code in existing_centres:
-                            del existing_centres[old_code]
+                        existing_centres.pop(old_code, None)
                         existing_centres[centre_code] = centre
 
                     centre.centre_name = name
@@ -725,8 +724,8 @@ def sync_centres(
         logger.info("Sync completed: %s", stats)
         return stats
 
-    except Exception as exc:
-        logger.exception("Sync execution failed for %s: %s", ECDA_DATASTORE_SOURCE_ID, exc)
+    except Exception:
+        logger.exception("Sync execution failed for %s", ECDA_DATASTORE_SOURCE_ID)
         if not dry_run:
             failure_trace = traceback.format_exc()
             update_data_source_status(
@@ -762,8 +761,8 @@ def main() -> None:
         sync_centres(max_records=args.limit, dry_run=args.dry_run)
         elapsed = time.time() - start_time
         logger.info("Job finished in %.2f seconds.", elapsed)
-    except Exception as exc:
-        logger.exception("Sync job failed: %s", exc)
+    except Exception:
+        logger.exception("Sync job failed")
         sys.exit(1)
 
 

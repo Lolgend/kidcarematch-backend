@@ -1,10 +1,20 @@
 import uuid
+from collections.abc import Generator
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Generator, Optional
+from typing import Any
+
 from pydantic import field_validator
 from sqlalchemy.orm import validates
-from sqlmodel import CheckConstraint, Field, Relationship, Session, SQLModel, UniqueConstraint, create_engine
+from sqlmodel import (
+    CheckConstraint,
+    Field,
+    Relationship,
+    Session,
+    SQLModel,
+    UniqueConstraint,
+    create_engine,
+)
 
 from kidcarematch_backend.core.config import settings
 
@@ -68,23 +78,23 @@ class PreschoolLevel(str, Enum):
     STUDENT_CARE = "student_care"
 
 class PreschoolCentre(SQLModel, table=True):
-    centre_id: Optional[int] = Field(default=None, primary_key=True)
+    centre_id: int | None = Field(default=None, primary_key=True)
     centre_code: str = Field(index=True, unique=True)
     centre_name: str = Field(index=True)
-    contact: Optional[str] = None
-    email: Optional[str] = None
-    postal: Optional[str] = None
-    website_url: Optional[str] = None
-    food_offered: Optional[str] = None
-    address: Optional[str] = None
-    second_languages: Optional[str] = None
+    contact: str | None = None
+    email: str | None = None
+    postal: str | None = None
+    website_url: str | None = None
+    food_offered: str | None = None
+    address: str | None = None
+    second_languages: str | None = None
     spark_certified: bool = Field(default=False)
-    weekday_full_day_hours: Optional[str] = None
-    saturday_hours: Optional[str] = None
+    weekday_full_day_hours: str | None = None
+    saturday_hours: str | None = None
     extended_operating_hours: bool = Field(default=False)
     transport_provided: bool = Field(default=False)
     gov_subsidy: bool = Field(default=False)
-    last_updated: Optional[datetime] = Field(default=None)
+    last_updated: datetime | None = Field(default=None)
 
     # 1-to-many relationships with cascade deletion
     vacancies: list["VacancyRecord"] = Relationship(
@@ -106,7 +116,7 @@ class PreschoolCentre(SQLModel, table=True):
 
 
 class VacancyRecord(SQLModel, table=True):
-    record_id: Optional[str] = Field(default=None, primary_key=True)
+    record_id: str | None = Field(default=None, primary_key=True)
     centre_id: int = Field(
         foreign_key="preschoolcentre.centre_id",
         ondelete="CASCADE",
@@ -117,7 +127,7 @@ class VacancyRecord(SQLModel, table=True):
     enrollment_month_year: datetime
     vacancy_status: str
 
-    centre: Optional[PreschoolCentre] = Relationship(back_populates="vacancies")
+    centre: PreschoolCentre | None = Relationship(back_populates="vacancies")
 
 
 class PreschoolService(SQLModel, table=True):
@@ -131,7 +141,7 @@ class PreschoolService(SQLModel, table=True):
         ),
     )
 
-    service_id: Optional[int] = Field(default=None, primary_key=True)
+    service_id: int | None = Field(default=None, primary_key=True)
     centre_id: int = Field(
         foreign_key="preschoolcentre.centre_id",
         ondelete="CASCADE",
@@ -142,14 +152,14 @@ class PreschoolService(SQLModel, table=True):
     level: PreschoolLevel = Field(index=True)
     fee: float
     citizenship_type: CitizenshipType = Field(default=CitizenshipType.OTHERS, index=True)
-    last_updated: Optional[datetime] = Field(default=None)
-    remarks: Optional[str] = Field(default=None, max_length=1000)
+    last_updated: datetime | None = Field(default=None)
+    remarks: str | None = Field(default=None, max_length=1000)
 
-    centre: Optional[PreschoolCentre] = Relationship(back_populates="services")
+    centre: PreschoolCentre | None = Relationship(back_populates="services")
 
 
 class User(SQLModel, table=True):
-    user_id: Optional[str] = Field(
+    user_id: str | None = Field(
         default_factory=lambda: str(uuid.uuid4()),
         primary_key=True,
     )
@@ -158,7 +168,7 @@ class User(SQLModel, table=True):
     full_name: str
     role: UserRole = Field(default=UserRole.PARENT, index=True)
     account_status: AccountStatus = Field(default=AccountStatus.ACTIVE)
-    admin_level: Optional[int] = Field(default=None)
+    admin_level: int | None = Field(default=None)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         nullable=False,
@@ -184,14 +194,14 @@ class User(SQLModel, table=True):
 
 
 class FamilyPreferenceProfile(SQLModel, table=True):
-    profile_id: Optional[str] = Field(default=None, primary_key=True)
+    profile_id: str | None = Field(default=None, primary_key=True)
     user_id: str = Field(foreign_key="user.user_id", ondelete="CASCADE", nullable=False, index=True)
     profile_name: str
     level: PreschoolLevel = Field(index=True)
     citizenship_status: CitizenshipType = Field(default=CitizenshipType.SC, index=True)
     service_required: str = Field(index=True)
     home_postal_code: str = Field()
-    workplace_postal_code: Optional[str] = Field(default=None)
+    workplace_postal_code: str | None = Field(default=None)
     location_preference: LocationPreference = Field(default=LocationPreference.HOME)
     household_income: float = Field()
     household_member_count: int = Field()
@@ -200,7 +210,7 @@ class FamilyPreferenceProfile(SQLModel, table=True):
     cost_weight: float = Field(default=0.5)
     travel_weight: float = Field(default=0.5)
 
-    user: Optional[User] = Relationship(back_populates="preference_profiles")
+    user: User | None = Relationship(back_populates="preference_profiles")
 
 
 class Review(SQLModel, table=True):
@@ -222,17 +232,17 @@ class Review(SQLModel, table=True):
     )
     user_id: str = Field(foreign_key="user.user_id", nullable=False, ondelete="CASCADE", index=True)
     rating: int = Field(ge=1, le=5)
-    review_description: Optional[str] = Field(default=None)
+    review_description: str | None = Field(default=None)
     moderation_status: ModerationStatus = Field(default=ModerationStatus.PENDING, index=True)
-    moderated_at: Optional[datetime] = Field(default=None)
-    moderated_by: Optional[str] = Field(default=None, foreign_key="user.user_id")
+    moderated_at: datetime | None = Field(default=None)
+    moderated_by: str | None = Field(default=None, foreign_key="user.user_id")
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
 
-    centre: Optional[PreschoolCentre] = Relationship(back_populates="reviews")
-    user: Optional[User] = Relationship(
+    centre: PreschoolCentre | None = Relationship(back_populates="reviews")
+    user: User | None = Relationship(
         back_populates="reviews",
         sa_relationship_kwargs={"foreign_keys": "[Review.user_id]"},
     )
@@ -260,7 +270,7 @@ class WatchlistEntry(SQLModel, table=True):
         ),
     )
 
-    watchlist_id: Optional[str] = Field(default=None, primary_key=True)
+    watchlist_id: str | None = Field(default=None, primary_key=True)
     user_id: str = Field(foreign_key="user.user_id", ondelete="CASCADE", nullable=False, index=True)
     centre_id: int = Field(
         foreign_key="preschoolcentre.centre_id",
@@ -271,32 +281,32 @@ class WatchlistEntry(SQLModel, table=True):
     level: PreschoolLevel = Field(index=True)
     enrollment_month_year: datetime = Field(index=True)
 
-    centre: Optional[PreschoolCentre] = Relationship(back_populates="watchlist_entries")
-    user: Optional[User] = Relationship(back_populates="watchlist_entries")
+    centre: PreschoolCentre | None = Relationship(back_populates="watchlist_entries")
+    user: User | None = Relationship(back_populates="watchlist_entries")
 
 
 class SubsidyRule(SQLModel, table=True):
-    rule_id: Optional[str] = Field(default=None, primary_key=True)
+    rule_id: str | None = Field(default=None, primary_key=True)
     subsidy_name: str = Field(index=True)
-    tier_name: Optional[str] = Field(default=None)
+    tier_name: str | None = Field(default=None)
     care_type: CareType = Field(index=True)
     metric: SubsidyMetric = Field(index=True)
-    applicant_status: Optional[ApplicantStatus] = Field(default=None, index=True)
+    applicant_status: ApplicantStatus | None = Field(default=None, index=True)
     citizenship: CitizenshipType = Field(default=CitizenshipType.SC, index=True)
-    income_min: Optional[float] = Field(default=None)
-    income_max: Optional[float] = Field(default=None)
+    income_min: float | None = Field(default=None)
+    income_max: float | None = Field(default=None)
     subsidy_amount: float
-    effective_date: Optional[datetime] = Field(default=None)
+    effective_date: datetime | None = Field(default=None)
 
 
 class ExternalDataSourceStatus(SQLModel, table=True):
     source_id: str = Field(primary_key=True)
     source_name: str
     sync_state: SyncState = Field(default=SyncState.IDLE)
-    last_successful_sync: Optional[datetime] = Field(default=None)
-    last_attempted_sync: Optional[datetime] = Field(default=None)
+    last_successful_sync: datetime | None = Field(default=None)
+    last_attempted_sync: datetime | None = Field(default=None)
     records_processed: int = Field(default=0)
-    error_message: Optional[str] = Field(default=None, max_length=1000)
+    error_message: str | None = Field(default=None, max_length=1000)
 
 
 database_url = settings.DATABASE_URL
