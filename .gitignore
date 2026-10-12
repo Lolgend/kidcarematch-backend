@@ -22,3 +22,6 @@ wheels/
 .scratch/
 .ruff_cache
 specs/
+
+# Secrets
+firebase_svc_acc.json
