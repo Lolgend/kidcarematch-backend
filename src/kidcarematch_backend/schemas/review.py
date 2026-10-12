@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kidcarematch_backend.db.db import ModerationStatus
 
@@ -30,6 +30,13 @@ class ReviewUpdateRequest(BaseModel):
         default=None,
         description="Optional text commentary from the parent",
     )
+
+    @field_validator("rating")
+    @classmethod
+    def validate_rating(cls, v: int | None) -> int | None:
+        if v is None:
+            raise ValueError("Rating cannot be null")
+        return v
 
 
 class ReviewResponse(BaseModel):
