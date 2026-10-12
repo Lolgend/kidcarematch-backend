@@ -1,7 +1,7 @@
 """Tests for Cohort Watchlist Subscription API endpoints (POST /api/v1/watchlist)."""
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,8 +12,11 @@ from kidcarematch_backend.auth.security import FirebaseTokenClaims, get_token_cl
 from kidcarematch_backend.db.db import (
     AccountStatus,
     PreschoolCentre,
+    PreschoolLevel,
     User,
     UserRole,
+    VacancyRecord,
+    WatchlistEntry,
     get_session,
     init_db,
 )
@@ -445,3 +448,432 @@ def test_create_watchlist_same_parent_different_months_success(
     )
     assert resp_apr.status_code == 201
     assert resp_mar.json()["watchlist_id"] != resp_apr.json()["watchlist_id"]
+
+
+# ==============================================================================
+# GET /api/v1/watchlist/me Tests (Ticket #35)
+# ==============================================================================
+
+
+def test_get_my_watchlist_missing_auth_returns_401(client: TestClient):
+    """Retrieving watchlist portfolio without Authorization header returns 401."""
+    response = client.get("/api/v1/watchlist/me")
+    assert response.status_code == 401
+    assert "detail" in response.json()
+
+
+def test_get_my_watchlist_invalid_auth_scheme_returns_401(client: TestClient):
+    """Retrieving watchlist portfolio with non-Bearer auth scheme returns 401."""
+    response = client.get(
+        "/api/v1/watchlist/me",
+        headers={"Authorization": "Basic invalid-token"},
+    )
+    assert response.status_code == 401
+
+
+def test_get_my_watchlist_suspended_user_returns_403(
+    client: TestClient, suspended_user: User
+):
+    """Retrieving watchlist portfolio as a suspended user returns 403."""
+    set_mock_auth(suspended_user)
+    response = client.get(
+        "/api/v1/watchlist/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Account is suspended."
+
+
+def test_get_my_watchlist_empty_returns_total_0(
+    client: TestClient, sample_user: User
+):
+    """Parent with no active watchlist entries receives empty items and total=0."""
+    set_mock_auth(sample_user)
+    response = client.get(
+        "/api/v1/watchlist/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["items"] == []
+    assert data["total"] == 0
+    assert data["limit"] == 20
+    assert data["offset"] == 0
+
+
+def test_get_my_watchlist_user_isolation(
+    client: TestClient,
+    test_engine,
+    sample_centre: PreschoolCentre,
+    sample_user: User,
+    second_user: User,
+):
+    """Parents only see their own watchlist subscriptions, never other parents'."""
+    assert sample_user.user_id is not None
+    assert second_user.user_id is not None
+    assert sample_centre.centre_id is not None
+    with Session(test_engine) as session:
+        # Create 2 entries for sample_user (Alice)
+        entry1 = WatchlistEntry(
+            user_id=sample_user.user_id,
+            centre_id=sample_centre.centre_id,
+            level=PreschoolLevel.INFANT,
+            enrollment_month_year=datetime(2027, 3, 1, tzinfo=timezone.utc),
+        )
+        entry2 = WatchlistEntry(
+            user_id=sample_user.user_id,
+            centre_id=sample_centre.centre_id,
+            level=PreschoolLevel.PG,
+            enrollment_month_year=datetime(2027, 4, 1, tzinfo=timezone.utc),
+        )
+        # Create 1 entry for second_user (Bob)
+        entry3 = WatchlistEntry(
+            user_id=second_user.user_id,
+            centre_id=sample_centre.centre_id,
+            level=PreschoolLevel.N1,
+            enrollment_month_year=datetime(2027, 5, 1, tzinfo=timezone.utc),
+        )
+        session.add_all([entry1, entry2, entry3])
+        session.commit()
+
+    # Query as Alice
+    set_mock_auth(sample_user)
+    resp_alice = client.get(
+        "/api/v1/watchlist/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert resp_alice.status_code == 200
+    alice_data = resp_alice.json()
+    assert alice_data["total"] == 2
+    assert len(alice_data["items"]) == 2
+    alice_levels = {item["level"] for item in alice_data["items"]}
+    assert alice_levels == {"infant", "pg"}
+
+    # Query as Bob
+    set_mock_auth(second_user)
+    resp_bob = client.get(
+        "/api/v1/watchlist/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert resp_bob.status_code == 200
+    bob_data = resp_bob.json()
+    assert bob_data["total"] == 1
+    assert len(bob_data["items"]) == 1
+    assert bob_data["items"][0]["level"] == "n1"
+
+
+def test_get_my_watchlist_enriched_centre_metadata(
+    client: TestClient,
+    test_engine,
+    sample_user: User,
+):
+    """Returned items include enriched centre metadata and preschool flags."""
+    assert sample_user.user_id is not None
+    with Session(test_engine) as session:
+        rich_centre = PreschoolCentre(
+            centre_code="PC_RICH_01",
+            centre_name="Sunny Hill Discovery",
+            postal="123456",
+            address="10 Orchard Boulevard #01-01",
+            spark_certified=True,
+            gov_subsidy=True,
+        )
+        session.add(rich_centre)
+        session.commit()
+        session.refresh(rich_centre)
+        assert rich_centre.centre_id is not None
+
+        entry = WatchlistEntry(
+            user_id=sample_user.user_id,
+            centre_id=rich_centre.centre_id,
+            level=PreschoolLevel.INFANT,
+            enrollment_month_year=datetime(2027, 6, 1, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.commit()
+        session.refresh(entry)
+        rich_centre_id = rich_centre.centre_id
+        entry_id = entry.watchlist_id
+
+    set_mock_auth(sample_user)
+    response = client.get(
+        "/api/v1/watchlist/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    item = data["items"][0]
+    assert item["watchlist_id"] == entry_id
+    assert item["centre_id"] == rich_centre_id
+    assert item["centre_name"] == "Sunny Hill Discovery"
+    assert item["centre_code"] == "PC_RICH_01"
+    assert item["postal"] == "123456"
+    assert item["address"] == "10 Orchard Boulevard #01-01"
+    assert item["spark_certified"] is True
+    assert item["gov_subsidy"] is True
+    assert item["level"] == "infant"
+    assert item["enrollment_month_year"].startswith("2027-06-01")
+    assert item["current_vacancy_status"] is None
+
+
+def test_get_my_watchlist_with_matching_vacancy_status(
+    client: TestClient,
+    test_engine,
+    sample_centre: PreschoolCentre,
+    sample_user: User,
+):
+    """current_vacancy_status is populated when matching VacancyRecord exists."""
+    assert sample_user.user_id is not None
+    assert sample_centre.centre_id is not None
+    month = datetime(2027, 7, 1, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        vacancy = VacancyRecord(
+            record_id="vac_test_01",
+            centre_id=sample_centre.centre_id,
+            level_type=PreschoolLevel.N1,
+            enrollment_month_year=month,
+            vacancy_status="Immediate Vacancy",
+        )
+        entry = WatchlistEntry(
+            user_id=sample_user.user_id,
+            centre_id=sample_centre.centre_id,
+            level=PreschoolLevel.N1,
+            enrollment_month_year=month,
+        )
+        session.add_all([vacancy, entry])
+        session.commit()
+
+    set_mock_auth(sample_user)
+    response = client.get(
+        "/api/v1/watchlist/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert data["items"][0]["current_vacancy_status"] == "Immediate Vacancy"
+
+
+def test_get_my_watchlist_without_vacancy_status_returns_null(
+    client: TestClient,
+    test_engine,
+    sample_centre: PreschoolCentre,
+    sample_user: User,
+):
+    """current_vacancy_status is null when no VacancyRecord exists for that cohort."""
+    assert sample_user.user_id is not None
+    assert sample_centre.centre_id is not None
+    with Session(test_engine) as session:
+        entry = WatchlistEntry(
+            user_id=sample_user.user_id,
+            centre_id=sample_centre.centre_id,
+            level=PreschoolLevel.PG,
+            enrollment_month_year=datetime(2027, 8, 1, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.commit()
+
+    set_mock_auth(sample_user)
+    response = client.get(
+        "/api/v1/watchlist/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert data["items"][0]["current_vacancy_status"] is None
+
+
+def test_get_my_watchlist_vacancy_mismatched_cohort_or_month_returns_null(
+    client: TestClient,
+    test_engine,
+    sample_centre: PreschoolCentre,
+    sample_user: User,
+):
+    """VacancyRecord only matches when centre_id, level, AND month all match."""
+    assert sample_user.user_id is not None
+    assert sample_centre.centre_id is not None
+    month = datetime(2027, 9, 1, tzinfo=timezone.utc)
+    other_month = datetime(2027, 10, 1, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        # Vacancy exists for PG in month 9, and Infant in month 10
+        vac1 = VacancyRecord(
+            record_id="vac_mismatch_01",
+            centre_id=sample_centre.centre_id,
+            level_type=PreschoolLevel.PG,
+            enrollment_month_year=month,
+            vacancy_status="Available PG",
+        )
+        vac2 = VacancyRecord(
+            record_id="vac_mismatch_02",
+            centre_id=sample_centre.centre_id,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=other_month,
+            vacancy_status="Available Oct Infant",
+        )
+        # Entry is Infant in month 9 (level mismatch with vac1, month mismatch with vac2)
+        entry = WatchlistEntry(
+            user_id=sample_user.user_id,
+            centre_id=sample_centre.centre_id,
+            level=PreschoolLevel.INFANT,
+            enrollment_month_year=month,
+        )
+        session.add_all([vac1, vac2, entry])
+        session.commit()
+
+    set_mock_auth(sample_user)
+    response = client.get(
+        "/api/v1/watchlist/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert data["items"][0]["current_vacancy_status"] is None
+
+
+def test_get_my_watchlist_sorted_chronologically_by_month_and_id(
+    client: TestClient,
+    test_engine,
+    sample_centre: PreschoolCentre,
+    sample_user: User,
+):
+    """Items are sorted by enrollment_month_year ASC, then watchlist_id ASC."""
+    assert sample_user.user_id is not None
+    assert sample_centre.centre_id is not None
+    with Session(test_engine) as session:
+        entry_late = WatchlistEntry(
+            watchlist_id="wl_id_3_late",
+            user_id=sample_user.user_id,
+            centre_id=sample_centre.centre_id,
+            level=PreschoolLevel.INFANT,
+            enrollment_month_year=datetime(2027, 12, 1, tzinfo=timezone.utc),
+        )
+        entry_early_b = WatchlistEntry(
+            watchlist_id="wl_id_2_early_b",
+            user_id=sample_user.user_id,
+            centre_id=sample_centre.centre_id,
+            level=PreschoolLevel.PG,
+            enrollment_month_year=datetime(2027, 2, 1, tzinfo=timezone.utc),
+        )
+        entry_early_a = WatchlistEntry(
+            watchlist_id="wl_id_1_early_a",
+            user_id=sample_user.user_id,
+            centre_id=sample_centre.centre_id,
+            level=PreschoolLevel.INFANT,
+            enrollment_month_year=datetime(2027, 2, 1, tzinfo=timezone.utc),
+        )
+        session.add_all([entry_late, entry_early_b, entry_early_a])
+        session.commit()
+
+    set_mock_auth(sample_user)
+    response = client.get(
+        "/api/v1/watchlist/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 3
+    ids = [item["watchlist_id"] for item in data["items"]]
+    assert ids == ["wl_id_1_early_a", "wl_id_2_early_b", "wl_id_3_late"]
+
+
+def test_get_my_watchlist_pagination_limit_and_offset(
+    client: TestClient,
+    test_engine,
+    sample_centre: PreschoolCentre,
+    sample_user: User,
+):
+    """Pagination via limit and offset correctly pages through portfolio."""
+    assert sample_user.user_id is not None
+    assert sample_centre.centre_id is not None
+    with Session(test_engine) as session:
+        for month_idx in range(1, 6):
+            entry = WatchlistEntry(
+                watchlist_id=f"wl_page_{month_idx:02d}",
+                user_id=sample_user.user_id,
+                centre_id=sample_centre.centre_id,
+                level=PreschoolLevel.INFANT,
+                enrollment_month_year=datetime(2027, month_idx, 1, tzinfo=timezone.utc),
+            )
+            session.add(entry)
+        session.commit()
+
+    set_mock_auth(sample_user)
+
+    # Page 1: limit=2, offset=0
+    resp_p1 = client.get(
+        "/api/v1/watchlist/me?limit=2&offset=0",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert resp_p1.status_code == 200
+    data_p1 = resp_p1.json()
+    assert data_p1["total"] == 5
+    assert data_p1["limit"] == 2
+    assert data_p1["offset"] == 0
+    assert len(data_p1["items"]) == 2
+    assert [i["watchlist_id"] for i in data_p1["items"]] == [
+        "wl_page_01",
+        "wl_page_02",
+    ]
+
+    # Page 2: limit=2, offset=2
+    resp_p2 = client.get(
+        "/api/v1/watchlist/me?limit=2&offset=2",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert resp_p2.status_code == 200
+    data_p2 = resp_p2.json()
+    assert data_p2["total"] == 5
+    assert len(data_p2["items"]) == 2
+    assert [i["watchlist_id"] for i in data_p2["items"]] == [
+        "wl_page_03",
+        "wl_page_04",
+    ]
+
+    # Page 3: limit=2, offset=4
+    resp_p3 = client.get(
+        "/api/v1/watchlist/me?limit=2&offset=4",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert resp_p3.status_code == 200
+    data_p3 = resp_p3.json()
+    assert data_p3["total"] == 5
+    assert len(data_p3["items"]) == 1
+    assert [i["watchlist_id"] for i in data_p3["items"]] == ["wl_page_05"]
+
+    # Offset beyond total
+    resp_empty = client.get(
+        "/api/v1/watchlist/me?limit=2&offset=5",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert resp_empty.status_code == 200
+    data_empty = resp_empty.json()
+    assert data_empty["total"] == 5
+    assert len(data_empty["items"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("limit", "offset"),
+    [
+        (0, 0),
+        (-1, 0),
+        (101, 0),
+        (20, -1),
+    ],
+)
+def test_get_my_watchlist_invalid_pagination_returns_422(
+    client: TestClient,
+    sample_user: User,
+    limit: int,
+    offset: int,
+):
+    """Invalid pagination parameters (limit < 1, limit > 100, offset < 0) return 422."""
+    set_mock_auth(sample_user)
+    response = client.get(
+        f"/api/v1/watchlist/me?limit={limit}&offset={offset}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 422
+
