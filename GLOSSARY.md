@@ -56,6 +56,10 @@ _Avoid_: Search filter, match config, family setting
 A parent-submitted evaluation of a preschool centre comprising a 1-to-5 star rating and qualitative commentary, governed by a tri-state moderation workflow (`PENDING`, `APPROVED`, `REJECTED`) and strictly unique per parent per centre.
 _Avoid_: Feedback, rating entry, centre comment
 
+**Reactive Moderation**:
+A content moderation model where parent-submitted preschool centre reviews default immediately to `APPROVED` status and become publicly visible upon submission, subject to post-publication auditing, community flagging, or administrative override rather than blocking on pre-publication approval queues.
+_Avoid_: Pre-moderation, automatic filtering, unmoderated content
+
 **Watchlist Entry**:
 A cohort-specific alert subscription tracking vacancy availability for a specific age level and enrollment month at a preschool centre.
 _Avoid_: Favourite, bookmark, notification subscription
