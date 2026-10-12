@@ -221,8 +221,11 @@ def normalize_preschool_level(val: Any) -> PreschoolLevel | None:
     if "playgroup" in normalized or "play group" in normalized or re.search(r"\bpg\b", normalized):
         return PreschoolLevel.PG
 
-    if "pre nursery" in normalized:
+    if "pre nursery" in normalized or "nursery 1" in normalized or "nursery1" in normalized or re.search(r"\bn1\b", normalized):
         return PreschoolLevel.N1
+
+    if "nursery 2" in normalized or "nursery2" in normalized or re.search(r"\bn2\b", normalized):
+        return PreschoolLevel.N2
 
     if "nursery" in normalized:
         return PreschoolLevel.N2
