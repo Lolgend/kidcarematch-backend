@@ -1046,6 +1046,50 @@ def test_patch_review_success_clear_description(
         assert updated.review_description is None
 
 
+@pytest.mark.parametrize("status_val", [ModerationStatus.PENDING, ModerationStatus.REJECTED])
+def test_patch_review_preserves_non_approved_moderation_status(
+    client: TestClient, sample_centre: PreschoolCentre, sample_user: User, test_engine, status_val: ModerationStatus
+):
+    """Author updating review rating or commentary preserves existing non-APPROVED moderation status."""
+    assert sample_centre.centre_id is not None
+    assert sample_user.user_id is not None
+
+    with Session(test_engine) as session:
+        review = Review(
+            review_id=str(uuid.uuid4()),
+            centre_id=sample_centre.centre_id,
+            user_id=sample_user.user_id,
+            rating=3,
+            review_description="Initial commentary under moderation",
+            moderation_status=status_val,
+        )
+        session.add(review)
+        session.commit()
+        session.refresh(review)
+        review_id = review.review_id
+
+    set_mock_auth(sample_user)
+    response = client.patch(
+        f"/api/v1/reviews/{review_id}",
+        headers={"Authorization": "Bearer mock-token"},
+        json={"rating": 4, "review_description": "Updated commentary while preserving status"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["review_id"] == review_id
+    assert data["rating"] == 4
+    assert data["review_description"] == "Updated commentary while preserving status"
+    assert data["moderation_status"] == status_val.value
+
+    # Verify database state
+    with Session(test_engine) as session:
+        updated = session.get(Review, review_id)
+        assert updated is not None
+        assert updated.rating == 4
+        assert updated.review_description == "Updated commentary while preserving status"
+        assert updated.moderation_status == status_val
+
+
 @pytest.mark.parametrize("invalid_rating", [0, -1, 6, 10, 100])
 def test_patch_review_out_of_bounds_rating_returns_422(
     client: TestClient, sample_review: Review, sample_user: User, invalid_rating: int, test_engine

@@ -1,6 +1,5 @@
 """Preschool centre API endpoints."""
 
-import uuid
 from datetime import datetime
 from typing import Annotated
 
@@ -439,12 +438,6 @@ def create_centre_review(
     """
     get_centre_or_404(centre_id, session)
 
-    if not current_user.user_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User ID is missing from profile",
-        )
-
     # Check composite uniqueness: one review per centre per user
     existing_review = session.exec(
         select(Review).where(
@@ -458,8 +451,9 @@ def create_centre_review(
             detail="You have already submitted a review for this preschool centre",
         )
 
+    assert current_user.user_id is not None
+
     review = Review(
-        review_id=str(uuid.uuid4()),
         centre_id=centre_id,
         user_id=current_user.user_id,
         rating=payload.rating,

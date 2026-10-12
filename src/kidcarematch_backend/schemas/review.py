@@ -39,32 +39,29 @@ class ReviewUpdateRequest(BaseModel):
         return v
 
 
-class ReviewResponse(BaseModel):
+class ReviewBaseResponse(BaseModel):
+    """Base schema for preschool centre review response representations."""
+
+    review_id: str
+    centre_id: int
+    rating: int
+    review_description: str | None = None
+    moderation_status: ModerationStatus
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReviewResponse(ReviewBaseResponse):
     """Complete preschool centre review details."""
 
-    review_id: str
-    centre_id: int
     user_id: str
-    rating: int
-    review_description: str | None = None
-    moderation_status: ModerationStatus
-    created_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
 
 
-class UserReviewItem(BaseModel):
+class UserReviewItem(ReviewBaseResponse):
     """Parent portfolio review item enriched with centre metadata."""
 
-    review_id: str
-    centre_id: int
     centre_name: str
-    rating: int
-    review_description: str | None = None
-    moderation_status: ModerationStatus
-    created_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
 
 
 class UserReviewListResponse(BaseModel):
