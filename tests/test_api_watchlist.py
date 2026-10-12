@@ -312,6 +312,30 @@ def test_create_watchlist_normalizes_enrollment_month_to_day_1_utc(
     assert normalized_dt.second == 0
 
 
+def test_create_watchlist_normalizes_positive_offset_timezone_month(
+    client: TestClient, sample_centre: PreschoolCentre, sample_user: User
+):
+    """Passing a date near month boundary with positive UTC offset normalizes to day 1 UTC of target month."""
+    set_mock_auth(sample_user)
+    payload = {
+        "centre_id": sample_centre.centre_id,
+        "level": "infant",
+        "enrollment_month_year": "2027-04-01T00:00:00+08:00",
+    }
+    response = client.post(
+        "/api/v1/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+        json=payload,
+    )
+    assert response.status_code == 201
+    data = response.json()
+    normalized_dt = datetime.fromisoformat(
+        data["enrollment_month_year"].replace("Z", "+00:00")
+    )
+    assert normalized_dt == datetime(2027, 4, 1, 0, 0, 0, tzinfo=timezone.utc)
+    assert data["enrollment_month_year"].startswith("2027-04-01T00:00:00")
+
+
 def test_create_watchlist_duplicate_subscription_returns_409(
     client: TestClient, sample_centre: PreschoolCentre, sample_user: User
 ):
@@ -1298,3 +1322,148 @@ def test_centre_watchlist_status_scoped_to_queried_centre_only(
     assert len(data2["watched_entries"]) == 1
     assert data2["watched_entries"][0]["centre_id"] == second_centre.centre_id
     assert data2["watched_entries"][0]["watchlist_id"] == resp_centre2.json()["watchlist_id"]
+
+
+# ==============================================================================
+# Database Cascade Integrity Tests (Spec #32 Items 22 & 23)
+# ==============================================================================
+
+
+def test_delete_preschool_centre_cascades_watchlist_entries(
+    client: TestClient,
+    test_engine,
+    sample_centre: PreschoolCentre,
+    sample_user: User,
+):
+    """Deleting a PreschoolCentre automatically cascade-deletes associated WatchlistEntry records."""
+    set_mock_auth(sample_user)
+    payload = {
+        "centre_id": sample_centre.centre_id,
+        "level": "infant",
+        "enrollment_month_year": "2027-04-01T00:00:00Z",
+    }
+    resp = client.post(
+        "/api/v1/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+        json=payload,
+    )
+    assert resp.status_code == 201
+    watchlist_id = resp.json()["watchlist_id"]
+
+    # Verify entry is retrievable via GET /api/v1/watchlist/me
+    resp_portfolio = client.get(
+        "/api/v1/watchlist/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert resp_portfolio.status_code == 200
+    assert resp_portfolio.json()["total"] == 1
+
+    # Verify entry is present in centre watchlist introspection
+    resp_centre_status = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert resp_centre_status.status_code == 200
+    assert resp_centre_status.json()["is_watched"] is True
+
+    # Delete PreschoolCentre in database session
+    with Session(test_engine) as session:
+        centre_to_delete = session.get(PreschoolCentre, sample_centre.centre_id)
+        assert centre_to_delete is not None
+        session.delete(centre_to_delete)
+        session.commit()
+
+    # Verify associated WatchlistEntry record was cascade-deleted
+    with Session(test_engine) as session:
+        assert session.get(WatchlistEntry, watchlist_id) is None
+        # User remains intact
+        assert session.get(User, sample_user.user_id) is not None
+
+    # Verify user's watchlist portfolio is now empty
+    resp_portfolio_after = client.get(
+        "/api/v1/watchlist/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert resp_portfolio_after.status_code == 200
+    assert resp_portfolio_after.json()["total"] == 0
+    assert resp_portfolio_after.json()["items"] == []
+
+    # Verify querying centre introspection returns 404
+    resp_centre_after = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert resp_centre_after.status_code == 404
+
+
+def test_delete_user_cascades_watchlist_entries(
+    client: TestClient,
+    test_engine,
+    sample_centre: PreschoolCentre,
+    sample_user: User,
+    second_user: User,
+):
+    """Deleting a User automatically cascade-deletes associated WatchlistEntry records."""
+    # sample_user subscribes
+    set_mock_auth(sample_user)
+    resp1 = client.post(
+        "/api/v1/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+        json={
+            "centre_id": sample_centre.centre_id,
+            "level": "infant",
+            "enrollment_month_year": "2027-04-01T00:00:00Z",
+        },
+    )
+    assert resp1.status_code == 201
+    wl1_id = resp1.json()["watchlist_id"]
+
+    # second_user subscribes to same centre with different level
+    set_mock_auth(second_user)
+    resp2 = client.post(
+        "/api/v1/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+        json={
+            "centre_id": sample_centre.centre_id,
+            "level": "pg",
+            "enrollment_month_year": "2027-04-01T00:00:00Z",
+        },
+    )
+    assert resp2.status_code == 201
+    wl2_id = resp2.json()["watchlist_id"]
+
+    # Delete sample_user in database session
+    with Session(test_engine) as session:
+        user_to_delete = session.get(User, sample_user.user_id)
+        assert user_to_delete is not None
+        session.delete(user_to_delete)
+        session.commit()
+
+    # Verify sample_user's WatchlistEntry was cascade-deleted
+    with Session(test_engine) as session:
+        assert session.get(WatchlistEntry, wl1_id) is None
+        # second_user's WatchlistEntry remains intact
+        assert session.get(WatchlistEntry, wl2_id) is not None
+        # PreschoolCentre remains intact
+        assert session.get(PreschoolCentre, sample_centre.centre_id) is not None
+
+    # Verify second_user still sees their active subscription
+    set_mock_auth(second_user)
+    resp_bob_portfolio = client.get(
+        "/api/v1/watchlist/me",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert resp_bob_portfolio.status_code == 200
+    assert resp_bob_portfolio.json()["total"] == 1
+    assert resp_bob_portfolio.json()["items"][0]["watchlist_id"] == wl2_id
+
+    # Verify centre introspection for second_user shows their subscription only
+    resp_bob_centre = client.get(
+        f"/api/v1/centres/{sample_centre.centre_id}/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert resp_bob_centre.status_code == 200
+    assert resp_bob_centre.json()["is_watched"] is True
+    assert len(resp_bob_centre.json()["watched_entries"]) == 1
+    assert resp_bob_centre.json()["watched_entries"][0]["watchlist_id"] == wl2_id
+

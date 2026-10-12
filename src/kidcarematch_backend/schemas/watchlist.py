@@ -20,8 +20,7 @@ class WatchlistCreateRequest(BaseModel):
     @classmethod
     def normalize_enrollment_month_year(cls, v: datetime) -> datetime:
         """Normalize enrollment month to day 1 at 00:00:00 UTC."""
-        dt = v.astimezone(timezone.utc) if v.tzinfo else v.replace(tzinfo=timezone.utc)
-        return datetime(dt.year, dt.month, 1, 0, 0, 0, tzinfo=timezone.utc)
+        return datetime(v.year, v.month, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 
 class WatchlistEntryResponse(BaseModel):
@@ -67,9 +66,9 @@ class CentreWatchlistEntryItem(BaseModel):
     """Summary of an active watchlist entry for centre introspection."""
 
     watchlist_id: str
-    centre_id: int
     level: PreschoolLevel
     enrollment_month_year: datetime
+    centre_id: int | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

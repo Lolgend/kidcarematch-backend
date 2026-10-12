@@ -24,6 +24,11 @@ from kidcarematch_backend.schemas.watchlist import (
 router = APIRouter(prefix="/api/v1/watchlist", tags=["watchlist"])
 
 
+WATCHLIST_CONFLICT_DETAIL = (
+    "Watchlist subscription already exists for this centre, cohort level, and enrollment month"
+)
+
+
 @router.post(
     "",
     response_model=WatchlistEntryResponse,
@@ -61,7 +66,7 @@ def create_watchlist_entry(
     if existing:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Watchlist subscription already exists for this centre, cohort level, and enrollment month",
+            detail=WATCHLIST_CONFLICT_DETAIL,
         )
 
     entry = WatchlistEntry(
@@ -78,7 +83,7 @@ def create_watchlist_entry(
         session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Watchlist subscription already exists for this centre, cohort level, and enrollment month",
+            detail=WATCHLIST_CONFLICT_DETAIL,
         ) from exc
 
     return entry
