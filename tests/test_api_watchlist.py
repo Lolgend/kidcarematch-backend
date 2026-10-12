@@ -1,7 +1,7 @@
 """Tests for Cohort Watchlist Subscription API endpoints (POST /api/v1/watchlist)."""
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,8 +12,10 @@ from kidcarematch_backend.auth.security import FirebaseTokenClaims, get_token_cl
 from kidcarematch_backend.db.db import (
     AccountStatus,
     PreschoolCentre,
+    PreschoolLevel,
     User,
     UserRole,
+    WatchlistEntry,
     get_session,
     init_db,
 )
@@ -107,6 +109,25 @@ def suspended_user(test_engine) -> User:
         session.commit()
         session.refresh(user)
         return user
+
+
+@pytest.fixture
+def sample_watchlist_entry(
+    test_engine, sample_user: User, sample_centre: PreschoolCentre
+) -> WatchlistEntry:
+    with Session(test_engine) as session:
+        assert sample_user.user_id is not None
+        assert sample_centre.centre_id is not None
+        entry = WatchlistEntry(
+            user_id=sample_user.user_id,
+            centre_id=sample_centre.centre_id,
+            level=PreschoolLevel.INFANT,
+            enrollment_month_year=datetime(2027, 3, 1, 0, 0, 0, tzinfo=timezone.utc),
+        )
+        session.add(entry)
+        session.commit()
+        session.refresh(entry)
+        return entry
 
 
 def set_mock_auth(user: User):
@@ -445,3 +466,151 @@ def test_create_watchlist_same_parent_different_months_success(
     )
     assert resp_apr.status_code == 201
     assert resp_mar.json()["watchlist_id"] != resp_apr.json()["watchlist_id"]
+
+
+# ==============================================================================
+# DELETE /api/v1/watchlist/{watchlist_id} Tests (Ticket #34)
+# ==============================================================================
+
+
+def test_delete_watchlist_missing_auth_returns_401(
+    client: TestClient, sample_watchlist_entry: WatchlistEntry
+):
+    """Deleting a watchlist subscription without Authorization header returns 401."""
+    response = client.delete(f"/api/v1/watchlist/{sample_watchlist_entry.watchlist_id}")
+    assert response.status_code == 401
+    assert "detail" in response.json()
+
+
+def test_delete_watchlist_invalid_auth_scheme_returns_401(
+    client: TestClient, sample_watchlist_entry: WatchlistEntry
+):
+    """Deleting a watchlist subscription with non-Bearer auth scheme returns 401."""
+    response = client.delete(
+        f"/api/v1/watchlist/{sample_watchlist_entry.watchlist_id}",
+        headers={"Authorization": "Basic not-a-bearer-token"},
+    )
+    assert response.status_code == 401
+
+
+def test_delete_watchlist_suspended_user_returns_403(
+    client: TestClient, sample_watchlist_entry: WatchlistEntry, suspended_user: User
+):
+    """Deleting a watchlist subscription as a suspended user returns 403."""
+    set_mock_auth(suspended_user)
+    response = client.delete(
+        f"/api/v1/watchlist/{sample_watchlist_entry.watchlist_id}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Account is suspended."
+
+
+def test_delete_watchlist_not_found_returns_404(client: TestClient, sample_user: User):
+    """Deleting a non-existent watchlist subscription returns 404."""
+    set_mock_auth(sample_user)
+    response = client.delete(
+        "/api/v1/watchlist/non-existent-watchlist-id",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Watchlist entry not found"
+
+
+def test_delete_watchlist_other_user_entry_returns_403(
+    client: TestClient,
+    test_engine,
+    sample_watchlist_entry: WatchlistEntry,
+    second_user: User,
+):
+    """Deleting another user's watchlist subscription returns 403 Forbidden."""
+    set_mock_auth(second_user)
+    response = client.delete(
+        f"/api/v1/watchlist/{sample_watchlist_entry.watchlist_id}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 403
+    assert (
+        response.json()["detail"]
+        == "You do not have permission to delete this watchlist entry"
+    )
+
+    # Verify entry is NOT deleted
+    with Session(test_engine) as session:
+        entry_in_db = session.get(WatchlistEntry, sample_watchlist_entry.watchlist_id)
+        assert entry_in_db is not None
+
+
+def test_delete_watchlist_success_returns_204_and_removes_from_db(
+    client: TestClient,
+    test_engine,
+    sample_watchlist_entry: WatchlistEntry,
+    sample_user: User,
+):
+    """Deleting an authored watchlist subscription permanently removes it and returns 204."""
+    set_mock_auth(sample_user)
+    response = client.delete(
+        f"/api/v1/watchlist/{sample_watchlist_entry.watchlist_id}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert response.status_code == 204
+    assert response.content == b""
+
+    # Verify permanently deleted from database
+    with Session(test_engine) as session:
+        entry_in_db = session.get(WatchlistEntry, sample_watchlist_entry.watchlist_id)
+        assert entry_in_db is None
+
+
+def test_delete_watchlist_second_attempt_returns_404(
+    client: TestClient, sample_watchlist_entry: WatchlistEntry, sample_user: User
+):
+    """Attempting to delete the same watchlist entry a second time returns 404 Not Found."""
+    set_mock_auth(sample_user)
+    first_resp = client.delete(
+        f"/api/v1/watchlist/{sample_watchlist_entry.watchlist_id}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert first_resp.status_code == 204
+
+    second_resp = client.delete(
+        f"/api/v1/watchlist/{sample_watchlist_entry.watchlist_id}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert second_resp.status_code == 404
+    assert second_resp.json()["detail"] == "Watchlist entry not found"
+
+
+def test_delete_watchlist_allows_resubscribing_without_409(
+    client: TestClient,
+    sample_centre: PreschoolCentre,
+    sample_user: User,
+):
+    """After deleting a subscription, the parent can re-subscribe without 409 Conflict."""
+    set_mock_auth(sample_user)
+    payload = {
+        "centre_id": sample_centre.centre_id,
+        "level": "infant",
+        "enrollment_month_year": "2027-09-01T00:00:00Z",
+    }
+    create_resp = client.post(
+        "/api/v1/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+        json=payload,
+    )
+    assert create_resp.status_code == 201
+    watchlist_id = create_resp.json()["watchlist_id"]
+
+    del_resp = client.delete(
+        f"/api/v1/watchlist/{watchlist_id}",
+        headers={"Authorization": "Bearer mock-token"},
+    )
+    assert del_resp.status_code == 204
+
+    re_create_resp = client.post(
+        "/api/v1/watchlist",
+        headers={"Authorization": "Bearer mock-token"},
+        json=payload,
+    )
+    assert re_create_resp.status_code == 201
+    assert re_create_resp.json()["watchlist_id"] != watchlist_id
