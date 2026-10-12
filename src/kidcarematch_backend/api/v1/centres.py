@@ -386,6 +386,39 @@ def list_centre_reviews(
     )
 
 
+@router.get(
+    "/{centre_id}/reviews/mine",
+    response_model=ReviewResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Parent's Review for Preschool Centre",
+)
+def get_my_centre_review(
+    centre_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
+) -> Review:
+    """Retrieve the authenticated parent's authored review for a specific preschool centre.
+
+    Returns 404 if the centre does not exist or if the parent has not reviewed this centre.
+    """
+    get_centre_or_404(centre_id, session)
+
+    review = session.exec(
+        select(Review).where(
+            col(Review.centre_id) == centre_id,
+            col(Review.user_id) == current_user.user_id,
+        )
+    ).first()
+
+    if not review:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Review not found",
+        )
+
+    return review
+
+
 @router.post(
     "/{centre_id}/reviews",
     response_model=ReviewResponse,
