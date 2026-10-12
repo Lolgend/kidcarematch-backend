@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
 
@@ -171,3 +171,37 @@ def get_my_watchlist(
         offset=offset,
     )
 
+
+@router.delete(
+    "/{watchlist_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete Watchlist Subscription",
+)
+def delete_watchlist_entry(
+    watchlist_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
+) -> Response:
+    """Permanently delete an authored cohort watchlist subscription.
+
+    Requires an authenticated active user session.
+    Enforces author ownership: only the user who created the subscription may delete it.
+    Returns HTTP 204 No Content upon successful hard-deletion.
+    """
+    entry = session.get(WatchlistEntry, watchlist_id)
+    if not entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Watchlist entry not found",
+        )
+
+    if entry.user_id != current_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to delete this watchlist entry",
+        )
+
+    session.delete(entry)
+    session.commit()
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
