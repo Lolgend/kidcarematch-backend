@@ -19,6 +19,7 @@ from kidcarematch_backend.db.db import (
     Review,
     User,
     VacancyRecord,
+    WatchlistEntry,
     get_session,
 )
 from kidcarematch_backend.schemas.centre import (
@@ -35,6 +36,10 @@ from kidcarematch_backend.schemas.centre import (
 from kidcarematch_backend.schemas.review import (
     ReviewCreateRequest,
     ReviewResponse,
+)
+from kidcarematch_backend.schemas.watchlist import (
+    CentreWatchlistEntryItem,
+    CentreWatchlistStatusResponse,
 )
 
 router = APIRouter(prefix="/api/v1/centres", tags=["centres"])
@@ -473,6 +478,54 @@ def create_centre_review(
         ) from exc
 
     return review
+
+
+@router.get(
+    "/{centre_id}/watchlist",
+    response_model=CentreWatchlistStatusResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Introspect Centre Watch Status",
+)
+def get_centre_watchlist_status(
+    centre_id: int,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
+) -> CentreWatchlistStatusResponse:
+    """Introspect whether the authenticated parent is currently watching this centre.
+
+    Returns the parent's active watchlist subscriptions for the centre, or an empty list if not watched.
+    """
+    get_centre_or_404(centre_id, session)
+    assert current_user.user_id is not None
+
+    entries = session.exec(
+        select(WatchlistEntry)
+        .where(
+            col(WatchlistEntry.centre_id) == centre_id,
+            col(WatchlistEntry.user_id) == current_user.user_id,
+        )
+        .order_by(
+            col(WatchlistEntry.enrollment_month_year).asc(),
+            col(WatchlistEntry.watchlist_id).asc(),
+        )
+    ).all()
+
+    is_watched = len(entries) > 0
+    watched_entries = [
+        CentreWatchlistEntryItem(
+            watchlist_id=e.watchlist_id or "",
+            centre_id=e.centre_id,
+            level=e.level,
+            enrollment_month_year=e.enrollment_month_year,
+        )
+        for e in entries
+    ]
+
+    return CentreWatchlistStatusResponse(
+        centre_id=centre_id,
+        is_watched=is_watched,
+        watched_entries=watched_entries,
+    )
 
 
 @router.get(
