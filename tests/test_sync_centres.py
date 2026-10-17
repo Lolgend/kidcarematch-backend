@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from typing import Any
+
 import pytest
 
 from kidcarematch_backend.cron.sync_centres import (
@@ -83,20 +84,38 @@ def test_parse_vacancies_for_centre_generates_42_records_with_correct_keys():
     assert len(records) == 42
 
     # Check first record (infant current month)
-    first = next(r for r in records if r.level_type == "infant" and r.record_id == "PT8553_infant_202610")
+    first = next(
+        r
+        for r in records
+        if r.level_type == "infant" and r.record_id == "PT8553_infant_202610"
+    )
     assert first.centre_id == 42
     assert first.vacancy_status == "Not Applicable"
-    assert first.enrollment_month_year == datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)
+    assert first.enrollment_month_year == datetime(
+        2026, 10, 1, 0, 0, tzinfo=timezone.utc
+    )
 
     # Check second month (infant next month -> November 2026)
-    second = next(r for r in records if r.level_type == "infant" and r.record_id == "PT8553_infant_202611")
+    second = next(
+        r
+        for r in records
+        if r.level_type == "infant" and r.record_id == "PT8553_infant_202611"
+    )
     assert second.vacancy_status == "Immediate"
-    assert second.enrollment_month_year == datetime(2026, 11, 1, 0, 0, tzinfo=timezone.utc)
+    assert second.enrollment_month_year == datetime(
+        2026, 11, 1, 0, 0, tzinfo=timezone.utc
+    )
 
     # Check rollover across year boundary (seventh month is April 2027)
-    seventh = next(r for r in records if r.level_type == "infant" and r.record_id == "PT8553_infant_202704")
+    seventh = next(
+        r
+        for r in records
+        if r.level_type == "infant" and r.record_id == "PT8553_infant_202704"
+    )
     assert seventh.vacancy_status == "Full"
-    assert seventh.enrollment_month_year == datetime(2027, 4, 1, 0, 0, tzinfo=timezone.utc)
+    assert seventh.enrollment_month_year == datetime(
+        2027, 4, 1, 0, 0, tzinfo=timezone.utc
+    )
 
 
 def test_parse_vacancies_anchored_to_sync_date_ignoring_stale_last_updated():
@@ -111,17 +130,31 @@ def test_parse_vacancies_anchored_to_sync_date_ignoring_stale_last_updated():
 
     # Explicit sync date is October 2026
     explicit_sync_date = datetime(2026, 10, 15, 12, 30, tzinfo=timezone.utc)
-    records = parse_vacancies_for_centre(centre_record, centre_id=99, sync_date=explicit_sync_date)
+    records = parse_vacancies_for_centre(
+        centre_record, centre_id=99, sync_date=explicit_sync_date
+    )
 
     assert len(records) == 42
 
     # Verify that horizons anchor to October 2026 instead of January 2025
-    current_rec = next(r for r in records if r.level_type == "infant" and r.record_id == "STALE01_infant_202610")
-    assert current_rec.enrollment_month_year == datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)
+    current_rec = next(
+        r
+        for r in records
+        if r.level_type == "infant" and r.record_id == "STALE01_infant_202610"
+    )
+    assert current_rec.enrollment_month_year == datetime(
+        2026, 10, 1, 0, 0, tzinfo=timezone.utc
+    )
     assert current_rec.vacancy_status == "Available"
 
-    seventh_rec = next(r for r in records if r.level_type == "infant" and r.record_id == "STALE01_infant_202704")
-    assert seventh_rec.enrollment_month_year == datetime(2027, 4, 1, 0, 0, tzinfo=timezone.utc)
+    seventh_rec = next(
+        r
+        for r in records
+        if r.level_type == "infant" and r.record_id == "STALE01_infant_202704"
+    )
+    assert seventh_rec.enrollment_month_year == datetime(
+        2027, 4, 1, 0, 0, tzinfo=timezone.utc
+    )
     assert seventh_rec.vacancy_status == "Full"
 
     # Verify NO records were generated using 2025 dates
@@ -135,7 +168,10 @@ def test_normalize_preschool_level_canonical_and_free_form():
     # Infant
     assert normalize_preschool_level("infant") == PreschoolLevel.INFANT
     assert normalize_preschool_level("Infant Care") == PreschoolLevel.INFANT
-    assert normalize_preschool_level("Infant Care (2 to 17 months)") == PreschoolLevel.INFANT
+    assert (
+        normalize_preschool_level("Infant Care (2 to 17 months)")
+        == PreschoolLevel.INFANT
+    )
     assert normalize_preschool_level("INFANT") == PreschoolLevel.INFANT
 
     # Playgroup
@@ -176,12 +212,16 @@ def test_normalize_preschool_level_canonical_and_free_form():
     # Student Care
     assert normalize_preschool_level("student_care") == PreschoolLevel.STUDENT_CARE
     assert normalize_preschool_level("Student Care") == PreschoolLevel.STUDENT_CARE
-    assert normalize_preschool_level("Student Care (7 to 14 yrs old)") == PreschoolLevel.STUDENT_CARE
+    assert (
+        normalize_preschool_level("Student Care (7 to 14 yrs old)")
+        == PreschoolLevel.STUDENT_CARE
+    )
     assert normalize_preschool_level("StudentCare") == PreschoolLevel.STUDENT_CARE
 
 
 def test_normalize_preschool_level_invalid_and_empty_returns_none(caplog):
     import logging
+
     from kidcarematch_backend.cron.sync_centres import normalize_preschool_level
 
     with caplog.at_level(logging.WARNING):
@@ -192,8 +232,14 @@ def test_normalize_preschool_level_invalid_and_empty_returns_none(caplog):
         assert normalize_preschool_level("Unknown Level") is None
         assert normalize_preschool_level("Senior Daycare") is None
 
-    assert any("Empty or blank preschool service level" in record.message for record in caplog.records)
-    assert any("Unmapped preschool service level" in record.message for record in caplog.records)
+    assert any(
+        "Empty or blank preschool service level" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "Unmapped preschool service level" in record.message
+        for record in caplog.records
+    )
 
 
 def test_normalize_citizenship_type_mappings():
@@ -214,7 +260,10 @@ def test_normalize_citizenship_type_mappings():
     assert normalize_citizenship_type("PR") == CitizenshipType.SPR
     assert normalize_citizenship_type("pr") == CitizenshipType.SPR
     assert normalize_citizenship_type("Permanent Resident") == CitizenshipType.SPR
-    assert normalize_citizenship_type("Singapore Permanent Resident") == CitizenshipType.SPR
+    assert (
+        normalize_citizenship_type("Singapore Permanent Resident")
+        == CitizenshipType.SPR
+    )
 
     # OTHERS
     assert normalize_citizenship_type("Others") == CitizenshipType.OTHERS
@@ -283,6 +332,7 @@ def test_parse_centre_service_null_citizenship_defaults_to_others():
 
 def test_parse_centre_service_unmapped_level_returns_none(caplog):
     import logging
+
     from kidcarematch_backend.cron.sync_centres import parse_centre_service
 
     raw_rec = {
@@ -298,11 +348,17 @@ def test_parse_centre_service_unmapped_level_returns_none(caplog):
         service = parse_centre_service(raw_rec, centre_map)
 
     assert service is None
-    assert any("Unmapped preschool service level" in record.message for record in caplog.records)
+    assert any(
+        "Unmapped preschool service level" in record.message
+        for record in caplog.records
+    )
 
 
-def test_parse_centre_service_empty_or_blank_level_logs_warning_and_returns_none(caplog):
+def test_parse_centre_service_empty_or_blank_level_logs_warning_and_returns_none(
+    caplog,
+):
     import logging
+
     from kidcarematch_backend.cron.sync_centres import parse_centre_service
 
     for empty_level in ("", "   ", None, "NA"):
@@ -319,7 +375,10 @@ def test_parse_centre_service_empty_or_blank_level_logs_warning_and_returns_none
             service = parse_centre_service(raw_rec, centre_map)
 
         assert service is None
-        assert any("Empty or blank preschool service level" in record.message for record in caplog.records)
+        assert any(
+            "Empty or blank preschool service level" in record.message
+            for record in caplog.records
+        )
         caplog.clear()
 
 
@@ -339,9 +398,16 @@ def test_parse_centre_service_unknown_centre_returns_none():
 
 
 def test_sync_centres_orchestration_with_mocks(monkeypatch):
+    from sqlmodel import Session, SQLModel, create_engine, select
+
     from kidcarematch_backend.cron.sync_centres import sync_centres
-    from kidcarematch_backend.db.db import CitizenshipType, PreschoolCentre, PreschoolLevel, PreschoolService, VacancyRecord
-    from sqlmodel import create_engine, Session, SQLModel, select
+    from kidcarematch_backend.db.db import (
+        CitizenshipType,
+        PreschoolCentre,
+        PreschoolLevel,
+        PreschoolService,
+        VacancyRecord,
+    )
 
     # Use in-memory SQLite for test orchestration
     test_engine = create_engine("sqlite:///:memory:")
@@ -349,6 +415,7 @@ def test_sync_centres_orchestration_with_mocks(monkeypatch):
 
     # Patch engine in sync_centres
     import kidcarematch_backend.cron.sync_centres as sc_mod
+
     monkeypatch.setattr(sc_mod, "engine", test_engine)
 
     sample_centres = [
@@ -408,14 +475,18 @@ def test_sync_centres_orchestration_with_mocks(monkeypatch):
 
 
 def test_sync_centres_multi_centre_horizon_alignment(monkeypatch):
-    from kidcarematch_backend.cron.sync_centres import sync_centres, VACANCY_LEVELS, VACANCY_HORIZONS
+    from sqlmodel import Session, SQLModel, create_engine, select
+
+    from kidcarematch_backend.cron.sync_centres import (
+        sync_centres,
+    )
     from kidcarematch_backend.db.db import VacancyRecord
-    from sqlmodel import create_engine, Session, SQLModel, select
 
     test_engine = create_engine("sqlite:///:memory:")
     SQLModel.metadata.create_all(test_engine)
 
     import kidcarematch_backend.cron.sync_centres as sc_mod
+
     monkeypatch.setattr(sc_mod, "engine", test_engine)
 
     # Two centres with very different last_updated timestamps
@@ -430,7 +501,9 @@ def test_sync_centres_multi_centre_horizon_alignment(monkeypatch):
         last_updated="2026-09-30",
     )
 
-    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [centre_1, centre_2])
+    monkeypatch.setattr(
+        sc_mod, "fetch_all_centres", lambda **kwargs: [centre_1, centre_2]
+    )
     monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [])
 
     reference_sync_date = datetime(2026, 10, 1, 8, 0, tzinfo=timezone.utc)
@@ -445,8 +518,12 @@ def test_sync_centres_multi_centre_horizon_alignment(monkeypatch):
         records = session.exec(select(VacancyRecord)).all()
         assert len(records) == 84
 
-        ctr1_records = [r for r in records if r.record_id and r.record_id.startswith("CTR001")]
-        ctr2_records = [r for r in records if r.record_id and r.record_id.startswith("CTR002")]
+        ctr1_records = [
+            r for r in records if r.record_id and r.record_id.startswith("CTR001")
+        ]
+        ctr2_records = [
+            r for r in records if r.record_id and r.record_id.startswith("CTR002")
+        ]
 
         assert len(ctr1_records) == 42
         assert len(ctr2_records) == 42
@@ -470,14 +547,18 @@ def test_sync_centres_multi_centre_horizon_alignment(monkeypatch):
 
 
 def test_sync_centres_rolling_cycle_preserves_historical_records(monkeypatch):
-    from kidcarematch_backend.cron.sync_centres import sync_centres, VACANCY_LEVELS, VACANCY_HORIZONS
+    from sqlmodel import Session, SQLModel, create_engine, select
+
+    from kidcarematch_backend.cron.sync_centres import (
+        sync_centres,
+    )
     from kidcarematch_backend.db.db import VacancyRecord
-    from sqlmodel import create_engine, Session, SQLModel, select
 
     test_engine = create_engine("sqlite:///:memory:")
     SQLModel.metadata.create_all(test_engine)
 
     import kidcarematch_backend.cron.sync_centres as sc_mod
+
     monkeypatch.setattr(sc_mod, "engine", test_engine)
 
     # Run 1: October 2026 sync
@@ -533,25 +614,38 @@ def test_sync_centres_rolling_cycle_preserves_historical_records(monkeypatch):
         hist_oct_infant = session.get(VacancyRecord, "ROLL01_infant_202610")
         assert hist_oct_infant is not None
         assert hist_oct_infant.vacancy_status == "Immediate"
-        assert hist_oct_infant.enrollment_month_year == datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)
+        assert hist_oct_infant.enrollment_month_year == datetime(
+            2026, 10, 1, 0, 0, tzinfo=timezone.utc
+        )
 
         # 2. Overlapping November record was updated
         updated_nov_infant = session.get(VacancyRecord, "ROLL01_infant_202611")
         assert updated_nov_infant is not None
         assert updated_nov_infant.vacancy_status == "Full"
-        assert updated_nov_infant.enrollment_month_year == datetime(2026, 11, 1, 0, 0, tzinfo=timezone.utc)
+        assert updated_nov_infant.enrollment_month_year == datetime(
+            2026, 11, 1, 0, 0, tzinfo=timezone.utc
+        )
 
         # 3. New seventh month (May 2027) was inserted
         new_may_infant = session.get(VacancyRecord, "ROLL01_infant_202705")
         assert new_may_infant is not None
         assert new_may_infant.vacancy_status == "Full"
-        assert new_may_infant.enrollment_month_year == datetime(2027, 5, 1, 0, 0, tzinfo=timezone.utc)
+        assert new_may_infant.enrollment_month_year == datetime(
+            2027, 5, 1, 0, 0, tzinfo=timezone.utc
+        )
 
 
 def test_preschool_service_composite_uniqueness_constraint():
     from sqlalchemy.exc import IntegrityError
     from sqlmodel import Session, create_engine
-    from kidcarematch_backend.db.db import CitizenshipType, PreschoolCentre, PreschoolLevel, PreschoolService, init_db
+
+    from kidcarematch_backend.db.db import (
+        CitizenshipType,
+        PreschoolCentre,
+        PreschoolLevel,
+        PreschoolService,
+        init_db,
+    )
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -611,9 +705,10 @@ def test_parse_centre_service_resolves_tp_code():
 
 def test_sync_centres_resolves_services_for_tp_code_centres(monkeypatch):
     from sqlmodel import Session, create_engine, select
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import PreschoolCentre, PreschoolService, init_db
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -657,11 +752,17 @@ def test_sync_centres_resolves_services_for_tp_code_centres(monkeypatch):
     assert stats["services_skipped"] == 0
 
     with Session(test_engine) as session:
-        centre = session.exec(select(PreschoolCentre).where(PreschoolCentre.centre_code == "PC9999")).first()
+        centre = session.exec(
+            select(PreschoolCentre).where(PreschoolCentre.centre_code == "PC9999")
+        ).first()
         assert centre is not None
         assert centre.centre_code == "PC9999"
 
-        services = session.exec(select(PreschoolService).where(PreschoolService.centre_id == centre.centre_id)).all()
+        services = session.exec(
+            select(PreschoolService).where(
+                PreschoolService.centre_id == centre.centre_id
+            )
+        ).all()
         assert len(services) == 2
         service_types = {s.type_of_service for s in services}
         assert service_types == {"Full Day", "Half Day"}
@@ -669,9 +770,10 @@ def test_sync_centres_resolves_services_for_tp_code_centres(monkeypatch):
 
 def test_sync_centres_updates_existing_services_idempotently(monkeypatch):
     from sqlmodel import Session, create_engine, select
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import PreschoolService, init_db
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -725,14 +827,22 @@ def test_sync_centres_updates_existing_services_idempotently(monkeypatch):
         assert len(services) == 1
         assert services[0].fee == 1250.0
         assert services[0].remarks == "Revised fee"
-        assert services[0].last_updated == datetime(2026, 11, 1, 0, 0, tzinfo=timezone.utc)
+        assert services[0].last_updated == datetime(
+            2026, 11, 1, 0, 0, tzinfo=timezone.utc
+        )
 
 
 def test_sync_centres_tp_code_only_centre_and_subsequent_update(monkeypatch):
     from sqlmodel import Session, create_engine, select
-    from kidcarematch_backend.cron.sync_centres import sync_centres
-    from kidcarematch_backend.db.db import PreschoolCentre, PreschoolService, VacancyRecord, init_db
+
     import kidcarematch_backend.cron.sync_centres as sc_mod
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import (
+        PreschoolCentre,
+        PreschoolService,
+        VacancyRecord,
+        init_db,
+    )
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -772,7 +882,9 @@ def test_sync_centres_tp_code_only_centre_and_subsequent_update(monkeypatch):
         assert len(centres) == 1
         assert centres[0].centre_code == "TP7777"
 
-        vacancies = session.exec(select(VacancyRecord).where(VacancyRecord.centre_id == centres[0].centre_id)).all()
+        vacancies = session.exec(
+            select(VacancyRecord).where(VacancyRecord.centre_id == centres[0].centre_id)
+        ).all()
         assert len(vacancies) == 42
         assert all(v.record_id.startswith("TP7777_") for v in vacancies)
 
@@ -811,7 +923,9 @@ def test_sync_centres_tp_code_only_centre_and_subsequent_update(monkeypatch):
         assert centres[0].centre_code == "EC7777"
 
         # Verify NO duplicate vacancies were created during transition from TP7777 to EC7777
-        vacancies = session.exec(select(VacancyRecord).where(VacancyRecord.centre_id == centres[0].centre_id)).all()
+        vacancies = session.exec(
+            select(VacancyRecord).where(VacancyRecord.centre_id == centres[0].centre_id)
+        ).all()
         assert len(vacancies) == 42
         assert all(v.record_id.startswith("EC7777_") for v in vacancies)
 
@@ -823,9 +937,15 @@ def test_sync_centres_tp_code_only_centre_and_subsequent_update(monkeypatch):
 
 def test_code_transition_migrates_historical_vacancies_without_duplicates(monkeypatch):
     from sqlmodel import Session, create_engine, select
-    from kidcarematch_backend.cron.sync_centres import sync_centres
-    from kidcarematch_backend.db.db import PreschoolCentre, PreschoolService, VacancyRecord, init_db
+
     import kidcarematch_backend.cron.sync_centres as sc_mod
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import (
+        PreschoolCentre,
+        PreschoolService,
+        VacancyRecord,
+        init_db,
+    )
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -870,7 +990,9 @@ def test_code_transition_migrates_historical_vacancies_without_duplicates(monkey
     stats2 = sync_centres(db_engine=test_engine, sync_date=oct_date)
     assert stats2["centres_updated"] == 1
     assert stats2["vacancies_updated"] == 36  # 36 overlapping months updated
-    assert stats2["vacancies_inserted"] == 6   # 6 new seventh_month (2027-04) records inserted
+    assert (
+        stats2["vacancies_inserted"] == 6
+    )  # 6 new seventh_month (2027-04) records inserted
     assert stats2["services_inserted"] == 1
 
     with Session(test_engine) as session:
@@ -878,7 +1000,9 @@ def test_code_transition_migrates_historical_vacancies_without_duplicates(monkey
         assert len(centres) == 1
         assert centres[0].centre_code == "EC1234"
 
-        all_vacancies = session.exec(select(VacancyRecord).where(VacancyRecord.centre_id == centres[0].centre_id)).all()
+        all_vacancies = session.exec(
+            select(VacancyRecord).where(VacancyRecord.centre_id == centres[0].centre_id)
+        ).all()
         # 42 original from Sep + 6 new for Apr 2027 = 48 total records
         assert len(all_vacancies) == 48
 
@@ -889,7 +1013,9 @@ def test_code_transition_migrates_historical_vacancies_without_duplicates(monkey
         # Historical September record was migrated to EC1234 and preserved
         hist_sep = session.get(VacancyRecord, "EC1234_infant_202609")
         assert hist_sep is not None
-        assert hist_sep.enrollment_month_year == datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
+        assert hist_sep.enrollment_month_year == datetime(
+            2026, 9, 1, 0, 0, tzinfo=timezone.utc
+        )
 
         services = session.exec(select(PreschoolService)).all()
         assert len(services) == 1
@@ -899,16 +1025,17 @@ def test_code_transition_migrates_historical_vacancies_without_duplicates(monkey
 
 def test_sync_centres_mixed_services_normalization_and_skipping(monkeypatch, caplog):
     import logging
+
     from sqlmodel import Session, create_engine, select
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import (
         CitizenshipType,
-        PreschoolCentre,
         PreschoolLevel,
         PreschoolService,
         init_db,
     )
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -1003,7 +1130,10 @@ def test_sync_centres_mixed_services_normalization_and_skipping(monkeypatch, cap
     assert stats["centres_inserted"] == 1
     assert stats["services_inserted"] == 6
     assert stats["services_skipped"] == 2
-    assert any("Unmapped preschool service level" in record.message for record in caplog.records)
+    assert any(
+        "Unmapped preschool service level" in record.message
+        for record in caplog.records
+    )
 
     with Session(test_engine) as session:
         db_services = session.exec(select(PreschoolService)).all()
@@ -1012,36 +1142,54 @@ def test_sync_centres_mixed_services_normalization_and_skipping(monkeypatch, cap
         services_by_level = {s.level: s for s in db_services}
 
         assert PreschoolLevel.INFANT in services_by_level
-        assert services_by_level[PreschoolLevel.INFANT].citizenship_type == CitizenshipType.SC
+        assert (
+            services_by_level[PreschoolLevel.INFANT].citizenship_type
+            == CitizenshipType.SC
+        )
         assert services_by_level[PreschoolLevel.INFANT].fee == 1500.0
 
         assert PreschoolLevel.K1 in services_by_level
-        assert services_by_level[PreschoolLevel.K1].citizenship_type == CitizenshipType.OTHERS
+        assert (
+            services_by_level[PreschoolLevel.K1].citizenship_type
+            == CitizenshipType.OTHERS
+        )
         assert services_by_level[PreschoolLevel.K1].fee == 1100.0
 
         assert PreschoolLevel.PG in services_by_level
-        assert services_by_level[PreschoolLevel.PG].citizenship_type == CitizenshipType.SPR
+        assert (
+            services_by_level[PreschoolLevel.PG].citizenship_type == CitizenshipType.SPR
+        )
         assert services_by_level[PreschoolLevel.PG].fee == 1200.0
 
         assert PreschoolLevel.N2 in services_by_level
-        assert services_by_level[PreschoolLevel.N2].citizenship_type == CitizenshipType.OTHERS
+        assert (
+            services_by_level[PreschoolLevel.N2].citizenship_type
+            == CitizenshipType.OTHERS
+        )
         assert services_by_level[PreschoolLevel.N2].fee == 1000.0
 
         assert PreschoolLevel.N1 in services_by_level
-        assert services_by_level[PreschoolLevel.N1].citizenship_type == CitizenshipType.OTHERS
+        assert (
+            services_by_level[PreschoolLevel.N1].citizenship_type
+            == CitizenshipType.OTHERS
+        )
         assert services_by_level[PreschoolLevel.N1].type_of_service == "Half Day"
         assert services_by_level[PreschoolLevel.N1].fee == 700.0
 
         assert PreschoolLevel.STUDENT_CARE in services_by_level
-        assert services_by_level[PreschoolLevel.STUDENT_CARE].citizenship_type == CitizenshipType.SC
+        assert (
+            services_by_level[PreschoolLevel.STUDENT_CARE].citizenship_type
+            == CitizenshipType.SC
+        )
         assert services_by_level[PreschoolLevel.STUDENT_CARE].fee == 600.0
 
 
 def test_sync_centres_heartbeat_lifecycle_success(monkeypatch):
     from sqlmodel import Session, create_engine
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -1086,9 +1234,10 @@ def test_sync_centres_heartbeat_lifecycle_success(monkeypatch):
 
 def test_sync_centres_heartbeat_lifecycle_running_state(monkeypatch):
     from sqlmodel import Session, create_engine
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -1102,8 +1251,12 @@ def test_sync_centres_heartbeat_lifecycle_running_state(monkeypatch):
             status = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
             if status:
                 observed_state_during_fetch["sync_state"] = status.sync_state
-                observed_state_during_fetch["last_attempted_sync"] = status.last_attempted_sync
-        return [make_test_centre_payload(centre_code="RUN_01", centre_name="Running Test")]
+                observed_state_during_fetch["last_attempted_sync"] = (
+                    status.last_attempted_sync
+                )
+        return [
+            make_test_centre_payload(centre_code="RUN_01", centre_name="Running Test")
+        ]
 
     monkeypatch.setattr(sc_mod, "fetch_all_centres", mock_fetch_all_centres)
     monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [])
@@ -1114,14 +1267,17 @@ def test_sync_centres_heartbeat_lifecycle_running_state(monkeypatch):
 
     assert observed_state_during_fetch["sync_state"] == SyncState.RUNNING
     assert observed_state_during_fetch["last_attempted_sync"] is not None
-    assert before_sync <= observed_state_during_fetch["last_attempted_sync"] <= after_sync
+    assert (
+        before_sync <= observed_state_during_fetch["last_attempted_sync"] <= after_sync
+    )
 
 
 def test_sync_centres_heartbeat_lifecycle_failure_on_fetch(monkeypatch):
     from sqlmodel import Session, create_engine
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -1148,17 +1304,22 @@ def test_sync_centres_heartbeat_lifecycle_failure_on_fetch(monkeypatch):
         assert "ECDA Datastore Gateway Timeout (504)" in status.error_message
 
 
-def test_sync_centres_heartbeat_lifecycle_failure_preserves_previous_success_timestamp(monkeypatch):
+def test_sync_centres_heartbeat_lifecycle_failure_preserves_previous_success_timestamp(
+    monkeypatch,
+):
     from sqlmodel import Session, create_engine
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
     monkeypatch.setattr(sc_mod, "engine", test_engine)
 
-    centre = make_test_centre_payload(centre_code="PREV_01", centre_name="Prev Success Centre")
+    centre = make_test_centre_payload(
+        centre_code="PREV_01", centre_name="Prev Success Centre"
+    )
 
     # Run 1: Successful sync
     monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [centre])
@@ -1197,15 +1358,18 @@ def test_sync_centres_heartbeat_lifecycle_failure_preserves_previous_success_tim
 
 def test_sync_centres_heartbeat_lifecycle_dry_run_does_not_persist_status(monkeypatch):
     from sqlmodel import Session, create_engine
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import ExternalDataSourceStatus, init_db
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
     monkeypatch.setattr(sc_mod, "engine", test_engine)
 
-    centre = make_test_centre_payload(centre_code="DRY_01", centre_name="Dry Run Centre")
+    centre = make_test_centre_payload(
+        centre_code="DRY_01", centre_name="Dry Run Centre"
+    )
     monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: [centre])
     monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [])
 
@@ -1220,8 +1384,34 @@ def test_sync_centres_heartbeat_lifecycle_dry_run_does_not_persist_status(monkey
         assert status is None
 
 
+def test_sync_centres_avoids_n_plus_one_queries(monkeypatch):
+    from sqlalchemy import event
+    from sqlmodel import SQLModel, create_engine
 
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+    from kidcarematch_backend.cron.sync_centres import sync_centres
 
+    test_engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
 
+    queries: list[str] = []
 
+    @event.listens_for(test_engine, "before_cursor_execute")
+    def count_query(conn, cursor, statement, parameters, context, executemany):
+        queries.append(statement)
 
+    sample_centres = [
+        make_test_centre_payload(centre_code=f"CTR{i:03d}", centre_name=f"Centre {i}")
+        for i in range(5)
+    ]
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: sample_centres)
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [])
+
+    stats = sync_centres(db_engine=test_engine)
+    assert stats["centres_inserted"] == 5
+    assert stats["vacancies_inserted"] == 210
+
+    # For 5 centres (210 vacancies), queries must scale in bulk/batch (e.g. <= 30 queries),
+    # not N+1 per vacancy (which was ~440 queries: 2 round trips per vacancy).
+    assert len(queries) <= 30, f"Expected <= 30 queries, got {len(queries)}"

@@ -97,8 +97,7 @@ def parse_datetime(val: Any) -> datetime | None:
 
     for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
         try:
-            dt = datetime.strptime(clean_val, fmt)
-            return dt.replace(tzinfo=timezone.utc)
+            return datetime.strptime(clean_val, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             continue
 
@@ -218,25 +217,50 @@ def normalize_preschool_level(val: Any) -> PreschoolLevel | None:
     if "infant" in normalized:
         return PreschoolLevel.INFANT
 
-    if "playgroup" in normalized or "play group" in normalized or re.search(r"\bpg\b", normalized):
+    if (
+        "playgroup" in normalized
+        or "play group" in normalized
+        or re.search(r"\bpg\b", normalized)
+    ):
         return PreschoolLevel.PG
 
-    if "pre nursery" in normalized or "nursery 1" in normalized or "nursery1" in normalized or re.search(r"\bn1\b", normalized):
+    if (
+        "pre nursery" in normalized
+        or "nursery 1" in normalized
+        or "nursery1" in normalized
+        or re.search(r"\bn1\b", normalized)
+    ):
         return PreschoolLevel.N1
 
-    if "nursery 2" in normalized or "nursery2" in normalized or re.search(r"\bn2\b", normalized):
+    if (
+        "nursery 2" in normalized
+        or "nursery2" in normalized
+        or re.search(r"\bn2\b", normalized)
+    ):
         return PreschoolLevel.N2
 
     if "nursery" in normalized:
         return PreschoolLevel.N2
 
-    if "kindergarten 1" in normalized or "kindergarten1" in normalized or re.search(r"\bk1\b", normalized):
+    if (
+        "kindergarten 1" in normalized
+        or "kindergarten1" in normalized
+        or re.search(r"\bk1\b", normalized)
+    ):
         return PreschoolLevel.K1
 
-    if "kindergarten 2" in normalized or "kindergarten2" in normalized or re.search(r"\bk2\b", normalized):
+    if (
+        "kindergarten 2" in normalized
+        or "kindergarten2" in normalized
+        or re.search(r"\bk2\b", normalized)
+    ):
         return PreschoolLevel.K2
 
-    if "student care" in normalized or "studentcare" in normalized or "student_care" in normalized:
+    if (
+        "student care" in normalized
+        or "studentcare" in normalized
+        or "student_care" in normalized
+    ):
         return PreschoolLevel.STUDENT_CARE
 
     logger.warning("Unmapped preschool service level: %r", val)
@@ -263,10 +287,25 @@ def normalize_citizenship_type(val: Any) -> CitizenshipType:
     if any(k in normalized for k in ("NON", "NOT", "OTHER", "FOREIGN")):
         return CitizenshipType.OTHERS
 
-    if normalized in ("SC", "SINGAPORE CITIZEN", "SINGAPORE CITIZENS", "SINGAPOREAN", "CITIZEN", "CITIZENS") or re.search(r"\bSC\b", normalized):
+    if normalized in (
+        "SC",
+        "SINGAPORE CITIZEN",
+        "SINGAPORE CITIZENS",
+        "SINGAPOREAN",
+        "CITIZEN",
+        "CITIZENS",
+    ) or re.search(r"\bSC\b", normalized):
         return CitizenshipType.SC
 
-    if normalized in ("SPR", "PR", "SINGAPORE PERMANENT RESIDENT", "SINGAPORE PERMANENT RESIDENTS", "PERMANENT RESIDENT", "PERMANENT RESIDENTS", "PERMANENTRESIDENT") or re.search(r"\b(SPR|PR)\b", normalized):
+    if normalized in (
+        "SPR",
+        "PR",
+        "SINGAPORE PERMANENT RESIDENT",
+        "SINGAPORE PERMANENT RESIDENTS",
+        "PERMANENT RESIDENT",
+        "PERMANENT RESIDENTS",
+        "PERMANENTRESIDENT",
+    ) or re.search(r"\b(SPR|PR)\b", normalized):
         return CitizenshipType.SPR
 
     return CitizenshipType.OTHERS
@@ -338,7 +377,12 @@ def fetch_datastore_records(
                 "fields": fields_query,
             }
 
-            logger.info("Fetching %s from data.gov.sg (offset=%d, limit=%d)...", entity_name, offset, limit)
+            logger.info(
+                "Fetching %s from data.gov.sg (offset=%d, limit=%d)...",
+                entity_name,
+                offset,
+                limit,
+            )
 
             retries = 3
             data: dict[str, Any] = {}
@@ -349,7 +393,13 @@ def fetch_datastore_records(
                     data = response.json() or {}
                     break
                 except (httpx.HTTPError, httpx.TimeoutException) as exc:
-                    logger.warning("%s API request failed (attempt %d/%d): %s", entity_name, attempt, retries, exc)
+                    logger.warning(
+                        "%s API request failed (attempt %d/%d): %s",
+                        entity_name,
+                        attempt,
+                        retries,
+                        exc,
+                    )
                     if attempt == retries:
                         raise
                     time.sleep(attempt * 2)
@@ -368,7 +418,9 @@ def fetch_datastore_records(
             offset += len(records)
 
             if total_available and offset >= total_available:
-                logger.info("Reached total available %s (%d).", entity_name, total_available)
+                logger.info(
+                    "Reached total available %s (%d).", entity_name, total_available
+                )
                 break
 
             if max_records and len(all_records) >= max_records:
@@ -407,7 +459,7 @@ SERVICES_REQUESTED_FIELDS = [
 
 def fetch_all_services(
     resource_id: str,
-    batch_size: int = 5000,
+    batch_size: int = 1000,
     max_records: int | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch all centre service records from data.gov.sg using pagination."""
@@ -441,7 +493,9 @@ def update_data_source_status(
                 sync_state=sync_state,
                 last_attempted_sync=last_attempted_sync,
                 last_successful_sync=last_successful_sync,
-                records_processed=records_processed if records_processed is not None else 0,
+                records_processed=records_processed
+                if records_processed is not None
+                else 0,
                 error_message=error_message,
             )
         else:
@@ -517,7 +571,7 @@ def sync_centres(
         # Fetch services before entering the database transaction to avoid holding open connections
         service_records = fetch_all_services(
             resource_id=services_resource_id,
-            batch_size=5000,
+            batch_size=1000,
             max_records=max_records,
         )
         stats["services_fetched"] = len(service_records)
@@ -529,12 +583,15 @@ def sync_centres(
             for db_centre in session.exec(select(PreschoolCentre)).all():
                 if db_centre.centre_code:
                     existing_centres[db_centre.centre_code] = db_centre
-            logger.info("Loaded %d existing centres from database.", len(existing_centres))
+            logger.info(
+                "Loaded %d existing centres from database.", len(existing_centres)
+            )
 
             # In-memory map from temporary permit code to centre_id for services resolution
             tp_alias_map: dict[str, int] = {}
+            valid_centres_with_rec: list[tuple[dict[str, Any], PreschoolCentre]] = []
 
-            # 1. Upsert Centres and Vacancies
+            # 1. Upsert Centres
             for rec in centre_records:
                 centre_code = clean_str(rec.get("centre_code"))
                 tp_code = clean_str(rec.get("tp_code"))
@@ -546,10 +603,16 @@ def sync_centres(
                     stats["vacancies_skipped"] += 42
                     continue
 
-                contact = clean_str(rec.get("centre_contact_no")) or clean_str(rec.get("contactno_lifesg"))
-                email = clean_str(rec.get("centre_email_address")) or clean_str(rec.get("emailaddress_lifesg"))
+                contact = clean_str(rec.get("centre_contact_no")) or clean_str(
+                    rec.get("contactno_lifesg")
+                )
+                email = clean_str(rec.get("centre_email_address")) or clean_str(
+                    rec.get("emailaddress_lifesg")
+                )
                 postal = clean_str(rec.get("postal_code"))
-                website = clean_str(rec.get("centre_website")) or clean_str(rec.get("website_lifesg"))
+                website = clean_str(rec.get("centre_website")) or clean_str(
+                    rec.get("website_lifesg")
+                )
                 food = clean_str(rec.get("food_offered"))
                 address = clean_str(rec.get("centre_address"))
                 languages = clean_str(rec.get("second_languages_offered"))
@@ -572,11 +635,18 @@ def sync_centres(
                 if centre is not None:
                     # Handle code transition: previously keyed under tp_code, now received permanent centre_code
                     if centre_code and old_code and centre_code != old_code:
-                        logger.info("Migrating centre code from %s to %s for centre_id=%s", old_code, centre_code, centre.centre_id)
+                        logger.info(
+                            "Migrating centre code from %s to %s for centre_id=%s",
+                            old_code,
+                            centre_code,
+                            centre.centre_id,
+                        )
                         centre.centre_code = centre_code
                         # Migrate existing vacancies to avoid duplicates while preserving history
                         old_vacancies = session.exec(
-                            select(VacancyRecord).where(VacancyRecord.centre_id == centre.centre_id)
+                            select(VacancyRecord).where(
+                                VacancyRecord.centre_id == centre.centre_id
+                            )
                         ).all()
                         for ev in old_vacancies:
                             if ev.record_id and ev.record_id.startswith(f"{old_code}_"):
@@ -635,14 +705,33 @@ def sync_centres(
                         last_updated=updated_at,
                     )
                     session.add(centre)
-                    session.flush()  # populate centre_id for foreign keys
-                    existing_centres[centre.centre_code] = centre
                     stats["centres_inserted"] += 1
 
+                valid_centres_with_rec.append((rec, centre))
+
+            # Flush once to populate centre_id on all newly inserted centres
+            session.flush()
+
+            # Update existing_centres and tp_alias_map with resolved centre_ids
+            for rec, centre in valid_centres_with_rec:
+                if centre.centre_code:
+                    existing_centres[centre.centre_code] = centre
+                tp_code = clean_str(rec.get("tp_code"))
                 if tp_code and centre.centre_id:
                     tp_alias_map[tp_code] = centre.centre_id
 
-                # Sync Vacancies for this centre
+            # Preload all existing vacancy records indexed by record_id
+            existing_vacancies: dict[str, VacancyRecord] = {
+                v.record_id: v
+                for v in session.exec(select(VacancyRecord)).all()
+                if v.record_id
+            }
+            logger.info(
+                "Loaded %d existing vacancies from database.", len(existing_vacancies)
+            )
+
+            # 2. Sync Vacancies
+            for rec, centre in valid_centres_with_rec:
                 vacancies = parse_vacancies_for_centre(
                     rec,
                     centre.centre_id,  # type: ignore[arg-type]
@@ -650,14 +739,16 @@ def sync_centres(
                     centre_code=centre.centre_code,
                 )
                 for v in vacancies:
-                    existing_v = session.get(VacancyRecord, v.record_id)
-                    if existing_v:
+                    if v.record_id and v.record_id in existing_vacancies:
+                        existing_v = existing_vacancies[v.record_id]
                         existing_v.vacancy_status = v.vacancy_status
                         existing_v.enrollment_month_year = v.enrollment_month_year
                         session.add(existing_v)
                         stats["vacancies_updated"] += 1
                     else:
                         session.add(v)
+                        if v.record_id:
+                            existing_vacancies[v.record_id] = v
                         stats["vacancies_inserted"] += 1
                     stats["vacancies_synced"] += 1
 
@@ -674,7 +765,9 @@ def sync_centres(
             # 2. Sync Services
             # Index existing services by (centre_id, type_of_service, level, citizenship_type)
             existing_services_list = session.exec(select(PreschoolService)).all()
-            existing_services: dict[tuple[int, str, PreschoolLevel, CitizenshipType], PreschoolService] = {
+            existing_services: dict[
+                tuple[int, str, PreschoolLevel, CitizenshipType], PreschoolService
+            ] = {
                 (s.centre_id, s.type_of_service, s.level, s.citizenship_type): s
                 for s in existing_services_list
             }
@@ -704,7 +797,9 @@ def sync_centres(
                     stats["services_inserted"] += 1
 
             if dry_run:
-                logger.info("Dry-run enabled: rolling back transaction without saving changes.")
+                logger.info(
+                    "Dry-run enabled: rolling back transaction without saving changes."
+                )
                 session.rollback()
             else:
                 session.commit()

@@ -63,10 +63,12 @@ class LocationPreference(str, Enum):
     WORKPLACE = "WORKPLACE"
     EITHER = "EITHER"
 
+
 class CitizenshipType(str, Enum):
     SC = "SC"
     SPR = "SPR"
     OTHERS = "OTHERS"
+
 
 class PreschoolLevel(str, Enum):
     INFANT = "infant"
@@ -76,6 +78,7 @@ class PreschoolLevel(str, Enum):
     K1 = "k1"
     K2 = "k2"
     STUDENT_CARE = "student_care"
+
 
 class PreschoolCentre(SQLModel, table=True):
     centre_id: int | None = Field(default=None, primary_key=True)
@@ -151,7 +154,9 @@ class PreschoolService(SQLModel, table=True):
     type_of_service: str
     level: PreschoolLevel = Field(index=True)
     fee: float
-    citizenship_type: CitizenshipType = Field(default=CitizenshipType.OTHERS, index=True)
+    citizenship_type: CitizenshipType = Field(
+        default=CitizenshipType.OTHERS, index=True
+    )
     last_updated: datetime | None = Field(default=None)
     remarks: str | None = Field(default=None, max_length=1000)
 
@@ -185,7 +190,10 @@ class User(SQLModel, table=True):
     )
     reviews: list["Review"] = Relationship(
         back_populates="user",
-        sa_relationship_kwargs={"foreign_keys": "[Review.user_id]", "cascade": "all, delete-orphan"},
+        sa_relationship_kwargs={
+            "foreign_keys": "[Review.user_id]",
+            "cascade": "all, delete-orphan",
+        },
     )
     watchlist_entries: list["WatchlistEntry"] = Relationship(
         back_populates="user",
@@ -195,7 +203,9 @@ class User(SQLModel, table=True):
 
 class FamilyPreferenceProfile(SQLModel, table=True):
     profile_id: str | None = Field(default=None, primary_key=True)
-    user_id: str = Field(foreign_key="user.user_id", ondelete="CASCADE", nullable=False, index=True)
+    user_id: str = Field(
+        foreign_key="user.user_id", ondelete="CASCADE", nullable=False, index=True
+    )
     profile_name: str
     level: PreschoolLevel = Field(index=True)
     citizenship_status: CitizenshipType = Field(default=CitizenshipType.SC, index=True)
@@ -217,7 +227,10 @@ class Review(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("centre_id", "user_id", name="uq_review_centre_user"),
         CheckConstraint("rating >= 1 AND rating <= 5", name="ck_review_rating_1_to_5"),
-        CheckConstraint(f"moderation_status IN {tuple(status.value for status in ModerationStatus)}", name="ck_review_moderation_status"),
+        CheckConstraint(
+            f"moderation_status IN {tuple(status.value for status in ModerationStatus)}",
+            name="ck_review_moderation_status",
+        ),
     )
 
     review_id: str | None = Field(
@@ -230,10 +243,14 @@ class Review(SQLModel, table=True):
         nullable=False,
         index=True,
     )
-    user_id: str = Field(foreign_key="user.user_id", nullable=False, ondelete="CASCADE", index=True)
+    user_id: str = Field(
+        foreign_key="user.user_id", nullable=False, ondelete="CASCADE", index=True
+    )
     rating: int = Field(ge=1, le=5)
     review_description: str | None = Field(default=None)
-    moderation_status: ModerationStatus = Field(default=ModerationStatus.PENDING, index=True)
+    moderation_status: ModerationStatus = Field(
+        default=ModerationStatus.PENDING, index=True
+    )
     moderated_at: datetime | None = Field(default=None)
     moderated_by: str | None = Field(default=None, foreign_key="user.user_id")
     created_at: datetime = Field(
@@ -274,7 +291,9 @@ class WatchlistEntry(SQLModel, table=True):
         default_factory=lambda: str(uuid.uuid4()),
         primary_key=True,
     )
-    user_id: str = Field(foreign_key="user.user_id", ondelete="CASCADE", nullable=False, index=True)
+    user_id: str = Field(
+        foreign_key="user.user_id", ondelete="CASCADE", nullable=False, index=True
+    )
     centre_id: int = Field(
         foreign_key="preschoolcentre.centre_id",
         ondelete="CASCADE",
@@ -313,7 +332,12 @@ class ExternalDataSourceStatus(SQLModel, table=True):
 
 
 database_url = settings.DATABASE_URL
-engine = create_engine(database_url, echo=True)
+engine = create_engine(
+    database_url,
+    echo=settings.DATABASE_ECHO,
+    pool_pre_ping=True,
+    pool_recycle=3600,
+)
 
 
 def init_db(db_engine: Any = None) -> None:
