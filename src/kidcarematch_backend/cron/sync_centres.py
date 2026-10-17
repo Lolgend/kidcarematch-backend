@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from sqlmodel import Session, select
+from sqlmodel import Session, insert, select
 
 from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.db.db import (
@@ -592,7 +592,7 @@ def sync_centres(
             valid_centres_with_rec: list[tuple[dict[str, Any], PreschoolCentre]] = []
 
             # 1. Upsert Centres
-            for rec in centre_records:
+            for idx, rec in enumerate(centre_records):
                 centre_code = clean_str(rec.get("centre_code"))
                 tp_code = clean_str(rec.get("tp_code"))
                 identifier = centre_code or tp_code
@@ -709,8 +709,21 @@ def sync_centres(
 
                 valid_centres_with_rec.append((rec, centre))
 
+                if (idx + 1) % 500 == 0 or (idx + 1) == len(centre_records):
+                    logger.info(
+                        "Staged %d/%d centres (inserted %d, updated %d)...",
+                        idx + 1,
+                        len(centre_records),
+                        stats["centres_inserted"],
+                        stats["centres_updated"],
+                    )
+
             # Flush once to populate centre_id on all newly inserted centres
+            logger.info(
+                "Flushing %d staged centres to database...", len(valid_centres_with_rec)
+            )
             session.flush()
+            logger.info("Centres flush complete.")
 
             # Update existing_centres and tp_alias_map with resolved centre_ids
             for rec, centre in valid_centres_with_rec:
@@ -731,7 +744,7 @@ def sync_centres(
             )
 
             # 2. Sync Vacancies
-            for rec, centre in valid_centres_with_rec:
+            for idx, (rec, centre) in enumerate(valid_centres_with_rec):
                 vacancies = parse_vacancies_for_centre(
                     rec,
                     centre.centre_id,  # type: ignore[arg-type]
@@ -752,7 +765,19 @@ def sync_centres(
                         stats["vacancies_inserted"] += 1
                     stats["vacancies_synced"] += 1
 
+                if (idx + 1) % 500 == 0 or (idx + 1) == len(valid_centres_with_rec):
+                    logger.info(
+                        "Processed vacancies for %d/%d centres (synced %d vacancies so far)...",
+                        idx + 1,
+                        len(valid_centres_with_rec),
+                        stats["vacancies_synced"],
+                    )
+
+            logger.info(
+                "Flushing %d synced vacancies to database...", stats["vacancies_synced"]
+            )
             session.flush()
+            logger.info("Vacancies flush complete.")
 
             # Build centre code / tp_code map for services lookup
             centre_map: dict[str, int] = {}
@@ -762,7 +787,7 @@ def sync_centres(
             for tp, cid in tp_alias_map.items():
                 centre_map[tp] = cid
 
-            # 2. Sync Services
+            # 3. Sync Services
             # Index existing services by (centre_id, type_of_service, level, citizenship_type)
             existing_services_list = session.exec(select(PreschoolService)).all()
             existing_services: dict[
@@ -771,7 +796,11 @@ def sync_centres(
                 (s.centre_id, s.type_of_service, s.level, s.citizenship_type): s
                 for s in existing_services_list
             }
+            logger.info(
+                "Loaded %d existing services from database.", len(existing_services)
+            )
 
+            services_to_insert: list[dict[str, Any]] = []
             for i, s_rec in enumerate(service_records):
                 parsed_service = parse_centre_service(s_rec, centre_map)
                 if not parsed_service:
@@ -792,9 +821,44 @@ def sync_centres(
                     session.add(svc)
                     stats["services_updated"] += 1
                 else:
-                    session.add(parsed_service)
+                    services_to_insert.append(
+                        {
+                            "centre_id": parsed_service.centre_id,
+                            "type_of_service": parsed_service.type_of_service,
+                            "level": parsed_service.level,
+                            "fee": parsed_service.fee,
+                            "citizenship_type": parsed_service.citizenship_type,
+                            "last_updated": parsed_service.last_updated,
+                            "remarks": parsed_service.remarks,
+                        }
+                    )
                     existing_services[s_key] = parsed_service
                     stats["services_inserted"] += 1
+
+                if (i + 1) % 20000 == 0 or (i + 1) == len(service_records):
+                    logger.info(
+                        "Staged %d/%d services (to insert: %d, to update: %d)...",
+                        i + 1,
+                        len(service_records),
+                        len(services_to_insert),
+                        stats["services_updated"],
+                    )
+
+            if services_to_insert:
+                logger.info(
+                    "Bulk inserting %d new services in batches...",
+                    len(services_to_insert),
+                )
+                chunk_size = 5000
+                for chunk_start in range(0, len(services_to_insert), chunk_size):
+                    chunk = services_to_insert[chunk_start : chunk_start + chunk_size]
+                    session.execute(insert(PreschoolService), chunk)
+                    logger.info(
+                        "Inserted %d/%d services...",
+                        min(chunk_start + chunk_size, len(services_to_insert)),
+                        len(services_to_insert),
+                    )
+                logger.info("Services bulk insert complete.")
 
             if dry_run:
                 logger.info(
@@ -802,6 +866,7 @@ def sync_centres(
                 )
                 session.rollback()
             else:
+                logger.info("Committing all database changes...")
                 session.commit()
                 logger.info("Transaction committed successfully.")
 
