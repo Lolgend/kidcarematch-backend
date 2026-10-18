@@ -1220,6 +1220,53 @@ def test_sync_centres_heartbeat_lifecycle_dry_run_does_not_persist_status(monkey
         assert status is None
 
 
+def test_sync_vacancies_does_not_issue_per_record_queries(monkeypatch):
+    """Ensure vacancy syncing does not suffer from N+1 query loop / per-record autoflushes."""
+    from sqlalchemy import event
+    from sqlmodel import create_engine
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import init_db
+
+    test_engine = create_engine("sqlite:///:memory:")
+    init_db(test_engine)
+    monkeypatch.setattr(sc_mod, "engine", test_engine)
+
+    # 5 centres = 210 vacancies
+    centres = [
+        make_test_centre_payload(
+            centre_code=f"CTR{i:03d}",
+            centre_name=f"Centre {i}",
+            last_updated="2026-10-01",
+        )
+        for i in range(5)
+    ]
+    monkeypatch.setattr(sc_mod, "fetch_all_centres", lambda **kwargs: centres)
+    monkeypatch.setattr(sc_mod, "fetch_all_services", lambda **kwargs: [])
+
+    queries: list[str] = []
+
+    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        queries.append(statement)
+
+    event.listen(test_engine, "before_cursor_execute", before_cursor_execute)
+
+    sync_centres(db_engine=test_engine)
+
+    vacancy_select_queries = [
+        q for q in queries
+        if "FROM vacancyrecord" in q or "from vacancyrecord" in q
+    ]
+
+    # Vacancy lookups must be bulk/in-memory (O(1)), NOT 1 query per vacancy (which would be 210 queries)
+    assert len(vacancy_select_queries) <= 2, (
+        f"Too many vacancy SELECT queries ({len(vacancy_select_queries)} queries for 210 vacancies). "
+        "Vacancy sync is executing per-record queries instead of bulk/in-memory resolution."
+    )
+
+
+
 
 
 

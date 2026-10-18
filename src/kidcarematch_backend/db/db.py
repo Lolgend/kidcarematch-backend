@@ -313,7 +313,7 @@ class ExternalDataSourceStatus(SQLModel, table=True):
 
 
 database_url = settings.DATABASE_URL
-engine = create_engine(database_url, echo=True)
+engine = create_engine(database_url, echo=settings.DB_ECHO)
 
 
 def init_db(db_engine: Any = None) -> None:
