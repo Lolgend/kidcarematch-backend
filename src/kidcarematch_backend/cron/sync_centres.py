@@ -531,6 +531,13 @@ def sync_centres(
                     existing_centres[db_centre.centre_code] = db_centre
             logger.info("Loaded %d existing centres from database.", len(existing_centres))
 
+            # Load existing vacancies indexed by record_id to avoid N+1 query loops
+            existing_vacancies: dict[str, VacancyRecord] = {}
+            for db_vacancy in session.exec(select(VacancyRecord)).all():
+                if db_vacancy.record_id:
+                    existing_vacancies[db_vacancy.record_id] = db_vacancy
+            logger.info("Loaded %d existing vacancies from database.", len(existing_vacancies))
+
             # In-memory map from temporary permit code to centre_id for services resolution
             tp_alias_map: dict[str, int] = {}
 
@@ -582,17 +589,18 @@ def sync_centres(
                             if ev.record_id and ev.record_id.startswith(f"{old_code}_"):
                                 suffix = ev.record_id[len(old_code) + 1 :]
                                 new_record_id = f"{centre_code}_{suffix}"
+                                existing_vacancies.pop(ev.record_id, None)
                                 session.delete(ev)
                                 session.flush()
-                                session.add(
-                                    VacancyRecord(
-                                        record_id=new_record_id,
-                                        centre_id=ev.centre_id,
-                                        level_type=ev.level_type,
-                                        enrollment_month_year=ev.enrollment_month_year,
-                                        vacancy_status=ev.vacancy_status,
-                                    )
+                                new_v = VacancyRecord(
+                                    record_id=new_record_id,
+                                    centre_id=ev.centre_id,
+                                    level_type=ev.level_type,
+                                    enrollment_month_year=ev.enrollment_month_year,
+                                    vacancy_status=ev.vacancy_status,
                                 )
+                                session.add(new_v)
+                                existing_vacancies[new_record_id] = new_v
                         session.flush()
                         existing_centres.pop(old_code, None)
                         existing_centres[centre_code] = centre
@@ -650,7 +658,9 @@ def sync_centres(
                     centre_code=centre.centre_code,
                 )
                 for v in vacancies:
-                    existing_v = session.get(VacancyRecord, v.record_id)
+                    if not v.record_id:
+                        continue
+                    existing_v = existing_vacancies.get(v.record_id)
                     if existing_v:
                         existing_v.vacancy_status = v.vacancy_status
                         existing_v.enrollment_month_year = v.enrollment_month_year
@@ -658,6 +668,7 @@ def sync_centres(
                         stats["vacancies_updated"] += 1
                     else:
                         session.add(v)
+                        existing_vacancies[v.record_id] = v
                         stats["vacancies_inserted"] += 1
                     stats["vacancies_synced"] += 1
 
