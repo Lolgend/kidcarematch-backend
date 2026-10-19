@@ -9,7 +9,6 @@ from sqlmodel import Session, col, select
 
 from kidcarematch_backend.auth.security import get_current_admin
 from kidcarematch_backend.db.db import (
-    AccountStatus,
     ModerationStatus,
     PreschoolCentre,
     Review,
@@ -57,12 +56,6 @@ def list_admin_reviews(
     ] = None,
 ) -> AdminReviewListResponse:
     """Retrieve a paginated, enriched feed of reviews supporting multi-criteria filtering."""
-    if current_admin.account_status != AccountStatus.ACTIVE:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is suspended.",
-        )
-
     conditions = []
     if moderation_status is not None:
         conditions.append(col(Review.moderation_status) == moderation_status)
@@ -130,12 +123,6 @@ def update_review_moderation_status(
     session: Annotated[Session, Depends(get_session)],
 ) -> AdminReviewResponse:
     """Update review moderation status and record administrative audit metadata."""
-    if current_admin.account_status != AccountStatus.ACTIVE:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is suspended.",
-        )
-
     review = session.get(Review, review_id)
     if not review:
         raise HTTPException(
@@ -178,12 +165,6 @@ def delete_admin_review(
     session: Annotated[Session, Depends(get_session)],
 ) -> Response:
     """Permanently delete a preschool centre review row from the database."""
-    if current_admin.account_status != AccountStatus.ACTIVE:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is suspended.",
-        )
-
     review = session.get(Review, review_id)
     if not review:
         raise HTTPException(

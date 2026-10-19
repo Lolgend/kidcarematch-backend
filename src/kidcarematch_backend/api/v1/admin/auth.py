@@ -2,10 +2,10 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 
 from kidcarematch_backend.auth.security import get_current_admin
-from kidcarematch_backend.db.db import AccountStatus, User
+from kidcarematch_backend.db.db import User
 from kidcarematch_backend.schemas.admin import AdminLogoutResponse, AdminProfileResponse
 
 router = APIRouter()
@@ -21,11 +21,6 @@ def admin_login(
     current_admin: Annotated[User, Depends(get_current_admin)],
 ) -> AdminProfileResponse:
     """Verify administrator identity and return administrative profile."""
-    if current_admin.account_status != AccountStatus.ACTIVE:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is suspended.",
-        )
     return AdminProfileResponse.model_validate(current_admin)
 
 

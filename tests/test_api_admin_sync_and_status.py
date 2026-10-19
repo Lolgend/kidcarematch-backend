@@ -383,7 +383,20 @@ def test_get_status_with_existing_records_returns_persisted_metrics(
 
 
 def test_status_refresh_both_probes_succeed(client: TestClient, seed_admin_user, test_engine, monkeypatch):
-    """POST /api/v1/admin/status/refresh pings external endpoints and updates heartbeats to SUCCESS."""
+    """POST /api/v1/admin/status/refresh pings external endpoints, updates sync_state to SUCCESS, but preserves existing last_successful_sync."""
+    earlier_success = datetime(2026, 10, 1, 10, 0, 0, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        ecda_status = ExternalDataSourceStatus(
+            source_id="ECDA_DATASTORE",
+            source_name="ECDA Preschool Datastore",
+            sync_state=SyncState.IDLE,
+            last_successful_sync=earlier_success,
+            last_attempted_sync=earlier_success,
+            records_processed=2000,
+        )
+        session.add(ecda_status)
+        session.commit()
+
     mock_claims = FirebaseTokenClaims(uid=seed_admin_user.firebase_uid, email=seed_admin_user.email)
     app.dependency_overrides[get_token_claims] = lambda: mock_claims
 
@@ -406,12 +419,28 @@ def test_status_refresh_both_probes_succeed(client: TestClient, seed_admin_user,
     status_map = {item["source_id"]: item for item in data}
 
     assert status_map["ECDA_DATASTORE"]["sync_state"] == "SUCCESS"
-    assert status_map["ECDA_DATASTORE"]["last_successful_sync"] is not None
     assert status_map["ECDA_DATASTORE"]["error_message"] is None
+    # Existing last_successful_sync preserved from real dataset synchronization
+    assert (
+        datetime.fromisoformat(
+            status_map["ECDA_DATASTORE"]["last_successful_sync"].replace("Z", "+00:00")
+        )
+        == earlier_success
+    )
+    assert status_map["ECDA_DATASTORE"]["last_attempted_sync"] is not None
 
     assert status_map["ONEMAP_API"]["sync_state"] == "SUCCESS"
-    assert status_map["ONEMAP_API"]["last_successful_sync"] is not None
+    # Never completed real dataset sync, so last_successful_sync remains None
+    assert status_map["ONEMAP_API"]["last_successful_sync"] is None
     assert status_map["ONEMAP_API"]["error_message"] is None
+    assert status_map["ONEMAP_API"]["last_attempted_sync"] is not None
+
+    with Session(test_engine) as session:
+        db_ecda = session.get(ExternalDataSourceStatus, "ECDA_DATASTORE")
+        assert db_ecda is not None
+        assert db_ecda.last_successful_sync == earlier_success
+        assert db_ecda.last_attempted_sync is not None
+        assert db_ecda.last_attempted_sync > earlier_success
 
 
 def test_status_refresh_probes_failure_records_failed_and_diagnostics(

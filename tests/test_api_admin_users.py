@@ -547,6 +547,51 @@ def test_admin_update_user_in_place(client: TestClient, admin_headers, test_engi
     assert demoted_data["admin_level"] is None
 
 
+def test_admin_update_user_account_status(client: TestClient, admin_headers, test_engine):
+    """Admin updating user account_status to SUSPENDED and then back to ACTIVE."""
+    with Session(test_engine) as session:
+        u = User(
+            user_id="target-status-update-1",
+            firebase_uid="fb_target_status_update_1",
+            email="status_update@example.com",
+            full_name="Status Update User",
+            role=UserRole.PARENT,
+            account_status=AccountStatus.ACTIVE,
+        )
+        session.add(u)
+        session.commit()
+
+    # Update account_status to SUSPENDED
+    resp = client.put(
+        "/api/v1/admin/users/target-status-update-1",
+        json={"account_status": "SUSPENDED"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["account_status"] == "SUSPENDED"
+
+    # Verify directly in DB
+    with Session(test_engine) as session:
+        db_user = session.get(User, "target-status-update-1")
+        assert db_user is not None
+        assert db_user.account_status == AccountStatus.SUSPENDED
+
+    # Update account_status back to ACTIVE
+    resp_reactivate = client.put(
+        "/api/v1/admin/users/target-status-update-1",
+        json={"account_status": "ACTIVE"},
+        headers=admin_headers,
+    )
+    assert resp_reactivate.status_code == 200
+    assert resp_reactivate.json()["account_status"] == "ACTIVE"
+
+    # Verify directly in DB
+    with Session(test_engine) as session:
+        db_user = session.get(User, "target-status-update-1")
+        assert db_user is not None
+        assert db_user.account_status == AccountStatus.ACTIVE
+
+
 def test_admin_update_user_not_found(client: TestClient, admin_headers):
     """Updating a non-existent user ID returns HTTP 404 Not Found."""
     resp = client.put(

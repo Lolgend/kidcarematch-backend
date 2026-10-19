@@ -1,6 +1,7 @@
 """Admin request and response schemas."""
 
 from datetime import datetime
+from typing import TypeVar
 
 from pydantic import (
     BaseModel,
@@ -92,6 +93,7 @@ class AdminUserUpdateRequest(BaseModel):
 
     full_name: str | None = Field(default=None, min_length=1, max_length=100)
     role: UserRole | None = Field(default=None)
+    account_status: AccountStatus | None = Field(default=None)
     admin_level: int | None = Field(default=None, ge=1)
 
     @field_validator("full_name")
@@ -216,13 +218,18 @@ class SubsidyRuleCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_income_range(self) -> "SubsidyRuleCreate":
-        if (
-            self.income_min is not None
-            and self.income_max is not None
-            and self.income_min > self.income_max
-        ):
-            raise ValueError("income_min cannot be greater than income_max")
-        return self
+        return _validate_income_range(self)
+
+
+_T = TypeVar("_T")
+
+
+def _validate_income_range(model: _T) -> _T:
+    income_min = getattr(model, "income_min", None)
+    income_max = getattr(model, "income_max", None)
+    if income_min is not None and income_max is not None and income_min > income_max:
+        raise ValueError("income_min cannot be greater than income_max")
+    return model
 
 
 class SubsidyRuleUpdate(BaseModel):
@@ -241,13 +248,7 @@ class SubsidyRuleUpdate(BaseModel):
 
     @model_validator(mode="after")
     def validate_income_range(self) -> "SubsidyRuleUpdate":
-        if (
-            self.income_min is not None
-            and self.income_max is not None
-            and self.income_min > self.income_max
-        ):
-            raise ValueError("income_min cannot be greater than income_max")
-        return self
+        return _validate_income_range(self)
 
 
 class BulkSubsidyRulesRequest(BaseModel):

@@ -237,6 +237,9 @@ def update_user(
         else:
             user.admin_level = None
 
+    if payload.account_status is not None:
+        user.account_status = payload.account_status
+
     user.updated_at = datetime.now(timezone.utc)
     session.add(user)
     session.commit()

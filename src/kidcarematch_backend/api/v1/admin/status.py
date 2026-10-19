@@ -84,12 +84,6 @@ def probe_onemap_api(client: httpx.Client) -> tuple[bool, str | None]:
     status_code=status.HTTP_200_OK,
     summary="Get External Data Source Statuses",
 )
-@router.get(
-    "/",
-    response_model=list[DataSourceStatusResponse],
-    status_code=status.HTTP_200_OK,
-    include_in_schema=False,
-)
 def get_external_data_source_statuses(
     session: Annotated[Session, Depends(get_session)],
     _: Annotated[User, Depends(get_current_admin)],
@@ -127,7 +121,6 @@ def refresh_external_data_source_statuses(
     ecda.last_attempted_sync = now
     if ecda_ok:
         ecda.sync_state = SyncState.SUCCESS
-        ecda.last_successful_sync = now
         ecda.error_message = None
     else:
         ecda.sync_state = SyncState.FAILED
@@ -136,7 +129,6 @@ def refresh_external_data_source_statuses(
     onemap.last_attempted_sync = now
     if onemap_ok:
         onemap.sync_state = SyncState.SUCCESS
-        onemap.last_successful_sync = now
         onemap.error_message = None
     else:
         onemap.sync_state = SyncState.FAILED

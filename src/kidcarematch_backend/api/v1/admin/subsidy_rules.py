@@ -7,7 +7,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, st
 from sqlmodel import Session, col, select
 
 from kidcarematch_backend.auth.security import get_current_admin
-from kidcarematch_backend.db.db import SubsidyRule, User, get_session
+from kidcarematch_backend.db.db import SubsidyRule, get_session
 from kidcarematch_backend.schemas.admin import (
     BulkSubsidyRulesRequest,
     SubsidyRuleCreate,
@@ -25,7 +25,6 @@ router = APIRouter(dependencies=[Depends(get_current_admin)])
     summary="List Subsidy Rules",
 )
 def list_subsidy_rules(
-    current_admin: Annotated[User, Depends(get_current_admin)],
     session: Annotated[Session, Depends(get_session)],
 ) -> list[SubsidyRule]:
     """Retrieve full active configuration matrix of childcare subsidy rules."""
@@ -47,7 +46,6 @@ def list_subsidy_rules(
 )
 def bulk_update_subsidy_rules(
     payload: Annotated[list[SubsidyRuleCreate] | BulkSubsidyRulesRequest, Body(...)],
-    current_admin: Annotated[User, Depends(get_current_admin)],
     session: Annotated[Session, Depends(get_session)],
     replace: bool = Query(
         default=True,
@@ -137,7 +135,6 @@ def bulk_update_subsidy_rules(
 )
 def create_subsidy_rule(
     payload: SubsidyRuleCreate,
-    current_admin: Annotated[User, Depends(get_current_admin)],
     session: Annotated[Session, Depends(get_session)],
 ) -> SubsidyRule:
     """Create an individual subsidy rule with schema validation against canonical enums."""
@@ -177,7 +174,6 @@ def create_subsidy_rule(
 def update_subsidy_rule(
     rule_id: str,
     payload: SubsidyRuleUpdate,
-    current_admin: Annotated[User, Depends(get_current_admin)],
     session: Annotated[Session, Depends(get_session)],
 ) -> SubsidyRule:
     """Update an existing subsidy rule in-place by ID."""
@@ -205,7 +201,6 @@ def update_subsidy_rule(
 )
 def delete_subsidy_rule(
     rule_id: str,
-    current_admin: Annotated[User, Depends(get_current_admin)],
     session: Annotated[Session, Depends(get_session)],
 ) -> Response:
     """Permanently remove a subsidy rule by ID."""
