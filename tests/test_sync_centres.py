@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from typing import Any
+
 import pytest
 
 from kidcarematch_backend.cron.sync_centres import (
@@ -182,6 +183,7 @@ def test_normalize_preschool_level_canonical_and_free_form():
 
 def test_normalize_preschool_level_invalid_and_empty_returns_none(caplog):
     import logging
+
     from kidcarematch_backend.cron.sync_centres import normalize_preschool_level
 
     with caplog.at_level(logging.WARNING):
@@ -283,6 +285,7 @@ def test_parse_centre_service_null_citizenship_defaults_to_others():
 
 def test_parse_centre_service_unmapped_level_returns_none(caplog):
     import logging
+
     from kidcarematch_backend.cron.sync_centres import parse_centre_service
 
     raw_rec = {
@@ -303,6 +306,7 @@ def test_parse_centre_service_unmapped_level_returns_none(caplog):
 
 def test_parse_centre_service_empty_or_blank_level_logs_warning_and_returns_none(caplog):
     import logging
+
     from kidcarematch_backend.cron.sync_centres import parse_centre_service
 
     for empty_level in ("", "   ", None, "NA"):
@@ -339,9 +343,16 @@ def test_parse_centre_service_unknown_centre_returns_none():
 
 
 def test_sync_centres_orchestration_with_mocks(monkeypatch):
+    from sqlmodel import Session, SQLModel, create_engine, select
+
     from kidcarematch_backend.cron.sync_centres import sync_centres
-    from kidcarematch_backend.db.db import CitizenshipType, PreschoolCentre, PreschoolLevel, PreschoolService, VacancyRecord
-    from sqlmodel import create_engine, Session, SQLModel, select
+    from kidcarematch_backend.db.db import (
+        CitizenshipType,
+        PreschoolCentre,
+        PreschoolLevel,
+        PreschoolService,
+        VacancyRecord,
+    )
 
     # Use in-memory SQLite for test orchestration
     test_engine = create_engine("sqlite:///:memory:")
@@ -408,9 +419,12 @@ def test_sync_centres_orchestration_with_mocks(monkeypatch):
 
 
 def test_sync_centres_multi_centre_horizon_alignment(monkeypatch):
-    from kidcarematch_backend.cron.sync_centres import sync_centres, VACANCY_LEVELS, VACANCY_HORIZONS
+    from sqlmodel import Session, SQLModel, create_engine, select
+
+    from kidcarematch_backend.cron.sync_centres import (
+        sync_centres,
+    )
     from kidcarematch_backend.db.db import VacancyRecord
-    from sqlmodel import create_engine, Session, SQLModel, select
 
     test_engine = create_engine("sqlite:///:memory:")
     SQLModel.metadata.create_all(test_engine)
@@ -470,9 +484,12 @@ def test_sync_centres_multi_centre_horizon_alignment(monkeypatch):
 
 
 def test_sync_centres_rolling_cycle_preserves_historical_records(monkeypatch):
-    from kidcarematch_backend.cron.sync_centres import sync_centres, VACANCY_LEVELS, VACANCY_HORIZONS
+    from sqlmodel import Session, SQLModel, create_engine, select
+
+    from kidcarematch_backend.cron.sync_centres import (
+        sync_centres,
+    )
     from kidcarematch_backend.db.db import VacancyRecord
-    from sqlmodel import create_engine, Session, SQLModel, select
 
     test_engine = create_engine("sqlite:///:memory:")
     SQLModel.metadata.create_all(test_engine)
@@ -551,7 +568,14 @@ def test_sync_centres_rolling_cycle_preserves_historical_records(monkeypatch):
 def test_preschool_service_composite_uniqueness_constraint():
     from sqlalchemy.exc import IntegrityError
     from sqlmodel import Session, create_engine
-    from kidcarematch_backend.db.db import CitizenshipType, PreschoolCentre, PreschoolLevel, PreschoolService, init_db
+
+    from kidcarematch_backend.db.db import (
+        CitizenshipType,
+        PreschoolCentre,
+        PreschoolLevel,
+        PreschoolService,
+        init_db,
+    )
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -611,9 +635,10 @@ def test_parse_centre_service_resolves_tp_code():
 
 def test_sync_centres_resolves_services_for_tp_code_centres(monkeypatch):
     from sqlmodel import Session, create_engine, select
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import PreschoolCentre, PreschoolService, init_db
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -669,9 +694,10 @@ def test_sync_centres_resolves_services_for_tp_code_centres(monkeypatch):
 
 def test_sync_centres_updates_existing_services_idempotently(monkeypatch):
     from sqlmodel import Session, create_engine, select
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import PreschoolService, init_db
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -730,9 +756,15 @@ def test_sync_centres_updates_existing_services_idempotently(monkeypatch):
 
 def test_sync_centres_tp_code_only_centre_and_subsequent_update(monkeypatch):
     from sqlmodel import Session, create_engine, select
-    from kidcarematch_backend.cron.sync_centres import sync_centres
-    from kidcarematch_backend.db.db import PreschoolCentre, PreschoolService, VacancyRecord, init_db
+
     import kidcarematch_backend.cron.sync_centres as sc_mod
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import (
+        PreschoolCentre,
+        PreschoolService,
+        VacancyRecord,
+        init_db,
+    )
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -823,9 +855,15 @@ def test_sync_centres_tp_code_only_centre_and_subsequent_update(monkeypatch):
 
 def test_code_transition_migrates_historical_vacancies_without_duplicates(monkeypatch):
     from sqlmodel import Session, create_engine, select
-    from kidcarematch_backend.cron.sync_centres import sync_centres
-    from kidcarematch_backend.db.db import PreschoolCentre, PreschoolService, VacancyRecord, init_db
+
     import kidcarematch_backend.cron.sync_centres as sc_mod
+    from kidcarematch_backend.cron.sync_centres import sync_centres
+    from kidcarematch_backend.db.db import (
+        PreschoolCentre,
+        PreschoolService,
+        VacancyRecord,
+        init_db,
+    )
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -899,16 +937,17 @@ def test_code_transition_migrates_historical_vacancies_without_duplicates(monkey
 
 def test_sync_centres_mixed_services_normalization_and_skipping(monkeypatch, caplog):
     import logging
+
     from sqlmodel import Session, create_engine, select
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import (
         CitizenshipType,
-        PreschoolCentre,
         PreschoolLevel,
         PreschoolService,
         init_db,
     )
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -1039,9 +1078,10 @@ def test_sync_centres_mixed_services_normalization_and_skipping(monkeypatch, cap
 
 def test_sync_centres_heartbeat_lifecycle_success(monkeypatch):
     from sqlmodel import Session, create_engine
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -1086,9 +1126,10 @@ def test_sync_centres_heartbeat_lifecycle_success(monkeypatch):
 
 def test_sync_centres_heartbeat_lifecycle_running_state(monkeypatch):
     from sqlmodel import Session, create_engine
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -1119,9 +1160,10 @@ def test_sync_centres_heartbeat_lifecycle_running_state(monkeypatch):
 
 def test_sync_centres_heartbeat_lifecycle_failure_on_fetch(monkeypatch):
     from sqlmodel import Session, create_engine
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -1150,9 +1192,10 @@ def test_sync_centres_heartbeat_lifecycle_failure_on_fetch(monkeypatch):
 
 def test_sync_centres_heartbeat_lifecycle_failure_preserves_previous_success_timestamp(monkeypatch):
     from sqlmodel import Session, create_engine
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import ExternalDataSourceStatus, SyncState, init_db
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)
@@ -1197,9 +1240,10 @@ def test_sync_centres_heartbeat_lifecycle_failure_preserves_previous_success_tim
 
 def test_sync_centres_heartbeat_lifecycle_dry_run_does_not_persist_status(monkeypatch):
     from sqlmodel import Session, create_engine
+
+    import kidcarematch_backend.cron.sync_centres as sc_mod
     from kidcarematch_backend.cron.sync_centres import sync_centres
     from kidcarematch_backend.db.db import ExternalDataSourceStatus, init_db
-    import kidcarematch_backend.cron.sync_centres as sc_mod
 
     test_engine = create_engine("sqlite:///:memory:")
     init_db(test_engine)

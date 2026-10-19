@@ -97,8 +97,7 @@ def parse_datetime(val: Any) -> datetime | None:
 
     for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
         try:
-            dt = datetime.strptime(clean_val, fmt)
-            return dt.replace(tzinfo=timezone.utc)
+            return datetime.strptime(clean_val, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             continue
 
