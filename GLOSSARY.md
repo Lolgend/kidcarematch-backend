@@ -36,6 +36,10 @@ _Avoid_: Third-party login, social auth, SSO
 The state and progression of a user's account in KidCareMatch, spanning initial Firebase credential registration, application onboarding profile creation, and active or suspended account status.
 _Avoid_: User onboarding flow, account lifecycle
 
+**Account Deactivation**:
+The canonical state and operational semantics (`AccountStatus.SUSPENDED`) in which a user account is administratively suspended. Suspended accounts retain historical relational integrity (associated reviews, preference profiles, and watchlist entries remain intact) while strictly barring session authentication and protected administrative or user API interactions.
+_Avoid_: User soft-deletion, account termination, ban, blacklisting
+
 **Administrator**:
 A privileged user role authorized to manage early childhood subsidy rules, review moderation workflows, and monitor external data sync pipelines.
 _Avoid_: Superuser, mod, staff
@@ -47,6 +51,10 @@ _Avoid_: Discount rule, grant scheme, rebate config
 **External Data Source Status**:
 A persistent operational heartbeat record tracking the real-time synchronization state, execution timestamps, record counts, and failure diagnostics for an external data provider.
 _Avoid_: Sync log, healthcheck record, source tracker
+
+**OneMap API**:
+The authoritative geospatial mapping, geocoding, and reverse-geocoding web services provided by the Singapore Land Authority (SLA), utilized for preschool centre coordinate resolution, postal code lookup, and parental travel proximity matching.
+_Avoid_: Google Maps Platform, SLA GIS, SLA Map service
 
 **Family Preference Profile**:
 A parent-configured matching criteria profile representing a specific child or search scenario, capturing target service type, location postal anchors, household income, budget ceiling, and cost/travel trade-off weights.
