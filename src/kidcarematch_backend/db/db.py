@@ -289,7 +289,10 @@ class WatchlistEntry(SQLModel, table=True):
 
 
 class SubsidyRule(SQLModel, table=True):
-    rule_id: str | None = Field(default=None, primary_key=True)
+    rule_id: str | None = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        primary_key=True,
+    )
     subsidy_name: str = Field(index=True)
     tier_name: str | None = Field(default=None)
     care_type: CareType = Field(index=True)
