@@ -806,13 +806,13 @@ def test_bulk_put_subsidy_rules_wrapped_payload_replaces_matrix(
         assert rules[0].rule_id == "SR_REPLACED_SINGLE"
 
 
-def test_bulk_put_subsidy_rules_upsert_mode_preserves_unmentioned(
+def test_bulk_put_subsidy_rules_unconditionally_replaces_matrix(
     client: TestClient,
     seed_admin_user,
     seed_subsidy_rules,
     test_engine,
 ):
-    """Bulk PUT with replace=false updates matching rules without purging unmentioned ones."""
+    """Bulk PUT unconditionally replaces matrix: unmentioned rules are purged."""
     mock_claims = FirebaseTokenClaims(
         uid=seed_admin_user.firebase_uid, email=seed_admin_user.email
     )
@@ -822,7 +822,7 @@ def test_bulk_put_subsidy_rules_upsert_mode_preserves_unmentioned(
     payload = [
         {
             "rule_id": "SR_BASIC_INFANT_WA",
-            "subsidy_name": "Basic Infant Subsidy (Upserted)",
+            "subsidy_name": "Basic Infant Subsidy (Replaced)",
             "care_type": "INFANT_CARE",
             "metric": "FIXED",
             "citizenship": "SC",
@@ -831,7 +831,7 @@ def test_bulk_put_subsidy_rules_upsert_mode_preserves_unmentioned(
     ]
 
     response = client.put(
-        "/api/v1/admin/subsidy-rules?replace=false",
+        "/api/v1/admin/subsidy-rules",
         json=payload,
         headers={"Authorization": "Bearer mock-token"},
     )
@@ -839,10 +839,9 @@ def test_bulk_put_subsidy_rules_upsert_mode_preserves_unmentioned(
 
     with Session(test_engine) as session:
         rules = session.exec(select(SubsidyRule)).all()
-        assert len(rules) == 2  # Both rules still exist!
-        rule_dict = {r.rule_id: r for r in rules}
-        assert rule_dict["SR_BASIC_INFANT_WA"].subsidy_amount == 630.0
-        assert rule_dict["SR_ADD_INFANT_T1"].subsidy_amount == 710.0
+        assert len(rules) == 1  # Only the mentioned rule exists!
+        assert rules[0].rule_id == "SR_BASIC_INFANT_WA"
+        assert rules[0].subsidy_amount == 630.0
 
 
 def test_bulk_put_subsidy_rules_empty_payload_clears_matrix(

@@ -3,7 +3,7 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Response, status
 from sqlmodel import Session, col, select
 
 from kidcarematch_backend.auth.security import get_current_admin
@@ -42,17 +42,13 @@ def list_subsidy_rules(
     "",
     response_model=list[SubsidyRuleResponse],
     status_code=status.HTTP_200_OK,
-    summary="Bulk Update or Replace Subsidy Rule Matrix",
+    summary="Bulk Replace Subsidy Rule Matrix",
 )
 def bulk_update_subsidy_rules(
     payload: Annotated[list[SubsidyRuleCreate] | BulkSubsidyRulesRequest, Body(...)],
     session: Annotated[Session, Depends(get_session)],
-    replace: bool = Query(
-        default=True,
-        description="Whether to replace unmentioned active rules (True) or perform in-place upsert (False)",
-    ),
 ) -> list[SubsidyRule]:
-    """Accept a bulk payload of subsidy rule definitions to update or replace the active configuration matrix in-place within a single database transaction."""
+    """Accept a bulk payload of subsidy rule definitions to replace the active configuration matrix within a single database transaction."""
     rule_items: list[SubsidyRuleCreate] = (
         payload.rules if isinstance(payload, BulkSubsidyRulesRequest) else payload
     )
@@ -76,44 +72,24 @@ def bulk_update_subsidy_rules(
     payload_rule_ids: set[str] = set()
 
     for item in rule_items:
+        data = item.model_dump(exclude={"rule_id"})
         if item.rule_id is not None and item.rule_id in existing_rules:
             # Update existing rule in-place
             rule = existing_rules[item.rule_id]
-            rule.subsidy_name = item.subsidy_name
-            rule.tier_name = item.tier_name
-            rule.care_type = item.care_type
-            rule.metric = item.metric
-            rule.applicant_status = item.applicant_status
-            rule.citizenship = item.citizenship
-            rule.income_min = item.income_min
-            rule.income_max = item.income_max
-            rule.subsidy_amount = item.subsidy_amount
-            rule.effective_date = item.effective_date
+            for key, val in data.items():
+                setattr(rule, key, val)
             payload_rule_ids.add(item.rule_id)
         else:
             # Create new rule
             new_id = item.rule_id or str(uuid.uuid4())
-            new_rule = SubsidyRule(
-                rule_id=new_id,
-                subsidy_name=item.subsidy_name,
-                tier_name=item.tier_name,
-                care_type=item.care_type,
-                metric=item.metric,
-                applicant_status=item.applicant_status,
-                citizenship=item.citizenship,
-                income_min=item.income_min,
-                income_max=item.income_max,
-                subsidy_amount=item.subsidy_amount,
-                effective_date=item.effective_date,
-            )
+            new_rule = SubsidyRule(rule_id=new_id, **data)
             session.add(new_rule)
             payload_rule_ids.add(new_id)
 
-    # If replace is True, remove existing rules not mentioned in payload
-    if replace:
-        for r_id, r_obj in existing_rules.items():
-            if r_id not in payload_rule_ids:
-                session.delete(r_obj)
+    # Unconditionally replace configuration matrix: remove existing rules not mentioned in payload
+    for r_id, r_obj in existing_rules.items():
+        if r_id not in payload_rule_ids:
+            session.delete(r_obj)
 
     session.commit()
 
@@ -148,16 +124,7 @@ def create_subsidy_rule(
 
     rule = SubsidyRule(
         rule_id=payload.rule_id or str(uuid.uuid4()),
-        subsidy_name=payload.subsidy_name,
-        tier_name=payload.tier_name,
-        care_type=payload.care_type,
-        metric=payload.metric,
-        applicant_status=payload.applicant_status,
-        citizenship=payload.citizenship,
-        income_min=payload.income_min,
-        income_max=payload.income_max,
-        subsidy_amount=payload.subsidy_amount,
-        effective_date=payload.effective_date,
+        **payload.model_dump(exclude={"rule_id"}),
     )
     session.add(rule)
     session.commit()
