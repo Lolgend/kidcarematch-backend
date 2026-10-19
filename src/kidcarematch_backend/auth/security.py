@@ -1,5 +1,6 @@
 """Authentication and security dependencies for KidCareMatch."""
 
+from pathlib import Path
 from typing import Annotated
 
 import firebase_admin  # type: ignore[import-untyped]
@@ -28,7 +29,7 @@ def get_firebase_app() -> firebase_admin.App:
     try:
         return firebase_admin.get_app()
     except ValueError:
-        if settings.FIREBASE_CREDENTIALS_PATH:
+        if settings.FIREBASE_CREDENTIALS_PATH and Path(settings.FIREBASE_CREDENTIALS_PATH).is_file():
             cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
             return firebase_admin.initialize_app(cred)
         if settings.FIREBASE_PROJECT_ID:
