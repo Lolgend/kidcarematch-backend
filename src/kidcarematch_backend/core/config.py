@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    DATABASE_URL: str = ""
+    DATABASE_URL: str = "sqlite:///:memory:"
     DB_ECHO: bool = False
     DATA_GOV_SG_API_URL: str = "https://data.gov.sg/api/action/datastore_search"
     DATA_GOV_SG_CENTRES_RESOURCE_ID: str = "d_696c994c50745b079b3684f0e90ffc53"

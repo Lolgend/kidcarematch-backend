@@ -19,9 +19,11 @@ Use `git ls-files` rather than recursive file searches.
 ### Toolchain & Commands
 - Package manager: `uv`
 - Run tests: `uv run pytest` (Always use `BypassSandbox: true`)
-- Type check: `uv run mypy src tests`
+- Type check: `uv run mypy src tests` (Always use `BypassSandbox: true`)
 - Lint / format: `uv run ruff check .`
 - GitHub CLI: `gh` (Always use `BypassSandbox: true`)
+- Git write ops (`git branch`, `git worktree`): Always use `BypassSandbox: true`
+- PowerShell: Chain commands with `;`, not `&&`
 
 ### Pull Request (PR)
 
