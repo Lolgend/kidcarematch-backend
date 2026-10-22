@@ -194,7 +194,14 @@ class User(SQLModel, table=True):
 
 
 class FamilyPreferenceProfile(SQLModel, table=True):
-    profile_id: str | None = Field(default=None, primary_key=True)
+    __table_args__ = (
+        UniqueConstraint("user_id", "profile_name", name="uq_family_profile_user_profile_name"),
+    )
+
+    profile_id: str | None = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        primary_key=True,
+    )
     user_id: str = Field(foreign_key="user.user_id", ondelete="CASCADE", nullable=False, index=True)
     profile_name: str
     level: PreschoolLevel = Field(index=True)
