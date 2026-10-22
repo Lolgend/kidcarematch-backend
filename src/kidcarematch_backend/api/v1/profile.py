@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -274,18 +274,18 @@ def patch_profile(
         and payload.profile_name is not None
         and payload.profile_name != existing_profile.profile_name
     ):
-            collision = session.exec(
-                select(FamilyPreferenceProfile).where(
-                    FamilyPreferenceProfile.user_id == current_user.user_id,
-                    FamilyPreferenceProfile.profile_name == payload.profile_name,
-                    FamilyPreferenceProfile.profile_id != profile_id,
-                )
-            ).first()
-            if collision:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"A profile with the name '{payload.profile_name}' already exists for your account.",
-                )
+        collision = session.exec(
+            select(FamilyPreferenceProfile).where(
+                FamilyPreferenceProfile.user_id == current_user.user_id,
+                FamilyPreferenceProfile.profile_name == payload.profile_name,
+                FamilyPreferenceProfile.profile_id != profile_id,
+            )
+        ).first()
+        if collision:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A profile with the name '{payload.profile_name}' already exists for your account.",
+            )
 
     # Merge values for cross-field validation
     merged_location_pref = patch_data.get(
@@ -294,15 +294,14 @@ def patch_profile(
     merged_workplace_postal = patch_data.get(
         "workplace_postal_code", existing_profile.workplace_postal_code
     )
-    merged_cost_weight = patch_data.get(
-        "cost_weight", existing_profile.cost_weight
-    )
+    merged_cost_weight = patch_data.get("cost_weight", existing_profile.cost_weight)
     merged_travel_weight = patch_data.get(
         "travel_weight", existing_profile.travel_weight
     )
 
     if (
-        merged_location_pref in (LocationPreference.WORKPLACE, LocationPreference.EITHER)
+        merged_location_pref
+        in (LocationPreference.WORKPLACE, LocationPreference.EITHER)
         and not merged_workplace_postal
     ):
         raise HTTPException(
@@ -339,3 +338,37 @@ def patch_profile(
 
     session.refresh(existing_profile)
     return existing_profile
+
+
+@router.delete(
+    "/{profile_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete Family Preference Profile",
+)
+def delete_profile(
+    profile_id: str,
+    current_user: Annotated[User, Depends(get_current_parent)],
+    session: Annotated[Session, Depends(get_session)],
+) -> Response:
+    """Delete a single Family Preference Profile by ID for the authenticated parent.
+
+    Enforces:
+    - Parent role requirement (ADMIN forbidden).
+    - Profile existence and strict user isolation (HTTP 404 if not found or owned by another user).
+    - Database deletion committed and returns HTTP 204 No Content.
+    """
+    profile = session.exec(
+        select(FamilyPreferenceProfile).where(
+            FamilyPreferenceProfile.profile_id == profile_id,
+            FamilyPreferenceProfile.user_id == current_user.user_id,
+        )
+    ).first()
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Preference profile not found",
+        )
+
+    session.delete(profile)
+    session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
