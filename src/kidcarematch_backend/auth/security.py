@@ -101,3 +101,14 @@ def get_current_admin(
         )
     return current_user
 
+
+def get_current_parent(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Validate that the current user has parent privileges."""
+    if current_user.role != UserRole.PARENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Parent privileges required.",
+        )
+    return current_user
