@@ -172,3 +172,128 @@ class ProfileResponse(BaseModel):
         if isinstance(v, datetime):
             return v.strftime("%Y-%m")
         return str(v)
+
+
+
+class ProfileUpdateRequest(ProfileCreateRequest):
+    """Payload for fully replacing a Family Preference Profile."""
+
+
+class ProfilePatchRequest(BaseModel):
+    """Payload for partially updating a Family Preference Profile."""
+
+    profile_name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description="Descriptive name or label for the preference profile",
+    )
+    level: PreschoolLevel | None = Field(
+        default=None,
+        description="Preschool cohort developmental age level",
+    )
+    citizenship_status: CitizenshipType | None = Field(
+        default=None,
+        description="Child's citizenship status for fee and subsidy determination",
+    )
+    service_required: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description="Required service offering type (e.g. Full Day, Half Day)",
+    )
+    home_postal_code: str | None = Field(
+        default=None,
+        description="6-digit Singapore home postal code",
+    )
+    workplace_postal_code: str | None = Field(
+        default=None,
+        description="Optional 6-digit Singapore workplace postal code",
+    )
+    location_preference: LocationPreference | None = Field(
+        default=None,
+        description="Proximity anchor prioritization preference (HOME, WORKPLACE, EITHER)",
+    )
+    household_income: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Gross monthly household income in SGD",
+    )
+    household_member_count: int | None = Field(
+        default=None,
+        ge=1,
+        description="Total number of household members for per-capita income calculation",
+    )
+    budget_max: float | None = Field(
+        default=None,
+        gt=0.0,
+        description="Maximum monthly net preschool fee budget ceiling in SGD",
+    )
+    enrollment_month_year: str | None = Field(
+        default=None,
+        description="Target enrollment month and year in YYYY-MM format",
+    )
+    cost_weight: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Trade-off weight assigned to cost factor (0.0 to 1.0)",
+    )
+    travel_weight: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Trade-off weight assigned to travel factor (0.0 to 1.0)",
+    )
+
+    @field_validator("profile_name")
+    @classmethod
+    def validate_profile_name(cls, v: str | None) -> str | None:
+        """Validate profile_name is non-empty if provided."""
+        if v is not None:
+            stripped = v.strip()
+            if not stripped:
+                raise ValueError("profile_name cannot be empty or whitespace only")
+            return stripped
+        return v
+
+    @field_validator("service_required")
+    @classmethod
+    def validate_service_required(cls, v: str | None) -> str | None:
+        """Validate service_required is non-empty if provided."""
+        if v is not None:
+            stripped = v.strip()
+            if not stripped:
+                raise ValueError("service_required cannot be empty or whitespace only")
+            return stripped
+        return v
+
+    @field_validator("home_postal_code")
+    @classmethod
+    def validate_home_postal(cls, v: str | None) -> str | None:
+        """Validate 6-digit Singapore postal code format for home residence if provided."""
+        if v is not None and not SINGAPORE_POSTAL_REGEX.match(v):
+            raise ValueError(
+                "home_postal_code must be a valid 6-digit Singapore postal code"
+            )
+        return v
+
+    @field_validator("workplace_postal_code")
+    @classmethod
+    def validate_workplace_postal(cls, v: str | None) -> str | None:
+        """Validate 6-digit Singapore postal code format for workplace if provided."""
+        if v is not None and not SINGAPORE_POSTAL_REGEX.match(v):
+            raise ValueError(
+                "workplace_postal_code must be a valid 6-digit Singapore postal code"
+            )
+        return v
+
+    @field_validator("enrollment_month_year")
+    @classmethod
+    def validate_enrollment_month(cls, v: str | None) -> str | None:
+        """Validate target enrollment month matches YYYY-MM format if provided."""
+        if v is not None and not ENROLLMENT_MONTH_REGEX.match(v):
+            raise ValueError(
+                "enrollment_month_year must be in YYYY-MM format (e.g. 2027-03)"
+            )
+        return v
