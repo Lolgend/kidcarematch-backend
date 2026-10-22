@@ -1,6 +1,5 @@
 """Family Preference Profile API endpoints."""
 
-from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -10,7 +9,6 @@ from sqlmodel import Session, select
 from kidcarematch_backend.auth.security import get_current_parent
 from kidcarematch_backend.db.db import (
     FamilyPreferenceProfile,
-    LocationPreference,
     User,
     get_session,
 )
@@ -19,9 +17,41 @@ from kidcarematch_backend.schemas.profile import (
     ProfilePatchRequest,
     ProfileResponse,
     ProfileUpdateRequest,
+    parse_year_month,
+    validate_location_and_weights,
 )
 
 router = APIRouter(prefix="/api/v1/profile", tags=["profile"])
+
+
+def is_profile_name_unique_violation(exc: IntegrityError) -> bool:
+    """Determine whether an IntegrityError is caused by the profile name unique constraint."""
+    err_str = str(exc).lower()
+    return (
+        "uq_family_profile_user_profile_name" in err_str
+        or "familypreferenceprofile.user_id, familypreferenceprofile.profile_name" in err_str
+        or ("unique constraint failed" in err_str and "profile_name" in err_str)
+    )
+
+
+def get_profile_or_404(
+    profile_id: str,
+    user_id: str,
+    session: Session,
+) -> FamilyPreferenceProfile:
+    """Retrieve a single Family Preference Profile by ID for the user, raising 404 if not found."""
+    profile = session.exec(
+        select(FamilyPreferenceProfile).where(
+            FamilyPreferenceProfile.profile_id == profile_id,
+            FamilyPreferenceProfile.user_id == user_id,
+        )
+    ).first()
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Preference profile not found",
+        )
+    return profile
 
 
 @router.post(
@@ -29,12 +59,6 @@ router = APIRouter(prefix="/api/v1/profile", tags=["profile"])
     response_model=ProfileResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create Family Preference Profile",
-)
-@router.post(
-    "/",
-    response_model=ProfileResponse,
-    status_code=status.HTTP_201_CREATED,
-    include_in_schema=False,
 )
 def create_profile(
     payload: ProfileCreateRequest,
@@ -90,6 +114,8 @@ def create_profile(
         session.commit()
     except IntegrityError as exc:
         session.rollback()
+        if not is_profile_name_unique_violation(exc):
+            raise
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"A profile with the name '{payload.profile_name}' already exists for your account.",
@@ -104,12 +130,6 @@ def create_profile(
     response_model=list[ProfileResponse],
     status_code=status.HTTP_200_OK,
     summary="List Family Preference Profiles",
-)
-@router.get(
-    "/",
-    response_model=list[ProfileResponse],
-    status_code=status.HTTP_200_OK,
-    include_in_schema=False,
 )
 def list_profiles(
     current_user: Annotated[User, Depends(get_current_parent)],
@@ -143,18 +163,8 @@ def get_profile(
     Returns HTTP 404 if the profile does not exist or belongs to another user
     (preventing ID enumeration).
     """
-    profile = session.exec(
-        select(FamilyPreferenceProfile).where(
-            FamilyPreferenceProfile.profile_id == profile_id,
-            FamilyPreferenceProfile.user_id == current_user.user_id,
-        )
-    ).first()
-    if not profile:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preference profile not found",
-        )
-    return profile
+    assert current_user.user_id is not None
+    return get_profile_or_404(profile_id, current_user.user_id, session)
 
 
 @router.put(
@@ -176,17 +186,8 @@ def update_profile(
     - Uniqueness of profile name per parent account if renamed (HTTP 409).
     - Domain validation of all criteria (HTTP 422).
     """
-    existing_profile = session.exec(
-        select(FamilyPreferenceProfile).where(
-            FamilyPreferenceProfile.profile_id == profile_id,
-            FamilyPreferenceProfile.user_id == current_user.user_id,
-        )
-    ).first()
-    if not existing_profile:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preference profile not found",
-        )
+    assert current_user.user_id is not None
+    existing_profile = get_profile_or_404(profile_id, current_user.user_id, session)
 
     # Check for name collision if renaming
     if payload.profile_name != existing_profile.profile_name:
@@ -222,6 +223,8 @@ def update_profile(
         session.commit()
     except IntegrityError as exc:
         session.rollback()
+        if not is_profile_name_unique_violation(exc):
+            raise
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"A profile with the name '{payload.profile_name}' already exists for your account.",
@@ -252,17 +255,8 @@ def patch_profile(
       - Location preference and workplace postal code consistency (HTTP 422).
       - Balanced weights summing to 1.0 (HTTP 422).
     """
-    existing_profile = session.exec(
-        select(FamilyPreferenceProfile).where(
-            FamilyPreferenceProfile.profile_id == profile_id,
-            FamilyPreferenceProfile.user_id == current_user.user_id,
-        )
-    ).first()
-    if not existing_profile:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preference profile not found",
-        )
+    assert current_user.user_id is not None
+    existing_profile = get_profile_or_404(profile_id, current_user.user_id, session)
 
     patch_data = payload.model_dump(exclude_unset=True)
     if not patch_data:
@@ -299,29 +293,23 @@ def patch_profile(
         "travel_weight", existing_profile.travel_weight
     )
 
-    if (
-        merged_location_pref
-        in (LocationPreference.WORKPLACE, LocationPreference.EITHER)
-        and not merged_workplace_postal
-    ):
+    try:
+        validate_location_and_weights(
+            location_preference=merged_location_pref,
+            workplace_postal_code=merged_workplace_postal,
+            cost_weight=merged_cost_weight,
+            travel_weight=merged_travel_weight,
+        )
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Workplace postal code is required when location preference is WORKPLACE or EITHER",
-        )
-
-    if round(merged_cost_weight + merged_travel_weight, 2) != 1.0:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="cost_weight and travel_weight must sum to 1.0",
-        )
+            detail=str(exc),
+        ) from exc
 
     for field_name, value in patch_data.items():
         if field_name == "enrollment_month_year":
             if value is not None:
-                year, month = map(int, value.split("-"))
-                existing_profile.enrollment_month_year = datetime(
-                    year, month, 1, 0, 0, 0, tzinfo=timezone.utc
-                )
+                existing_profile.enrollment_month_year = parse_year_month(value)
         else:
             setattr(existing_profile, field_name, value)
 
@@ -330,6 +318,8 @@ def patch_profile(
         session.commit()
     except IntegrityError as exc:
         session.rollback()
+        if not is_profile_name_unique_violation(exc):
+            raise
         name = payload.profile_name or existing_profile.profile_name
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -357,17 +347,8 @@ def delete_profile(
     - Profile existence and strict user isolation (HTTP 404 if not found or owned by another user).
     - Database deletion committed and returns HTTP 204 No Content.
     """
-    profile = session.exec(
-        select(FamilyPreferenceProfile).where(
-            FamilyPreferenceProfile.profile_id == profile_id,
-            FamilyPreferenceProfile.user_id == current_user.user_id,
-        )
-    ).first()
-    if not profile:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preference profile not found",
-        )
+    assert current_user.user_id is not None
+    profile = get_profile_or_404(profile_id, current_user.user_id, session)
 
     session.delete(profile)
     session.commit()
