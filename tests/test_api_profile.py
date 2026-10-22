@@ -478,3 +478,175 @@ def test_database_level_composite_uniqueness(test_engine, sample_parent: User):
         session.add(p2)
         with pytest.raises(IntegrityError):
             session.commit()
+
+
+# ==============================================================================
+# GET /api/v1/profile & GET /api/v1/profile/{profile_id} Tests (Ticket #59)
+# ==============================================================================
+
+
+def test_list_profiles_empty_for_new_parent(client: TestClient, sample_parent: User):
+    """GET /api/v1/profile returns HTTP 200 with an empty list when parent has no profiles."""
+    set_mock_auth(sample_parent)
+    response = client.get("/api/v1/profile")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_list_profiles_user_isolation(
+    client: TestClient, sample_parent: User, second_parent: User
+):
+    """GET /api/v1/profile returns only profiles belonging to the authenticated parent."""
+    # Create two profiles for sample_parent
+    set_mock_auth(sample_parent)
+    res1 = client.post(
+        "/api/v1/profile",
+        json=valid_profile_payload(profile_name="Infant Liam", level="infant"),
+    )
+    assert res1.status_code == 201
+    res2 = client.post(
+        "/api/v1/profile",
+        json=valid_profile_payload(
+            profile_name="Kindergarten Emma",
+            level="k1",
+            enrollment_month_year="2028-01",
+        ),
+    )
+    assert res2.status_code == 201
+
+    # Create a profile for second_parent
+    set_mock_auth(second_parent)
+    res3 = client.post(
+        "/api/v1/profile",
+        json=valid_profile_payload(profile_name="Second Parent Infant"),
+    )
+    assert res3.status_code == 201
+
+    # Query as sample_parent
+    set_mock_auth(sample_parent)
+    list_res = client.get("/api/v1/profile")
+    assert list_res.status_code == 200
+    profiles = list_res.json()
+    assert len(profiles) == 2
+
+    # Check user isolation and serialization
+    names = {p["profile_name"] for p in profiles}
+    assert names == {"Infant Liam", "Kindergarten Emma"}
+    for p in profiles:
+        assert p["user_id"] == sample_parent.user_id
+        # Enrollment month year must be serialized as YYYY-MM
+        assert len(p["enrollment_month_year"]) == 7
+        assert "-" in p["enrollment_month_year"]
+
+    # Query as second_parent
+    set_mock_auth(second_parent)
+    list_res2 = client.get("/api/v1/profile")
+    assert list_res2.status_code == 200
+    profiles2 = list_res2.json()
+    assert len(profiles2) == 1
+    assert profiles2[0]["profile_name"] == "Second Parent Infant"
+    assert profiles2[0]["user_id"] == second_parent.user_id
+
+
+def test_list_profiles_missing_auth_returns_401(client: TestClient):
+    """GET /api/v1/profile without authentication token returns HTTP 401."""
+    response = client.get("/api/v1/profile")
+    assert response.status_code == 401
+
+
+def test_list_profiles_admin_role_returns_403(client: TestClient, admin_user: User):
+    """GET /api/v1/profile by non-parent user (e.g. ADMIN) returns HTTP 403 Forbidden."""
+    set_mock_auth(admin_user)
+    response = client.get("/api/v1/profile")
+    assert response.status_code == 403
+    assert "parent" in response.json()["detail"].lower()
+
+
+def test_list_profiles_suspended_parent_returns_403(
+    client: TestClient, suspended_parent: User
+):
+    """GET /api/v1/profile by suspended parent returns HTTP 403 Forbidden."""
+    set_mock_auth(suspended_parent)
+    response = client.get("/api/v1/profile")
+    assert response.status_code == 403
+    assert "suspended" in response.json()["detail"].lower()
+
+
+def test_get_single_profile_success(client: TestClient, sample_parent: User):
+    """GET /api/v1/profile/{profile_id} returns HTTP 200 with matching ProfileResponse."""
+    set_mock_auth(sample_parent)
+    create_res = client.post("/api/v1/profile", json=valid_profile_payload())
+    assert create_res.status_code == 201
+    created_data = create_res.json()
+    profile_id = created_data["profile_id"]
+
+    get_res = client.get(f"/api/v1/profile/{profile_id}")
+    assert get_res.status_code == 200
+    data = get_res.json()
+    assert data["profile_id"] == profile_id
+    assert data["user_id"] == sample_parent.user_id
+    assert data["profile_name"] == "Infant Liam"
+    assert data["level"] == "infant"
+    assert data["citizenship_status"] == "SC"
+    assert data["service_required"] == "Full Day"
+    assert data["home_postal_code"] == "560123"
+    assert data["workplace_postal_code"] == "018989"
+    assert data["location_preference"] == "HOME"
+    assert data["household_income"] == 8500.0
+    assert data["household_member_count"] == 4
+    assert data["budget_max"] == 1200.0
+    assert data["enrollment_month_year"] == "2027-03"
+    assert data["cost_weight"] == 0.6
+    assert data["travel_weight"] == 0.4
+
+
+def test_get_single_profile_not_found(client: TestClient, sample_parent: User):
+    """GET /api/v1/profile/{profile_id} returns HTTP 404 when profile does not exist."""
+    set_mock_auth(sample_parent)
+    response = client.get("/api/v1/profile/non-existent-uuid")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Preference profile not found"
+
+
+def test_get_single_profile_other_user_returns_404(
+    client: TestClient, sample_parent: User, second_parent: User
+):
+    """GET /api/v1/profile/{profile_id} returns HTTP 404 when profile belongs to another parent."""
+    # Create profile as sample_parent
+    set_mock_auth(sample_parent)
+    create_res = client.post("/api/v1/profile", json=valid_profile_payload())
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    # Try to access as second_parent
+    set_mock_auth(second_parent)
+    get_res = client.get(f"/api/v1/profile/{profile_id}")
+    # Must return 404 to avoid ID enumeration
+    assert get_res.status_code == 404
+    assert get_res.json()["detail"] == "Preference profile not found"
+
+
+def test_get_single_profile_missing_auth_returns_401(client: TestClient):
+    """GET /api/v1/profile/{profile_id} without authentication returns HTTP 401."""
+    response = client.get("/api/v1/profile/some-profile-id")
+    assert response.status_code == 401
+
+
+def test_get_single_profile_admin_role_returns_403(
+    client: TestClient, admin_user: User
+):
+    """GET /api/v1/profile/{profile_id} by non-parent user returns HTTP 403 Forbidden."""
+    set_mock_auth(admin_user)
+    response = client.get("/api/v1/profile/some-profile-id")
+    assert response.status_code == 403
+    assert "parent" in response.json()["detail"].lower()
+
+
+def test_get_single_profile_suspended_parent_returns_403(
+    client: TestClient, suspended_parent: User
+):
+    """GET /api/v1/profile/{profile_id} by suspended parent returns HTTP 403 Forbidden."""
+    set_mock_auth(suspended_parent)
+    response = client.get("/api/v1/profile/some-profile-id")
+    assert response.status_code == 403
+    assert "suspended" in response.json()["detail"].lower()
