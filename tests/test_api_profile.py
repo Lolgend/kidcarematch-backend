@@ -719,9 +719,7 @@ def test_put_profile_same_name_allowed(client: TestClient, sample_parent: User):
     assert create_res.status_code == 201
     profile_id = create_res.json()["profile_id"]
 
-    updated_payload = valid_profile_payload(
-        profile_name="Same Name", budget_max=1500.0
-    )
+    updated_payload = valid_profile_payload(profile_name="Same Name", budget_max=1500.0)
     put_res = client.put(f"/api/v1/profile/{profile_id}", json=updated_payload)
     assert put_res.status_code == 200
     assert put_res.json()["budget_max"] == 1500.0
@@ -956,9 +954,7 @@ def test_patch_profile_single_weight_merged_sum_invalid_returns_422(
     profile_id = create_res.json()["profile_id"]
 
     # Existing travel_weight is 0.4. Patching cost_weight to 0.9 makes sum = 1.3
-    patch_res = client.patch(
-        f"/api/v1/profile/{profile_id}", json={"cost_weight": 0.9}
-    )
+    patch_res = client.patch(f"/api/v1/profile/{profile_id}", json={"cost_weight": 0.9})
     assert patch_res.status_code == 422
     assert "1.0" in patch_res.text
 
@@ -1205,3 +1201,163 @@ def test_patch_profile_suspended_parent_returns_403(
     )
     assert response.status_code == 403
     assert "suspended" in response.json()["detail"].lower()
+
+
+# =============================================================================
+# DELETE /api/v1/profile/{profile_id} Tests (Ticket #61)
+# =============================================================================
+
+
+def test_delete_profile_success(client: TestClient, sample_parent: User, test_engine):
+    """DELETE /api/v1/profile/{profile_id} successfully removes the profile and returns 204."""
+    set_mock_auth(sample_parent)
+    create_res = client.post("/api/v1/profile", json=valid_profile_payload())
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    # Verify profile exists before deletion
+    get_res = client.get(f"/api/v1/profile/{profile_id}")
+    assert get_res.status_code == 200
+
+    # Delete profile
+    delete_res = client.delete(f"/api/v1/profile/{profile_id}")
+    assert delete_res.status_code == 204
+    assert delete_res.text == ""
+
+    # Subsequent GET returns 404
+    get_after_delete = client.get(f"/api/v1/profile/{profile_id}")
+    assert get_after_delete.status_code == 404
+    assert get_after_delete.json()["detail"] == "Preference profile not found"
+
+    # Profile should no longer appear in profile list
+    list_res = client.get("/api/v1/profile")
+    assert list_res.status_code == 200
+    assert not any(p["profile_id"] == profile_id for p in list_res.json())
+
+    # Directly verify in database session
+    with Session(test_engine) as session:
+        db_profile = session.get(FamilyPreferenceProfile, profile_id)
+        assert db_profile is None
+
+
+def test_delete_profile_not_found(client: TestClient, sample_parent: User):
+    """DELETE /api/v1/profile/{profile_id} returns HTTP 404 if profile does not exist."""
+    set_mock_auth(sample_parent)
+    response = client.delete("/api/v1/profile/non-existent-profile-id")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Preference profile not found"
+
+
+def test_delete_profile_other_user_isolation(
+    client: TestClient, sample_parent: User, second_parent: User, test_engine
+):
+    """DELETE /api/v1/profile/{profile_id} returns HTTP 404 for profile of another parent."""
+    # First parent creates a profile
+    set_mock_auth(sample_parent)
+    create_res = client.post("/api/v1/profile", json=valid_profile_payload())
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    # Second parent attempts to delete first parent's profile
+    set_mock_auth(second_parent)
+    delete_res = client.delete(f"/api/v1/profile/{profile_id}")
+    assert delete_res.status_code == 404
+    assert delete_res.json()["detail"] == "Preference profile not found"
+
+    # First parent's profile is still intact
+    set_mock_auth(sample_parent)
+    get_res = client.get(f"/api/v1/profile/{profile_id}")
+    assert get_res.status_code == 200
+    assert get_res.json()["profile_id"] == profile_id
+
+    # Verify in DB
+    with Session(test_engine) as session:
+        db_profile = session.get(FamilyPreferenceProfile, profile_id)
+        assert db_profile is not None
+
+
+def test_delete_profile_unauthenticated_returns_401(client: TestClient):
+    """DELETE /api/v1/profile/{profile_id} returns HTTP 401 if unauthenticated."""
+    response = client.delete("/api/v1/profile/any-profile-id")
+    assert response.status_code == 401
+
+
+def test_delete_profile_admin_role_returns_403(client: TestClient, admin_user: User):
+    """DELETE /api/v1/profile/{profile_id} returns HTTP 403 for non-parent role (ADMIN)."""
+    set_mock_auth(admin_user)
+    response = client.delete("/api/v1/profile/any-profile-id")
+    assert response.status_code == 403
+    assert "parent" in response.json()["detail"].lower()
+
+
+def test_delete_profile_suspended_parent_returns_403(
+    client: TestClient, suspended_parent: User
+):
+    """DELETE /api/v1/profile/{profile_id} returns HTTP 403 for suspended parent account."""
+    set_mock_auth(suspended_parent)
+    response = client.delete("/api/v1/profile/any-profile-id")
+    assert response.status_code == 403
+    assert "suspended" in response.json()["detail"].lower()
+
+
+def test_cascade_delete_user_removes_preference_profiles(
+    test_engine, sample_parent: User
+):
+    """Deleting a parent User record automatically cascade-deletes all associated profiles."""
+    assert sample_parent.user_id is not None
+    with Session(test_engine) as session:
+        # Add two profiles for sample_parent
+        p1 = FamilyPreferenceProfile(
+            profile_id="cascade-prof-1",
+            user_id=sample_parent.user_id,
+            profile_name="Profile Child 1",
+            level=PreschoolLevel.INFANT,
+            citizenship_status=CitizenshipType.SC,
+            service_required="Full Day",
+            home_postal_code="123456",
+            location_preference=LocationPreference.HOME,
+            household_income=6000.0,
+            household_member_count=3,
+            budget_max=1000.0,
+            enrollment_month_year=datetime(2027, 5, 1, tzinfo=timezone.utc),
+            cost_weight=0.5,
+            travel_weight=0.5,
+        )
+        p2 = FamilyPreferenceProfile(
+            profile_id="cascade-prof-2",
+            user_id=sample_parent.user_id,
+            profile_name="Profile Child 2",
+            level=PreschoolLevel.PG,
+            citizenship_status=CitizenshipType.SC,
+            service_required="Half Day",
+            home_postal_code="123456",
+            location_preference=LocationPreference.HOME,
+            household_income=6000.0,
+            household_member_count=3,
+            budget_max=800.0,
+            enrollment_month_year=datetime(2027, 8, 1, tzinfo=timezone.utc),
+            cost_weight=0.5,
+            travel_weight=0.5,
+        )
+        session.add_all([p1, p2])
+        session.commit()
+
+        # Confirm profiles exist
+        assert session.get(FamilyPreferenceProfile, "cascade-prof-1") is not None
+        assert session.get(FamilyPreferenceProfile, "cascade-prof-2") is not None
+
+        # Fetch the user within the same session and delete
+        user = session.get(User, sample_parent.user_id)
+        assert user is not None
+        session.delete(user)
+        session.commit()
+
+        # Confirm cascade deletion of both preference profiles
+        assert session.get(FamilyPreferenceProfile, "cascade-prof-1") is None
+        assert session.get(FamilyPreferenceProfile, "cascade-prof-2") is None
+        profiles_remaining = session.exec(
+            select(FamilyPreferenceProfile).where(
+                FamilyPreferenceProfile.user_id == sample_parent.user_id
+            )
+        ).all()
+        assert len(profiles_remaining) == 0
