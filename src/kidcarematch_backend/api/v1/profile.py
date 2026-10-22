@@ -89,3 +89,61 @@ def create_profile(
 
     session.refresh(profile)
     return profile
+
+
+@router.get(
+    "",
+    response_model=list[ProfileResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List Family Preference Profiles",
+)
+@router.get(
+    "/",
+    response_model=list[ProfileResponse],
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+def list_profiles(
+    current_user: Annotated[User, Depends(get_current_parent)],
+    session: Annotated[Session, Depends(get_session)],
+) -> list[FamilyPreferenceProfile]:
+    """Retrieve all Family Preference Profiles belonging to the authenticated parent.
+
+    Enforces parent authorization and strict user isolation.
+    """
+    profiles = session.exec(
+        select(FamilyPreferenceProfile).where(
+            FamilyPreferenceProfile.user_id == current_user.user_id
+        )
+    ).all()
+    return list(profiles)
+
+
+@router.get(
+    "/{profile_id}",
+    response_model=ProfileResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Family Preference Profile by ID",
+)
+def get_profile(
+    profile_id: str,
+    current_user: Annotated[User, Depends(get_current_parent)],
+    session: Annotated[Session, Depends(get_session)],
+) -> FamilyPreferenceProfile:
+    """Retrieve a single Family Preference Profile by ID for the authenticated parent.
+
+    Returns HTTP 404 if the profile does not exist or belongs to another user
+    (preventing ID enumeration).
+    """
+    profile = session.exec(
+        select(FamilyPreferenceProfile).where(
+            FamilyPreferenceProfile.profile_id == profile_id,
+            FamilyPreferenceProfile.user_id == current_user.user_id,
+        )
+    ).first()
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Preference profile not found",
+        )
+    return profile
