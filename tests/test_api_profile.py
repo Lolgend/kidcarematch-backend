@@ -650,3 +650,558 @@ def test_get_single_profile_suspended_parent_returns_403(
     response = client.get("/api/v1/profile/some-profile-id")
     assert response.status_code == 403
     assert "suspended" in response.json()["detail"].lower()
+
+
+# ==============================================================================
+# PUT /api/v1/profile/{profile_id} Tests (Ticket #60)
+# ==============================================================================
+
+
+def test_put_profile_success(client: TestClient, sample_parent: User, test_engine):
+    """Full replacement of profile criteria returns HTTP 200 and updated ProfileResponse."""
+    set_mock_auth(sample_parent)
+    create_res = client.post("/api/v1/profile", json=valid_profile_payload())
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    updated_payload = {
+        "profile_name": "Toddler Liam - Updated",
+        "level": "pg",
+        "citizenship_status": "SPR",
+        "service_required": "Half Day",
+        "home_postal_code": "650123",
+        "workplace_postal_code": "049318",
+        "location_preference": "WORKPLACE",
+        "household_income": 9500.0,
+        "household_member_count": 5,
+        "budget_max": 1800.0,
+        "enrollment_month_year": "2027-06",
+        "cost_weight": 0.3,
+        "travel_weight": 0.7,
+    }
+
+    put_res = client.put(f"/api/v1/profile/{profile_id}", json=updated_payload)
+    assert put_res.status_code == 200, put_res.text
+    data = put_res.json()
+
+    assert data["profile_id"] == profile_id
+    assert data["user_id"] == sample_parent.user_id
+    assert data["profile_name"] == "Toddler Liam - Updated"
+    assert data["level"] == "pg"
+    assert data["citizenship_status"] == "SPR"
+    assert data["service_required"] == "Half Day"
+    assert data["home_postal_code"] == "650123"
+    assert data["workplace_postal_code"] == "049318"
+    assert data["location_preference"] == "WORKPLACE"
+    assert data["household_income"] == 9500.0
+    assert data["household_member_count"] == 5
+    assert data["budget_max"] == 1800.0
+    assert data["enrollment_month_year"] == "2027-06"
+    assert data["cost_weight"] == 0.3
+    assert data["travel_weight"] == 0.7
+
+    # Verify persistence in database
+    with Session(test_engine) as session:
+        profile = session.get(FamilyPreferenceProfile, profile_id)
+        assert profile is not None
+        assert profile.profile_name == "Toddler Liam - Updated"
+        assert profile.level == PreschoolLevel.PG
+        assert profile.enrollment_month_year.year == 2027
+        assert profile.enrollment_month_year.month == 6
+
+
+def test_put_profile_same_name_allowed(client: TestClient, sample_parent: User):
+    """PUT request keeping the same profile_name does NOT raise 409 Conflict."""
+    set_mock_auth(sample_parent)
+    create_res = client.post(
+        "/api/v1/profile", json=valid_profile_payload(profile_name="Same Name")
+    )
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    updated_payload = valid_profile_payload(
+        profile_name="Same Name", budget_max=1500.0
+    )
+    put_res = client.put(f"/api/v1/profile/{profile_id}", json=updated_payload)
+    assert put_res.status_code == 200
+    assert put_res.json()["budget_max"] == 1500.0
+    assert put_res.json()["profile_name"] == "Same Name"
+
+
+def test_put_profile_rename_conflict_returns_409(
+    client: TestClient, sample_parent: User
+):
+    """PUT renaming profile to an existing name of the same parent returns HTTP 409 Conflict."""
+    set_mock_auth(sample_parent)
+    res1 = client.post(
+        "/api/v1/profile", json=valid_profile_payload(profile_name="Profile 1")
+    )
+    assert res1.status_code == 201
+    profile1_id = res1.json()["profile_id"]
+
+    res2 = client.post(
+        "/api/v1/profile", json=valid_profile_payload(profile_name="Profile 2")
+    )
+    assert res2.status_code == 201
+
+    # Try renaming Profile 1 to "Profile 2"
+    rename_payload = valid_profile_payload(profile_name="Profile 2")
+    put_res = client.put(f"/api/v1/profile/{profile1_id}", json=rename_payload)
+    assert put_res.status_code == 409
+    assert "already exists" in put_res.json()["detail"].lower()
+
+
+def test_put_profile_rename_to_another_parent_same_name_allowed(
+    client: TestClient, sample_parent: User, second_parent: User
+):
+    """PUT renaming to a name used by another parent succeeds (names are unique per parent)."""
+    set_mock_auth(second_parent)
+    res2 = client.post(
+        "/api/v1/profile", json=valid_profile_payload(profile_name="Shared Name")
+    )
+    assert res2.status_code == 201
+
+    set_mock_auth(sample_parent)
+    res1 = client.post(
+        "/api/v1/profile", json=valid_profile_payload(profile_name="Initial Name")
+    )
+    assert res1.status_code == 201
+    profile1_id = res1.json()["profile_id"]
+
+    # sample_parent renames their profile to "Shared Name"
+    rename_payload = valid_profile_payload(profile_name="Shared Name")
+    put_res = client.put(f"/api/v1/profile/{profile1_id}", json=rename_payload)
+    assert put_res.status_code == 200
+    assert put_res.json()["profile_name"] == "Shared Name"
+
+
+def test_put_profile_not_found(client: TestClient, sample_parent: User):
+    """PUT /api/v1/profile/{profile_id} returns HTTP 404 if profile does not exist."""
+    set_mock_auth(sample_parent)
+    response = client.put(
+        "/api/v1/profile/non-existent-id", json=valid_profile_payload()
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Preference profile not found"
+
+
+def test_put_profile_other_user_returns_404(
+    client: TestClient, sample_parent: User, second_parent: User
+):
+    """PUT /api/v1/profile/{profile_id} returns HTTP 404 if profile belongs to another parent."""
+    set_mock_auth(sample_parent)
+    create_res = client.post("/api/v1/profile", json=valid_profile_payload())
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    set_mock_auth(second_parent)
+    put_res = client.put(
+        f"/api/v1/profile/{profile_id}", json=valid_profile_payload(budget_max=2000.0)
+    )
+    assert put_res.status_code == 404
+    assert put_res.json()["detail"] == "Preference profile not found"
+
+
+@pytest.mark.parametrize(
+    "override_field, override_value",
+    [
+        ("home_postal_code", "12345"),
+        ("home_postal_code", "ABCDEF"),
+        ("workplace_postal_code", "999"),
+        ("location_preference", "WORKPLACE"),  # without workplace postal
+        ("cost_weight", 0.7),  # sum = 0.7 + 0.4 = 1.1 != 1.0
+        ("enrollment_month_year", "2027-13"),
+        ("enrollment_month_year", "2027/03"),
+        ("household_income", -10.0),
+        ("household_member_count", 0),
+        ("budget_max", 0.0),
+        ("budget_max", -500.0),
+    ],
+)
+def test_put_profile_revalidates_domain_criteria(
+    client: TestClient, sample_parent: User, override_field: str, override_value
+):
+    """PUT revalidates all domain criteria, returning HTTP 422 for invalid payloads."""
+    set_mock_auth(sample_parent)
+    create_res = client.post("/api/v1/profile", json=valid_profile_payload())
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    if override_field == "location_preference" and override_value == "WORKPLACE":
+        payload = valid_profile_payload(
+            location_preference="WORKPLACE", workplace_postal_code=None
+        )
+    else:
+        payload = valid_profile_payload(**{override_field: override_value})
+
+    put_res = client.put(f"/api/v1/profile/{profile_id}", json=payload)
+    assert put_res.status_code == 422
+
+
+def test_put_profile_unauthenticated_returns_401(client: TestClient):
+    """PUT /api/v1/profile/{profile_id} returns HTTP 401 if unauthenticated."""
+    response = client.put(
+        "/api/v1/profile/any-profile-id", json=valid_profile_payload()
+    )
+    assert response.status_code == 401
+
+
+def test_put_profile_admin_role_returns_403(client: TestClient, admin_user: User):
+    """PUT /api/v1/profile/{profile_id} returns HTTP 403 for non-parent role (ADMIN)."""
+    set_mock_auth(admin_user)
+    response = client.put(
+        "/api/v1/profile/any-profile-id", json=valid_profile_payload()
+    )
+    assert response.status_code == 403
+    assert "parent" in response.json()["detail"].lower()
+
+
+def test_put_profile_suspended_parent_returns_403(
+    client: TestClient, suspended_parent: User
+):
+    """PUT /api/v1/profile/{profile_id} returns HTTP 403 for suspended parent account."""
+    set_mock_auth(suspended_parent)
+    response = client.put(
+        "/api/v1/profile/any-profile-id", json=valid_profile_payload()
+    )
+    assert response.status_code == 403
+    assert "suspended" in response.json()["detail"].lower()
+
+
+# ==============================================================================
+# PATCH /api/v1/profile/{profile_id} Tests (Ticket #60)
+# ==============================================================================
+
+
+def test_patch_profile_budget_max_success(
+    client: TestClient, sample_parent: User, test_engine
+):
+    """PATCH updating just budget_max updates that field and preserves other fields."""
+    set_mock_auth(sample_parent)
+    create_res = client.post(
+        "/api/v1/profile", json=valid_profile_payload(budget_max=1200.0)
+    )
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}", json={"budget_max": 2500.0}
+    )
+    assert patch_res.status_code == 200, patch_res.text
+    data = patch_res.json()
+
+    assert data["profile_id"] == profile_id
+    assert data["budget_max"] == 2500.0
+    # Original fields preserved
+    assert data["profile_name"] == "Infant Liam"
+    assert data["household_income"] == 8500.0
+    assert data["cost_weight"] == 0.6
+    assert data["travel_weight"] == 0.4
+
+    with Session(test_engine) as session:
+        profile = session.get(FamilyPreferenceProfile, profile_id)
+        assert profile is not None
+        assert profile.budget_max == 2500.0
+
+
+def test_patch_profile_income_and_members_success(
+    client: TestClient, sample_parent: User
+):
+    """PATCH updating household_income and household_member_count succeeds."""
+    set_mock_auth(sample_parent)
+    create_res = client.post("/api/v1/profile", json=valid_profile_payload())
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}",
+        json={"household_income": 12000.0, "household_member_count": 5},
+    )
+    assert patch_res.status_code == 200
+    data = patch_res.json()
+    assert data["household_income"] == 12000.0
+    assert data["household_member_count"] == 5
+
+
+def test_patch_profile_weights_pair_success(client: TestClient, sample_parent: User):
+    """PATCH updating both cost_weight and travel_weight summing to 1.0 succeeds."""
+    set_mock_auth(sample_parent)
+    create_res = client.post(
+        "/api/v1/profile",
+        json=valid_profile_payload(cost_weight=0.6, travel_weight=0.4),
+    )
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}",
+        json={"cost_weight": 0.8, "travel_weight": 0.2},
+    )
+    assert patch_res.status_code == 200
+    data = patch_res.json()
+    assert data["cost_weight"] == 0.8
+    assert data["travel_weight"] == 0.2
+
+
+def test_patch_profile_single_weight_merged_sum_invalid_returns_422(
+    client: TestClient, sample_parent: User
+):
+    """PATCH updating one weight such that merged sum != 1.0 returns HTTP 422."""
+    set_mock_auth(sample_parent)
+    create_res = client.post(
+        "/api/v1/profile",
+        json=valid_profile_payload(cost_weight=0.6, travel_weight=0.4),
+    )
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    # Existing travel_weight is 0.4. Patching cost_weight to 0.9 makes sum = 1.3
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}", json={"cost_weight": 0.9}
+    )
+    assert patch_res.status_code == 422
+    assert "1.0" in patch_res.text
+
+
+def test_patch_profile_single_weight_merged_sum_valid_success(
+    client: TestClient, sample_parent: User
+):
+    """PATCH updating one weight where merged sum equals 1.0 succeeds."""
+    set_mock_auth(sample_parent)
+    # Create with 0.5, 0.5
+    create_res = client.post(
+        "/api/v1/profile",
+        json=valid_profile_payload(cost_weight=0.5, travel_weight=0.5),
+    )
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    # Existing cost_weight is 0.5. Patching travel_weight to 0.5 keeps sum = 1.0
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}", json={"travel_weight": 0.5}
+    )
+    assert patch_res.status_code == 200
+    assert patch_res.json()["travel_weight"] == 0.5
+
+
+def test_patch_profile_location_pref_workplace_missing_postal_returns_422(
+    client: TestClient, sample_parent: User
+):
+    """PATCH switching location_preference to WORKPLACE without workplace_postal_code returns 422."""
+    set_mock_auth(sample_parent)
+    create_res = client.post(
+        "/api/v1/profile",
+        json=valid_profile_payload(
+            location_preference="HOME", workplace_postal_code=None
+        ),
+    )
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}",
+        json={"location_preference": "WORKPLACE"},
+    )
+    assert patch_res.status_code == 422
+    assert "workplace postal code" in patch_res.text.lower()
+
+
+def test_patch_profile_location_pref_workplace_with_postal_success(
+    client: TestClient, sample_parent: User
+):
+    """PATCH updating location_preference and workplace_postal_code together succeeds."""
+    set_mock_auth(sample_parent)
+    create_res = client.post(
+        "/api/v1/profile",
+        json=valid_profile_payload(
+            location_preference="HOME", workplace_postal_code=None
+        ),
+    )
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}",
+        json={
+            "location_preference": "WORKPLACE",
+            "workplace_postal_code": "018989",
+        },
+    )
+    assert patch_res.status_code == 200
+    data = patch_res.json()
+    assert data["location_preference"] == "WORKPLACE"
+    assert data["workplace_postal_code"] == "018989"
+
+
+def test_patch_profile_clear_workplace_postal_when_workplace_pref_returns_422(
+    client: TestClient, sample_parent: User
+):
+    """PATCH clearing workplace_postal_code when location_preference is WORKPLACE returns 422."""
+    set_mock_auth(sample_parent)
+    create_res = client.post(
+        "/api/v1/profile",
+        json=valid_profile_payload(
+            location_preference="WORKPLACE", workplace_postal_code="018989"
+        ),
+    )
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}",
+        json={"workplace_postal_code": None},
+    )
+    assert patch_res.status_code == 422
+    assert "workplace postal code" in patch_res.text.lower()
+
+
+def test_patch_profile_enrollment_month_success(
+    client: TestClient, sample_parent: User, test_engine
+):
+    """PATCH updating enrollment_month_year normalizes date in database."""
+    set_mock_auth(sample_parent)
+    create_res = client.post("/api/v1/profile", json=valid_profile_payload())
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}",
+        json={"enrollment_month_year": "2028-11"},
+    )
+    assert patch_res.status_code == 200
+    assert patch_res.json()["enrollment_month_year"] == "2028-11"
+
+    with Session(test_engine) as session:
+        profile = session.get(FamilyPreferenceProfile, profile_id)
+        assert profile is not None
+        assert profile.enrollment_month_year.year == 2028
+        assert profile.enrollment_month_year.month == 11
+        assert profile.enrollment_month_year.day == 1
+
+
+def test_patch_profile_same_name_allowed(client: TestClient, sample_parent: User):
+    """PATCH submitting unchanged profile_name does NOT raise 409 Conflict."""
+    set_mock_auth(sample_parent)
+    create_res = client.post(
+        "/api/v1/profile", json=valid_profile_payload(profile_name="Stable Name")
+    )
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}",
+        json={"profile_name": "Stable Name", "budget_max": 1600.0},
+    )
+    assert patch_res.status_code == 200
+    assert patch_res.json()["profile_name"] == "Stable Name"
+    assert patch_res.json()["budget_max"] == 1600.0
+
+
+def test_patch_profile_rename_conflict_returns_409(
+    client: TestClient, sample_parent: User
+):
+    """PATCH renaming profile to collide with another profile of same parent returns 409."""
+    set_mock_auth(sample_parent)
+    res1 = client.post(
+        "/api/v1/profile", json=valid_profile_payload(profile_name="Profile Alpha")
+    )
+    assert res1.status_code == 201
+    profile1_id = res1.json()["profile_id"]
+
+    res2 = client.post(
+        "/api/v1/profile", json=valid_profile_payload(profile_name="Profile Beta")
+    )
+    assert res2.status_code == 201
+
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile1_id}",
+        json={"profile_name": "Profile Beta"},
+    )
+    assert patch_res.status_code == 409
+    assert "already exists" in patch_res.json()["detail"].lower()
+
+
+def test_patch_profile_not_found(client: TestClient, sample_parent: User):
+    """PATCH /api/v1/profile/{profile_id} returns HTTP 404 if profile does not exist."""
+    set_mock_auth(sample_parent)
+    response = client.patch(
+        "/api/v1/profile/non-existent-id", json={"budget_max": 2000.0}
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Preference profile not found"
+
+
+def test_patch_profile_other_user_returns_404(
+    client: TestClient, sample_parent: User, second_parent: User
+):
+    """PATCH /api/v1/profile/{profile_id} returns HTTP 404 for profile of another parent."""
+    set_mock_auth(sample_parent)
+    create_res = client.post("/api/v1/profile", json=valid_profile_payload())
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    set_mock_auth(second_parent)
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}", json={"budget_max": 2000.0}
+    )
+    assert patch_res.status_code == 404
+    assert patch_res.json()["detail"] == "Preference profile not found"
+
+
+@pytest.mark.parametrize(
+    "patch_body",
+    [
+        {"household_income": -1.0},
+        {"household_member_count": 0},
+        {"budget_max": 0.0},
+        {"budget_max": -100.0},
+        {"home_postal_code": "123"},
+        {"home_postal_code": "ABCDEF"},
+        {"workplace_postal_code": "invalid"},
+        {"enrollment_month_year": "2027-13"},
+        {"enrollment_month_year": "invalid-date"},
+        {"cost_weight": -0.1},
+        {"cost_weight": 1.2},
+    ],
+)
+def test_patch_profile_field_validations_return_422(
+    client: TestClient, sample_parent: User, patch_body: dict
+):
+    """PATCH invalid field formats or bounds return HTTP 422."""
+    set_mock_auth(sample_parent)
+    create_res = client.post("/api/v1/profile", json=valid_profile_payload())
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    patch_res = client.patch(f"/api/v1/profile/{profile_id}", json=patch_body)
+    assert patch_res.status_code == 422
+
+
+def test_patch_profile_unauthenticated_returns_401(client: TestClient):
+    """PATCH /api/v1/profile/{profile_id} returns HTTP 401 if unauthenticated."""
+    response = client.patch(
+        "/api/v1/profile/any-profile-id", json={"budget_max": 1500.0}
+    )
+    assert response.status_code == 401
+
+
+def test_patch_profile_admin_role_returns_403(client: TestClient, admin_user: User):
+    """PATCH /api/v1/profile/{profile_id} returns HTTP 403 for non-parent role (ADMIN)."""
+    set_mock_auth(admin_user)
+    response = client.patch(
+        "/api/v1/profile/any-profile-id", json={"budget_max": 1500.0}
+    )
+    assert response.status_code == 403
+    assert "parent" in response.json()["detail"].lower()
+
+
+def test_patch_profile_suspended_parent_returns_403(
+    client: TestClient, suspended_parent: User
+):
+    """PATCH /api/v1/profile/{profile_id} returns HTTP 403 for suspended parent account."""
+    set_mock_auth(suspended_parent)
+    response = client.patch(
+        "/api/v1/profile/any-profile-id", json={"budget_max": 1500.0}
+    )
+    assert response.status_code == 403
+    assert "suspended" in response.json()["detail"].lower()
