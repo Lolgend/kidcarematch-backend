@@ -4,7 +4,14 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from kidcarematch_backend.db.db import (
     CitizenshipType,
@@ -14,6 +21,76 @@ from kidcarematch_backend.db.db import (
 
 SINGAPORE_POSTAL_REGEX = re.compile(r"^\d{6}$")
 ENROLLMENT_MONTH_REGEX = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+def parse_year_month(value: str) -> datetime:
+    """Parse a YYYY-MM string into day 1 of that month at 00:00:00 UTC."""
+    year, month = map(int, value.split("-"))
+    return datetime(year, month, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def validate_non_empty_str(v: str | None, field_name: str) -> str:
+    """Validate that a string is non-null and not empty or whitespace-only."""
+    if v is None:
+        raise ValueError(f"{field_name} cannot be null")
+    stripped = v.strip()
+    if not stripped:
+        raise ValueError(f"{field_name} cannot be empty or whitespace only")
+    return stripped
+
+
+def validate_singapore_postal_code(
+    v: str | None,
+    field_name: str = "postal_code",
+    *,
+    allow_none: bool = False,
+) -> str | None:
+    """Validate 6-digit Singapore postal code format."""
+    if v is None:
+        if allow_none:
+            return None
+        raise ValueError(f"{field_name} cannot be null")
+    if not SINGAPORE_POSTAL_REGEX.match(v):
+        raise ValueError(
+            f"{field_name} must be a valid 6-digit Singapore postal code"
+        )
+    return v
+
+
+def validate_enrollment_month_format(
+    v: str | None,
+    field_name: str = "enrollment_month_year",
+) -> str:
+    """Validate target enrollment month matches YYYY-MM format."""
+    if v is None:
+        raise ValueError(f"{field_name} cannot be null")
+    if not ENROLLMENT_MONTH_REGEX.match(v):
+        raise ValueError(
+            f"{field_name} must be in YYYY-MM format (e.g. 2027-03)"
+        )
+    return v
+
+
+def validate_location_and_weights(
+    location_preference: LocationPreference,
+    workplace_postal_code: str | None,
+    cost_weight: float,
+    travel_weight: float,
+) -> None:
+    """Enforce domain invariants across location preferences and trade-off weights.
+
+    Raises ValueError if invariants are violated.
+    """
+    if (
+        location_preference
+        in (LocationPreference.WORKPLACE, LocationPreference.EITHER)
+        and not workplace_postal_code
+    ):
+        raise ValueError(
+            "Workplace postal code is required when location preference is WORKPLACE or EITHER"
+        )
+    if round(cost_weight + travel_weight, 2) != 1.0:
+        raise ValueError("cost_weight and travel_weight must sum to 1.0")
 
 
 class ProfileCreateRequest(BaseModel):
@@ -75,73 +152,48 @@ class ProfileCreateRequest(BaseModel):
         description="Trade-off weight assigned to travel factor (0.0 to 1.0)",
     )
 
-    @field_validator("profile_name")
+    @field_validator("profile_name", "service_required")
     @classmethod
-    def validate_profile_name(cls, v: str) -> str:
-        """Validate profile_name is non-empty after stripping whitespace."""
-        stripped = v.strip()
-        if not stripped:
-            raise ValueError("profile_name cannot be empty or whitespace only")
-        return stripped
-
-    @field_validator("service_required")
-    @classmethod
-    def validate_service_required(cls, v: str) -> str:
-        """Validate service_required is non-empty after stripping whitespace."""
-        stripped = v.strip()
-        if not stripped:
-            raise ValueError("service_required cannot be empty or whitespace only")
-        return stripped
+    def validate_stripped_strings(cls, v: str, info: ValidationInfo) -> str:
+        """Validate string fields are non-empty after stripping whitespace."""
+        return validate_non_empty_str(v, info.field_name or "field")
 
     @field_validator("home_postal_code")
     @classmethod
     def validate_home_postal(cls, v: str) -> str:
         """Validate 6-digit Singapore postal code format for home residence."""
-        if not SINGAPORE_POSTAL_REGEX.match(v):
-            raise ValueError(
-                "home_postal_code must be a valid 6-digit Singapore postal code"
-            )
-        return v
+        result = validate_singapore_postal_code(v, "home_postal_code", allow_none=False)
+        assert result is not None
+        return result
 
     @field_validator("workplace_postal_code")
     @classmethod
     def validate_workplace_postal(cls, v: str | None) -> str | None:
         """Validate 6-digit Singapore postal code format for workplace if provided."""
-        if v is not None and not SINGAPORE_POSTAL_REGEX.match(v):
-            raise ValueError(
-                "workplace_postal_code must be a valid 6-digit Singapore postal code"
-            )
-        return v
+        return validate_singapore_postal_code(
+            v, "workplace_postal_code", allow_none=True
+        )
 
     @field_validator("enrollment_month_year")
     @classmethod
     def validate_enrollment_month(cls, v: str) -> str:
         """Validate target enrollment month matches YYYY-MM format."""
-        if not ENROLLMENT_MONTH_REGEX.match(v):
-            raise ValueError(
-                "enrollment_month_year must be in YYYY-MM format (e.g. 2027-03)"
-            )
-        return v
+        return validate_enrollment_month_format(v, "enrollment_month_year")
 
     @model_validator(mode="after")
     def validate_cross_field_rules(self) -> "ProfileCreateRequest":
         """Enforce domain invariants across location preferences and trade-off weights."""
-        if (
-            self.location_preference
-            in (LocationPreference.WORKPLACE, LocationPreference.EITHER)
-            and not self.workplace_postal_code
-        ):
-            raise ValueError(
-                "Workplace postal code is required when location preference is WORKPLACE or EITHER"
-            )
-        if round(self.cost_weight + self.travel_weight, 2) != 1.0:
-            raise ValueError("cost_weight and travel_weight must sum to 1.0")
+        validate_location_and_weights(
+            self.location_preference,
+            self.workplace_postal_code,
+            self.cost_weight,
+            self.travel_weight,
+        )
         return self
 
     def get_enrollment_datetime(self) -> datetime:
         """Convert YYYY-MM to the 1st of the month at 00:00:00 UTC."""
-        year, month = map(int, self.enrollment_month_year.split("-"))
-        return datetime(year, month, 1, 0, 0, 0, tzinfo=timezone.utc)
+        return parse_year_month(self.enrollment_month_year)
 
 
 class ProfileResponse(BaseModel):
@@ -172,7 +224,6 @@ class ProfileResponse(BaseModel):
         if isinstance(v, datetime):
             return v.strftime("%Y-%m")
         return str(v)
-
 
 
 class ProfileUpdateRequest(ProfileCreateRequest):
@@ -246,54 +297,47 @@ class ProfilePatchRequest(BaseModel):
         description="Trade-off weight assigned to travel factor (0.0 to 1.0)",
     )
 
-    @field_validator("profile_name")
+    @field_validator(
+        "level",
+        "citizenship_status",
+        "location_preference",
+        "household_income",
+        "household_member_count",
+        "budget_max",
+        "cost_weight",
+        "travel_weight",
+    )
     @classmethod
-    def validate_profile_name(cls, v: str | None) -> str | None:
-        """Validate profile_name is non-empty if provided."""
-        if v is not None:
-            stripped = v.strip()
-            if not stripped:
-                raise ValueError("profile_name cannot be empty or whitespace only")
-            return stripped
+    def validate_non_nullable_fields(cls, v: Any, info: ValidationInfo) -> Any:
+        """Ensure mandatory database fields cannot be explicitly set to null."""
+        if v is None:
+            raise ValueError(f"{info.field_name} cannot be null")
         return v
 
-    @field_validator("service_required")
+    @field_validator("profile_name", "service_required")
     @classmethod
-    def validate_service_required(cls, v: str | None) -> str | None:
-        """Validate service_required is non-empty if provided."""
-        if v is not None:
-            stripped = v.strip()
-            if not stripped:
-                raise ValueError("service_required cannot be empty or whitespace only")
-            return stripped
-        return v
+    def validate_stripped_strings(cls, v: str | None, info: ValidationInfo) -> str:
+        """Validate string fields are non-empty if provided."""
+        return validate_non_empty_str(v, info.field_name or "field")
 
     @field_validator("home_postal_code")
     @classmethod
-    def validate_home_postal(cls, v: str | None) -> str | None:
-        """Validate 6-digit Singapore postal code format for home residence if provided."""
-        if v is not None and not SINGAPORE_POSTAL_REGEX.match(v):
-            raise ValueError(
-                "home_postal_code must be a valid 6-digit Singapore postal code"
-            )
-        return v
+    def validate_home_postal(cls, v: str | None) -> str:
+        """Validate 6-digit Singapore postal code for home residence if provided."""
+        result = validate_singapore_postal_code(v, "home_postal_code", allow_none=False)
+        assert result is not None
+        return result
 
     @field_validator("workplace_postal_code")
     @classmethod
     def validate_workplace_postal(cls, v: str | None) -> str | None:
-        """Validate 6-digit Singapore postal code format for workplace if provided."""
-        if v is not None and not SINGAPORE_POSTAL_REGEX.match(v):
-            raise ValueError(
-                "workplace_postal_code must be a valid 6-digit Singapore postal code"
-            )
-        return v
+        """Validate 6-digit Singapore postal code for workplace if provided."""
+        return validate_singapore_postal_code(
+            v, "workplace_postal_code", allow_none=True
+        )
 
     @field_validator("enrollment_month_year")
     @classmethod
-    def validate_enrollment_month(cls, v: str | None) -> str | None:
+    def validate_enrollment_month(cls, v: str | None) -> str:
         """Validate target enrollment month matches YYYY-MM format if provided."""
-        if v is not None and not ENROLLMENT_MONTH_REGEX.match(v):
-            raise ValueError(
-                "enrollment_month_year must be in YYYY-MM format (e.g. 2027-03)"
-            )
-        return v
+        return validate_enrollment_month_format(v, "enrollment_month_year")

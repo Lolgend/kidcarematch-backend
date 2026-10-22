@@ -17,7 +17,9 @@ from kidcarematch_backend.schemas.centre import (
 )
 from kidcarematch_backend.schemas.profile import (
     ProfileCreateRequest,
+    ProfilePatchRequest,
     ProfileResponse,
+    ProfileUpdateRequest,
 )
 from kidcarematch_backend.schemas.user import (
     UserResponse,
@@ -36,7 +38,9 @@ __all__ = [
     "PreschoolCentreListResponse",
     "PreschoolServiceResponse",
     "ProfileCreateRequest",
+    "ProfilePatchRequest",
     "ProfileResponse",
+    "ProfileUpdateRequest",
     "ReviewSummaryResponse",
     "UserResponse",
     "UserSignupRequest",

@@ -1361,3 +1361,142 @@ def test_cascade_delete_user_removes_preference_profiles(
             )
         ).all()
         assert len(profiles_remaining) == 0
+
+
+# ==============================================================================
+# Code Review Refactor & Standards Verification Tests
+# ==============================================================================
+
+
+def test_schema_exports():
+    """Verify ProfileUpdateRequest and ProfilePatchRequest are exported in schemas."""
+    from kidcarematch_backend import schemas
+    from kidcarematch_backend.schemas import (
+        ProfilePatchRequest,
+        ProfileUpdateRequest,
+    )
+
+    assert "ProfileUpdateRequest" in schemas.__all__
+    assert "ProfilePatchRequest" in schemas.__all__
+    assert ProfileUpdateRequest is not None
+    assert ProfilePatchRequest is not None
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "profile_name",
+        "level",
+        "citizenship_status",
+        "service_required",
+        "home_postal_code",
+        "location_preference",
+        "household_income",
+        "household_member_count",
+        "budget_max",
+        "enrollment_month_year",
+        "cost_weight",
+        "travel_weight",
+    ],
+)
+def test_patch_profile_explicit_null_on_non_nullable_fields_returns_422(
+    client: TestClient, sample_parent: User, field_name: str
+):
+    """PATCH with explicit null on mandatory database fields returns HTTP 422."""
+    set_mock_auth(sample_parent)
+    res = client.post("/api/v1/profile", json=valid_profile_payload())
+    assert res.status_code == 201
+    profile_id = res.json()["profile_id"]
+
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}",
+        json={field_name: None},
+    )
+    assert patch_res.status_code == 422
+    assert "null" in patch_res.text.lower() or "input should be" in patch_res.text.lower()
+
+
+def test_patch_profile_explicit_null_workplace_postal_code_when_home_pref_succeeds(
+    client: TestClient, sample_parent: User
+):
+    """PATCH explicit null on workplace_postal_code succeeds when location_preference is HOME."""
+    set_mock_auth(sample_parent)
+    res = client.post(
+        "/api/v1/profile",
+        json=valid_profile_payload(
+            location_preference="HOME",
+            workplace_postal_code="018989",
+        ),
+    )
+    assert res.status_code == 201
+    profile_id = res.json()["profile_id"]
+    assert res.json()["workplace_postal_code"] == "018989"
+
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}",
+        json={"workplace_postal_code": None},
+    )
+    assert patch_res.status_code == 200
+    assert patch_res.json()["workplace_postal_code"] is None
+
+
+def test_no_trailing_slash_alias_endpoints(client: TestClient, sample_parent: User):
+    """Verify unrequested trailing-slash routes are removed and not accepted directly without redirect."""
+    set_mock_auth(sample_parent)
+    res = client.post(
+        "/api/v1/profile/",
+        json=valid_profile_payload(),
+        follow_redirects=False,
+    )
+    assert res.status_code in (307, 404, 405)
+
+
+def test_profile_helper_functions(test_engine):
+    """Verify extracted helper functions: parse_year_month, validate_location_and_weights, get_profile_or_404."""
+    from fastapi import HTTPException
+
+    from kidcarematch_backend.api.v1.profile import get_profile_or_404
+    from kidcarematch_backend.schemas.profile import (
+        parse_year_month,
+        validate_location_and_weights,
+    )
+
+    # 1. parse_year_month
+    dt = parse_year_month("2028-09")
+    assert dt == datetime(2028, 9, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    # 2. validate_location_and_weights
+    with pytest.raises(ValueError, match="Workplace postal code is required"):
+        validate_location_and_weights(
+            location_preference=LocationPreference.WORKPLACE,
+            workplace_postal_code=None,
+            cost_weight=0.5,
+            travel_weight=0.5,
+        )
+
+    with pytest.raises(ValueError, match="sum to 1.0"):
+        validate_location_and_weights(
+            location_preference=LocationPreference.HOME,
+            workplace_postal_code=None,
+            cost_weight=0.6,
+            travel_weight=0.6,
+        )
+
+    # 3. get_profile_or_404
+    with Session(test_engine) as session:
+        with pytest.raises(HTTPException) as exc_info:
+            get_profile_or_404("non-existent", "user-123", session)
+        assert exc_info.value.status_code == 404
+
+
+def test_unexpected_integrity_error_re_raised(client: TestClient, sample_parent: User, monkeypatch):
+    """Verify unexpected database IntegrityError is re-raised and not swallowed as 409 conflict."""
+    set_mock_auth(sample_parent)
+
+    def faulty_commit(self):
+        raise IntegrityError("FOREIGN KEY constraint failed", None, None)
+
+    monkeypatch.setattr(Session, "commit", faulty_commit)
+
+    with pytest.raises(IntegrityError, match="FOREIGN KEY"):
+        client.post("/api/v1/profile", json=valid_profile_payload())
