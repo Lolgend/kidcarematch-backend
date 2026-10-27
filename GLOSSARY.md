@@ -57,7 +57,7 @@ The authoritative geospatial mapping, geocoding, and reverse-geocoding web servi
 _Avoid_: Google Maps Platform, SLA GIS, SLA Map service
 
 **Family Preference Profile**:
-A parent-configured matching criteria profile representing a specific child or search scenario, capturing target service type, location postal anchors, household income, budget ceiling, and cost/travel trade-off weights.
+A parent-configured matching criteria profile representing a specific child or search scenario, capturing target service type, location postal anchors, household income, budget ceiling, and cost/travel trade-off weights. An authenticated parent may maintain a portfolio of multiple distinct preference profiles, each bearing a unique profile name within the parent's account.
 _Avoid_: Search filter, match config, family setting
 
 **Review**:
@@ -79,4 +79,3 @@ _Avoid_: Age group, grade, tier, class level
 **Citizenship Type**:
 The Singapore residency classification tier determining subsidy eligibility and fee scales, canonically categorized as Singapore Citizen (`SC`), Singapore Permanent Resident (`SPR`), or Foreigner/Non-Resident (`OTHERS`).
 _Avoid_: Nationality status, resident type, citizen tier
-
