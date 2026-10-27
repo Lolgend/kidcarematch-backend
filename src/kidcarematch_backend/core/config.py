@@ -10,6 +10,11 @@ class Settings(BaseSettings):
     ONEMAP_API_URL: str = "https://www.onemap.gov.sg/api/common/elastic/search"
     FIREBASE_PROJECT_ID: str | None = None
     FIREBASE_CREDENTIALS_PATH: str | None = "./firebase_svc_acc.json"
+    CORS_ALLOWED_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "https://kidscare-match-sg.web.app",
+        "https://kidscare-match-sg.firebaseapp.com",
+    ]
 
     model_config = SettingsConfigDict(
         env_file=".env",
