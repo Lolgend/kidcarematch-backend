@@ -317,6 +317,10 @@ def test_get_centres_custom_limit_and_offset(client: TestClient, test_engine):
         ("spark_certified", "not_a_bool"),
         ("gov_subsidy", "not_a_bool"),
         ("level", "invalid_level"),
+        ("district", 0),
+        ("district", 29),
+        ("district", -1),
+        ("district", "invalid"),
     ],
 )
 def test_get_centres_invalid_parameters_return_422(
@@ -1513,3 +1517,366 @@ def test_get_centre_summary_ecda_heartbeat_filtering_and_fallback(
 
 
 
+
+
+def test_get_postal_districts_reference_endpoint_returns_all_28_districts(
+    client: TestClient,
+):
+    """GET /api/v1/centres/districts returns all 28 canonical Postal Districts in ascending order."""
+    response = client.get("/api/v1/centres/districts")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    assert len(data) == 28
+
+    # Ensure strictly ascending 1 to 28
+    assert [item["district"] for item in data] == list(range(1, 29))
+
+    # Verify key canonical districts
+    d1 = next(item for item in data if item["district"] == 1)
+    assert d1["name"] == "Raffles Place, Cecil, Marina, People's Park"
+    assert d1["postal_sectors"] == ["01", "02", "03", "04", "05", "06"]
+
+    d14 = next(item for item in data if item["district"] == 14)
+    assert d14["name"] == "Geylang, Eunos, Paya Lebar"
+    assert d14["postal_sectors"] == ["38", "39", "40", "41"]
+
+    d17 = next(item for item in data if item["district"] == 17)
+    assert d17["name"] == "Loyang, Changi"
+    assert d17["postal_sectors"] == ["49", "50", "81"]
+
+    d19 = next(item for item in data if item["district"] == 19)
+    assert d19["name"] == "Serangoon Garden, Hougang, Punggol"
+    assert d19["postal_sectors"] == ["53", "54", "55", "82"]
+
+    d23 = next(item for item in data if item["district"] == 23)
+    assert d23["name"] == "Hillview, Dairy Farm, Bukit Panjang, Choa Chu Kang"
+    assert d23["postal_sectors"] == ["65", "66", "67", "68"]
+
+    # Ensure unassigned sector 74 does not belong to any district
+    all_sectors = [sector for item in data for sector in item["postal_sectors"]]
+    assert "74" not in all_sectors
+    assert len(all_sectors) == 81
+
+
+def test_centres_response_includes_resolved_district_and_name(
+    client: TestClient, test_engine
+):
+    """PreschoolCentreItem and detail responses include resolved district and district_name."""
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_code="D01_C",
+            centre_name="Downtown Marina Centre",
+            postal="018956",
+        )
+        c2 = PreschoolCentre(
+            centre_code="D14_C",
+            centre_name="Geylang Learning Hub",
+            postal="380001",
+        )
+        c3 = PreschoolCentre(
+            centre_code="D23_C",
+            centre_name="Hillview Child Development",
+            postal="650123",
+        )
+        c4 = PreschoolCentre(
+            centre_code="D74_C",
+            centre_name="Unmapped Sector Centre",
+            postal="740001",
+        )
+        c5 = PreschoolCentre(
+            centre_code="D_NONE_C",
+            centre_name="No Postal Centre",
+            postal=None,
+        )
+        session.add_all([c1, c2, c3, c4, c5])
+        session.commit()
+        session.refresh(c2)
+
+    # Test listing endpoint
+    res = client.get("/api/v1/centres?limit=10")
+    assert res.status_code == 200
+    items = {item["centre_code"]: item for item in res.json()["items"]}
+
+    assert items["D01_C"]["district"] == 1
+    assert items["D01_C"]["district_name"] == "Raffles Place, Cecil, Marina, People's Park"
+
+    assert items["D14_C"]["district"] == 14
+    assert items["D14_C"]["district_name"] == "Geylang, Eunos, Paya Lebar"
+
+    assert items["D23_C"]["district"] == 23
+    assert items["D23_C"]["district_name"] == "Hillview, Dairy Farm, Bukit Panjang, Choa Chu Kang"
+
+    assert items["D74_C"]["district"] is None
+    assert items["D74_C"]["district_name"] is None
+
+    assert items["D_NONE_C"]["district"] is None
+    assert items["D_NONE_C"]["district_name"] is None
+
+    # Test detail by ID
+    res_detail_id = client.get(f"/api/v1/centres/{c2.centre_id}")
+    assert res_detail_id.status_code == 200
+    detail_data = res_detail_id.json()
+    assert detail_data["district"] == 14
+    assert detail_data["district_name"] == "Geylang, Eunos, Paya Lebar"
+
+    # Test detail by code
+    res_detail_code = client.get("/api/v1/centres/code/D14_C")
+    assert res_detail_code.status_code == 200
+    code_data = res_detail_code.json()
+    assert code_data["district"] == 14
+    assert code_data["district_name"] == "Geylang, Eunos, Paya Lebar"
+
+
+def test_get_centres_filter_by_single_district(
+    client: TestClient, test_engine
+):
+    """Filtering by a single district returns centres matching all postal sectors in that district."""
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_code="D01_C1",
+            centre_name="Raffles Quay Childcare",
+            postal="018956",  # Sector 01 -> District 1
+        )
+        c2 = PreschoolCentre(
+            centre_code="D01_C2",
+            centre_name="Shenton Way Infant Care",
+            postal="069123",  # Sector 06 -> District 1
+        )
+        c3 = PreschoolCentre(
+            centre_code="D14_C1",
+            centre_name="Geylang East Preschool",
+            postal="380001",  # Sector 38 -> District 14
+        )
+        c4 = PreschoolCentre(
+            centre_code="D14_C2",
+            centre_name="Eunos Learning Center",
+            postal="409002",  # Sector 40 -> District 14
+        )
+        c5 = PreschoolCentre(
+            centre_code="D23_C1",
+            centre_name="Bukit Panjang Kids Center",
+            postal="670123",  # Sector 67 -> District 23
+        )
+        session.add_all([c1, c2, c3, c4, c5])
+        session.commit()
+
+    # Query district 1 (leading zeros)
+    res_d1 = client.get("/api/v1/centres?district=1")
+    assert res_d1.status_code == 200
+    data_d1 = res_d1.json()
+    assert data_d1["total"] == 2
+    codes_d1 = {item["centre_code"] for item in data_d1["items"]}
+    assert codes_d1 == {"D01_C1", "D01_C2"}
+
+    # Query district 14
+    res_d14 = client.get("/api/v1/centres?district=14")
+    assert res_d14.status_code == 200
+    data_d14 = res_d14.json()
+    assert data_d14["total"] == 2
+    codes_d14 = {item["centre_code"] for item in data_d14["items"]}
+    assert codes_d14 == {"D14_C1", "D14_C2"}
+
+    # Query district 28 with no centres
+    res_d28 = client.get("/api/v1/centres?district=28")
+    assert res_d28.status_code == 200
+    assert res_d28.json()["total"] == 0
+
+
+def test_get_centres_filter_by_multiple_districts_and_deduplication(
+    client: TestClient, test_engine
+):
+    """Filtering by multiple districts returns the union, and duplicate params are deduplicated."""
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_code="M_D01",
+            centre_name="Marina Preschool",
+            postal="029876",  # Sector 02 -> District 1
+        )
+        c2 = PreschoolCentre(
+            centre_code="M_D14",
+            centre_name="Paya Lebar Preschool",
+            postal="419876",  # Sector 41 -> District 14
+        )
+        c3 = PreschoolCentre(
+            centre_code="M_D23",
+            centre_name="Choa Chu Kang Preschool",
+            postal="680123",  # Sector 68 -> District 23
+        )
+        c4 = PreschoolCentre(
+            centre_code="M_D74",
+            centre_name="Unassigned Sector Preschool",
+            postal="740123",  # Unassigned sector 74
+        )
+        c5 = PreschoolCentre(
+            centre_code="M_NONE",
+            centre_name="Missing Postal Preschool",
+            postal=None,
+        )
+        session.add_all([c1, c2, c3, c4, c5])
+        session.commit()
+
+    # Query multiple districts: 14 and 23
+    res_multi = client.get("/api/v1/centres?district=14&district=23")
+    assert res_multi.status_code == 200
+    data_multi = res_multi.json()
+    assert data_multi["total"] == 2
+    codes_multi = {item["centre_code"] for item in data_multi["items"]}
+    assert codes_multi == {"M_D14", "M_D23"}
+
+    # Duplicate district query: district=14&district=14
+    res_dup = client.get("/api/v1/centres?district=14&district=14")
+    assert res_dup.status_code == 200
+    data_dup = res_dup.json()
+    assert data_dup["total"] == 1
+    assert data_dup["items"][0]["centre_code"] == "M_D14"
+
+    # Ensure unmapped (74) and None are excluded when filtering by all districts containing 1, 14, 23
+    res_all_three = client.get("/api/v1/centres?district=1&district=14&district=23")
+    assert res_all_three.status_code == 200
+    data_all_three = res_all_three.json()
+    assert data_all_three["total"] == 3
+    codes_all_three = {item["centre_code"] for item in data_all_three["items"]}
+    assert codes_all_three == {"M_D01", "M_D14", "M_D23"}
+
+
+def test_get_centres_combined_district_with_all_other_filters(
+    client: TestClient, test_engine
+):
+    """District filter combines conjunctively (AND) with query, postal_prefix, spark, subsidy, and level."""
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_code="COMB_1",
+            centre_name="Sunflower Geylang",
+            address="100 Geylang Rd",
+            postal="380001",  # District 14, prefix 38
+            spark_certified=True,
+            gov_subsidy=True,
+        )
+        c2 = PreschoolCentre(
+            centre_code="COMB_2",
+            centre_name="Sunflower Eunos",
+            address="200 Eunos Rd",
+            postal="380002",  # District 14, prefix 38
+            spark_certified=True,
+            gov_subsidy=False,
+        )
+        c3 = PreschoolCentre(
+            centre_code="COMB_3",
+            centre_name="Moonlight Geylang",
+            address="300 Geylang Rd",
+            postal="380003",  # District 14, prefix 38
+            spark_certified=False,
+            gov_subsidy=True,
+        )
+        c4 = PreschoolCentre(
+            centre_code="COMB_4",
+            centre_name="Sunflower Paya Lebar",
+            address="400 Paya Lebar Rd",
+            postal="400001",  # District 14, prefix 40
+            spark_certified=True,
+            gov_subsidy=True,
+        )
+        c5 = PreschoolCentre(
+            centre_code="COMB_5",
+            centre_name="Sunflower Raffles",
+            address="10 Raffles Quay",
+            postal="018956",  # District 1, prefix 01
+            spark_certified=True,
+            gov_subsidy=True,
+        )
+        session.add_all([c1, c2, c3, c4, c5])
+        session.commit()
+        session.refresh(c1)
+        session.refresh(c2)
+        session.refresh(c3)
+        session.refresh(c4)
+        session.refresh(c5)
+        assert c1.centre_id is not None
+        assert c2.centre_id is not None
+        assert c3.centre_id is not None
+        assert c4.centre_id is not None
+        assert c5.centre_id is not None
+
+        # Vacancies
+        v1 = VacancyRecord(
+            record_id="VR_C1_infant",
+            centre_id=c1.centre_id,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=datetime(2026, 12, 1, tzinfo=timezone.utc),
+            vacancy_status="Immediate",
+        )
+        v2 = VacancyRecord(
+            record_id="VR_C2_infant",
+            centre_id=c2.centre_id,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=datetime(2026, 12, 1, tzinfo=timezone.utc),
+            vacancy_status="Immediate",
+        )
+        v3 = VacancyRecord(
+            record_id="VR_C3_infant",
+            centre_id=c3.centre_id,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=datetime(2026, 12, 1, tzinfo=timezone.utc),
+            vacancy_status="Immediate",
+        )
+        v4 = VacancyRecord(
+            record_id="VR_C4_k1",
+            centre_id=c4.centre_id,
+            level_type=PreschoolLevel.K1,
+            enrollment_month_year=datetime(2026, 12, 1, tzinfo=timezone.utc),
+            vacancy_status="Immediate",
+        )
+        v5 = VacancyRecord(
+            record_id="VR_C5_infant",
+            centre_id=c5.centre_id,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=datetime(2026, 12, 1, tzinfo=timezone.utc),
+            vacancy_status="Immediate",
+        )
+        session.add_all([v1, v2, v3, v4, v5])
+        session.commit()
+
+    # 1. District 14 + spark_certified=true -> C1, C2, C4
+    r1 = client.get("/api/v1/centres?district=14&spark_certified=true")
+    assert r1.status_code == 200
+    assert {i["centre_code"] for i in r1.json()["items"]} == {"COMB_1", "COMB_2", "COMB_4"}
+
+    # 2. District 14 + gov_subsidy=true -> C1, C3, C4
+    r2 = client.get("/api/v1/centres?district=14&gov_subsidy=true")
+    assert r2.status_code == 200
+    assert {i["centre_code"] for i in r2.json()["items"]} == {"COMB_1", "COMB_3", "COMB_4"}
+
+    # 3. District 14 + level=infant -> C1, C2, C3
+    r3 = client.get("/api/v1/centres?district=14&level=infant")
+    assert r3.status_code == 200
+    assert {i["centre_code"] for i in r3.json()["items"]} == {"COMB_1", "COMB_2", "COMB_3"}
+
+    # 4. District 14 + postal_prefix=38 -> C1, C2, C3
+    r4 = client.get("/api/v1/centres?district=14&postal_prefix=38")
+    assert r4.status_code == 200
+    assert {i["centre_code"] for i in r4.json()["items"]} == {"COMB_1", "COMB_2", "COMB_3"}
+
+    # 5. District 14 + postal_prefix=40 -> C4
+    r5 = client.get("/api/v1/centres?district=14&postal_prefix=40")
+    assert r5.status_code == 200
+    assert {i["centre_code"] for i in r5.json()["items"]} == {"COMB_4"}
+
+    # 6. District 14 + query=sunflower -> C1, C2, C4
+    r6 = client.get("/api/v1/centres?district=14&query=sunflower")
+    assert r6.status_code == 200
+    assert {i["centre_code"] for i in r6.json()["items"]} == {"COMB_1", "COMB_2", "COMB_4"}
+
+    # 7. Fully combined: District 14 + query=sunflower + postal_prefix=38 + spark=true + subsidy=true + level=infant -> ONLY C1
+    r7 = client.get(
+        "/api/v1/centres?district=14&query=sunflower&postal_prefix=38&spark_certified=true&gov_subsidy=true&level=infant"
+    )
+    assert r7.status_code == 200
+    assert {i["centre_code"] for i in r7.json()["items"]} == {"COMB_1"}
+
+    # 8. Multi-district union combined: District 1 + District 14 + query=sunflower + spark=true + subsidy=true + level=infant -> C1 and C5
+    r8 = client.get(
+        "/api/v1/centres?district=1&district=14&query=sunflower&spark_certified=true&gov_subsidy=true&level=infant"
+    )
+    assert r8.status_code == 200
+    assert {i["centre_code"] for i in r8.json()["items"]} == {"COMB_1", "COMB_5"}

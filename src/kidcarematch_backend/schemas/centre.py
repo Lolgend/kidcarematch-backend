@@ -2,8 +2,10 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
+from typing_extensions import Self
 
+from kidcarematch_backend.core.postal_districts import get_district_by_postal_code
 from kidcarematch_backend.db.db import CitizenshipType, PreschoolLevel
 
 
@@ -38,11 +40,31 @@ class PreschoolCentreItem(BaseModel):
     extended_operating_hours: bool
     transport_provided: bool
     gov_subsidy: bool
+    district: int | None = None
+    district_name: str | None = None
     last_updated: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
 
+
+
+    @model_validator(mode="after")
+    def populate_district(self) -> Self:
+        d_num, d_name = get_district_by_postal_code(self.postal)
+        self.district = d_num
+        self.district_name = d_name
+        return self
+
+
+class PostalDistrictItem(BaseModel):
+    """Singapore Postal District reference model."""
+
+    district: int
+    name: str
+    postal_sectors: list[str]
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PreschoolCentreListResponse(BaseModel):
