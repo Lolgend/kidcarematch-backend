@@ -78,7 +78,11 @@ def test_parse_vacancies_for_centre_generates_42_records_with_correct_keys():
         "k2_vacancy_seventh_month": "Full",
     }
 
-    records = parse_vacancies_for_centre(centre_record, centre_id=42)
+    records = parse_vacancies_for_centre(
+        centre_record,
+        centre_id=42,
+        sync_date=datetime(2026, 10, 2, tzinfo=timezone.utc),
+    )
 
     # 6 levels * 7 horizons = 42 records
     assert len(records) == 42

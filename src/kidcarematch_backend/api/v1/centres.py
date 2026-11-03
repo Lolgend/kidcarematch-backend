@@ -4,11 +4,16 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_
+from pydantic import Field
+from sqlalchemy import false, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from kidcarematch_backend.auth.security import get_current_user
+from kidcarematch_backend.core.postal_districts import (
+    get_all_postal_districts,
+    get_postal_sectors_for_districts,
+)
 from kidcarematch_backend.db.db import (
     CitizenshipType,
     ExternalDataSourceStatus,
@@ -26,6 +31,7 @@ from kidcarematch_backend.schemas.centre import (
     CentreReviewItem,
     CentreReviewListResponse,
     CentreSummaryResponse,
+    PostalDistrictItem,
     PreschoolCentreDetailResponse,
     PreschoolCentreItem,
     PreschoolCentreListResponse,
@@ -84,6 +90,17 @@ def get_centre_or_404(centre_id: int, session: Session) -> PreschoolCentre:
             detail="Preschool centre not found",
         )
     return centre
+
+
+@router.get(
+    "/districts",
+    response_model=list[PostalDistrictItem],
+    status_code=status.HTTP_200_OK,
+    summary="List Singapore Postal Districts",
+)
+def list_postal_districts() -> list[PostalDistrictItem]:
+    """Retrieve all 28 canonical Singapore Postal Districts and their postal sectors."""
+    return [PostalDistrictItem.model_validate(d) for d in get_all_postal_districts()]
 
 
 @router.get(
@@ -159,6 +176,10 @@ def list_centres(
         str | None,
         Query(description="Case-insensitive search across centre name and address"),
     ] = None,
+    district: Annotated[
+        list[Annotated[int, Field(ge=1, le=28)]] | None,
+        Query(description="Filter centres by Singapore postal district (1 to 28)"),
+    ] = None,
     postal_prefix: Annotated[
         str | None,
         Query(description="Prefix match on Singapore postal code"),
@@ -199,6 +220,17 @@ def list_centres(
                     ).like(pattern),
                 )
             )
+
+    if district:
+        sectors = get_postal_sectors_for_districts(district)
+        if sectors:
+            conditions.append(col(PreschoolCentre.postal).is_not(None))
+            conditions.append(func.length(col(PreschoolCentre.postal)) >= 2)
+            conditions.append(
+                func.substr(col(PreschoolCentre.postal), 1, 2).in_(sectors)
+            )
+        else:
+            conditions.append(false())
 
     if postal_prefix is not None:
         cleaned_postal = postal_prefix.strip()

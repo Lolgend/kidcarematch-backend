@@ -79,3 +79,8 @@ _Avoid_: Age group, grade, tier, class level
 **Citizenship Type**:
 The Singapore residency classification tier determining subsidy eligibility and fee scales, canonically categorized as Singapore Citizen (`SC`), Singapore Permanent Resident (`SPR`), or Foreigner/Non-Resident (`OTHERS`).
 _Avoid_: Nationality status, resident type, citizen tier
+
+
+**Postal District**:
+One of Singapore's 28 official geographical postal districts (D01 through D28), each grouping one or more two-digit postal code sectors (the first two digits of a six-digit Singapore postal code) and associated with a canonical set of locality names.
+_Avoid_: Region, zone, planning area, neighbourhood
