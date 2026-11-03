@@ -1880,3 +1880,40 @@ def test_get_centres_combined_district_with_all_other_filters(
     )
     assert r8.status_code == 200
     assert {i["centre_code"] for i in r8.json()["items"]} == {"COMB_1", "COMB_5"}
+
+
+def test_centres_invalid_and_malformed_postal_resolves_to_null(
+    client: TestClient, test_engine
+):
+    """Centres with invalid, partial, or malformed postal codes resolve district and district_name to null."""
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_code="INV_SHORT",
+            centre_name="Short Postal Centre",
+            postal="12",
+        )
+        c2 = PreschoolCentre(
+            centre_code="INV_ALPHA",
+            centre_name="Alpha Postal Centre",
+            postal="12ABCD",
+        )
+        c3 = PreschoolCentre(
+            centre_code="INV_FIVE",
+            centre_name="Five Digit Postal Centre",
+            postal="12345",
+        )
+        c4 = PreschoolCentre(
+            centre_code="INV_LONG",
+            centre_name="Seven Digit Postal Centre",
+            postal="1234567",
+        )
+        session.add_all([c1, c2, c3, c4])
+        session.commit()
+
+    res = client.get("/api/v1/centres?limit=10")
+    assert res.status_code == 200
+    items = {item["centre_code"]: item for item in res.json()["items"]}
+
+    for code in ("INV_SHORT", "INV_ALPHA", "INV_FIVE", "INV_LONG"):
+        assert items[code]["district"] is None
+        assert items[code]["district_name"] is None

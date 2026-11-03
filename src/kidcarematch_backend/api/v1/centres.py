@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import Field
-from sqlalchemy import func, or_
+from sqlalchemy import false, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
@@ -230,7 +230,7 @@ def list_centres(
                 func.substr(col(PreschoolCentre.postal), 1, 2).in_(sectors)
             )
         else:
-            conditions.append(col(PreschoolCentre.centre_id) == -1)
+            conditions.append(false())
 
     if postal_prefix is not None:
         cleaned_postal = postal_prefix.strip()

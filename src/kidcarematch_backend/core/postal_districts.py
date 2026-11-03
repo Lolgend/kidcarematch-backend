@@ -165,20 +165,17 @@ def get_all_postal_districts() -> list[dict[str, Any]]:
 def get_district_by_postal_code(postal: str | None) -> tuple[int | None, str | None]:
     """Resolve district number and name from a 6-digit postal code string.
 
-    Returns (None, None) if postal is None, shorter than 2 digits,
-    non-numeric prefix, or unmapped sector (e.g. 74).
+    Returns (None, None) if postal is None, not 6 digits,
+    non-numeric, or unmapped sector (e.g. 74).
     """
     if postal is None:
         return None, None
 
     cleaned = postal.strip()
-    if len(cleaned) < 2:
+    if len(cleaned) != 6 or not cleaned.isdigit():
         return None, None
 
     sector = cleaned[:2]
-    if not sector.isdigit():
-        return None, None
-
     match = SECTOR_TO_DISTRICT.get(sector)
     if match is None:
         return None, None
