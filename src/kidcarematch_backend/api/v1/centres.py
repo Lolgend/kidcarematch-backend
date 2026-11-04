@@ -1,5 +1,6 @@
 """Preschool centre API endpoints."""
 
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -18,6 +19,8 @@ from kidcarematch_backend.core.postal_districts import (
     get_postal_sectors_for_districts,
 )
 from kidcarematch_backend.db.db import (
+    ApplicantStatus,
+    CareType,
     CitizenshipType,
     ExternalDataSourceStatus,
     FamilyPreferenceProfile,
@@ -26,6 +29,8 @@ from kidcarematch_backend.db.db import (
     PreschoolLevel,
     PreschoolService,
     Review,
+    SubsidyMetric,
+    SubsidyRule,
     User,
     VacancyRecord,
     WatchlistEntry,
@@ -46,6 +51,7 @@ from kidcarematch_backend.schemas.centre import (
 from kidcarematch_backend.schemas.match import (
     CentreMatchRequest,
     CentreMatchResponse,
+    FeeBreakdownItem,
     MatchCandidateItem,
 )
 from kidcarematch_backend.schemas.profile import (
@@ -110,6 +116,145 @@ def score_vacancy_fit(status: str | None) -> float:
     if normalized == "limited":
         return 50.0
     return 0.0
+
+
+def map_level_to_care_type(level: PreschoolLevel) -> CareType:
+    """Map developmental preschool cohort level to ECDA subsidy CareType category."""
+    if level == PreschoolLevel.INFANT:
+        return CareType.INFANT_CARE
+    return CareType.CHILD_CARE
+
+
+def resolve_published_programme_fee(
+    services: list[PreschoolService],
+    requested_level: PreschoolLevel,
+    service_required: str,
+    citizenship_status: CitizenshipType,
+) -> tuple[float, str | None]:
+    """Resolve centre published programme fee matching requested level, service type, and citizenship.
+
+    Priority and fallback logic:
+    - Service Type: exact match (case-insensitive) -> fallback to "Full Day" -> fallback to any available service type.
+    - Citizenship: exact match -> fallback to OTHERS -> fallback to any available citizenship tier.
+    Returns (published_fee, remarks).
+    """
+    level_services = [s for s in services if s.level == requested_level]
+    if not level_services:
+        return 0.0, None
+
+    req_clean = service_required.strip().lower()
+    type_matches = [
+        s for s in level_services if s.type_of_service.strip().lower() == req_clean
+    ]
+    if not type_matches and req_clean != "full day":
+        type_matches = [
+            s
+            for s in level_services
+            if s.type_of_service.strip().lower() == "full day"
+        ]
+    if not type_matches:
+        type_matches = level_services
+
+    cit_match = next(
+        (s for s in type_matches if s.citizenship_type == citizenship_status),
+        None,
+    )
+    if cit_match is None and citizenship_status != CitizenshipType.OTHERS:
+        cit_match = next(
+            (
+                s
+                for s in type_matches
+                if s.citizenship_type == CitizenshipType.OTHERS
+            ),
+            None,
+        )
+    if cit_match is None:
+        cit_match = type_matches[0]
+
+    return cit_match.fee, cit_match.remarks
+
+
+def evaluate_government_subsidy(
+    session: Session,
+    care_type: CareType,
+    citizenship: CitizenshipType,
+    applicant_status: ApplicantStatus,
+    household_income: float,
+    household_member_count: int,
+) -> float:
+    """Evaluate eligible government early childhood subsidies according to ECDA means-tested policy.
+
+    - Fixed subsidies (e.g. Basic Subsidy) are summed universally.
+    - Means-tested tiered subsidies (e.g. Additional Subsidy) evaluate both Gross Household Income (HHI)
+      and Per-Capita Income (PCI = HHI / household_member_count), taking the maximum eligible benefit.
+    """
+    statement = (
+        select(SubsidyRule)
+        .where(
+            col(SubsidyRule.care_type) == care_type,
+            col(SubsidyRule.citizenship) == citizenship,
+            or_(
+                col(SubsidyRule.applicant_status) == applicant_status,
+                col(SubsidyRule.applicant_status).is_(None),
+            ),
+        )
+    )
+    rules = session.exec(statement).all()
+    if not rules:
+        return 0.0
+
+    member_count = max(1, household_member_count)
+    pci = household_income / member_count
+
+    fixed_subsidy = 0.0
+    tiered_rules_by_name: dict[str, list[SubsidyRule]] = defaultdict(list)
+
+    for r in rules:
+        if r.metric == SubsidyMetric.FIXED:
+            fixed_subsidy += r.subsidy_amount
+        elif r.metric in (
+            SubsidyMetric.HOUSEHOLD_INCOME,
+            SubsidyMetric.PER_CAPITA_INCOME,
+        ):
+            tiered_rules_by_name[r.subsidy_name].append(r)
+
+    total_tiered_subsidy = 0.0
+    for sub_rules in tiered_rules_by_name.values():
+        hhi_benefit = 0.0
+        pci_benefit = 0.0
+        for r in sub_rules:
+            if (
+                r.metric == SubsidyMetric.HOUSEHOLD_INCOME
+                and (r.income_min is None or household_income >= r.income_min)
+                and (r.income_max is None or household_income <= r.income_max)
+            ):
+                hhi_benefit = max(hhi_benefit, r.subsidy_amount)
+            elif (
+                r.metric == SubsidyMetric.PER_CAPITA_INCOME
+                and (r.income_min is None or pci >= r.income_min)
+                and (r.income_max is None or pci <= r.income_max)
+            ):
+                pci_benefit = max(pci_benefit, r.subsidy_amount)
+        total_tiered_subsidy += max(hhi_benefit, pci_benefit)
+
+    return round(fixed_subsidy + total_tiered_subsidy, 2)
+
+
+def calculate_cost_fit(
+    estimated_payable_fee: float,
+    budget_max: float | None,
+) -> float | None:
+    """Calculate Cost Fit percentage (0% - 100%) comparing net payable fee against budget ceiling.
+
+    - 100% if payable fee <= budget_max (or <= 0.0)
+    - min(100.0, (budget_max / payable_fee) * 100.0) otherwise
+    - None if budget_max is None
+    """
+    if budget_max is None:
+        return None
+    if estimated_payable_fee <= budget_max or estimated_payable_fee <= 0.0:
+        return 100.0
+    return round(min(100.0, (budget_max / estimated_payable_fee) * 100.0), 2)
 
 
 def get_centre_or_404(centre_id: int, session: Session) -> PreschoolCentre:
@@ -650,12 +795,32 @@ def match_centres(
             0,
             tzinfo=timezone.utc,
         )
+        citizenship_status = profile.citizenship_status
+        service_required = profile.service_required
+        household_income = profile.household_income
+        household_member_count = profile.household_member_count
+        budget_max: float | None = profile.budget_max
+        applicant_status = profile.applicant_status
+        vacancy_weight = profile.vacancy_weight
+        cost_weight = profile.cost_weight
+        travel_weight = profile.travel_weight
     else:
         assert request.level is not None
         assert request.enrollment_month_year is not None
         requested_level = request.level
         enrollment_month_str = request.enrollment_month_year
         target_dt = parse_year_month(enrollment_month_str)
+        citizenship_status = request.citizenship_status
+        service_required = request.service_required
+        household_income = request.household_income
+        household_member_count = request.household_member_count
+        budget_max = request.budget_max
+        applicant_status = request.applicant_status
+        vacancy_weight = request.vacancy_weight
+        cost_weight = request.cost_weight
+        travel_weight = request.travel_weight
+
+    _ = travel_weight  # Travel Fit integration scheduled for Ticket #70
 
     # 2. Strict cohort filtering: candidates must offer requested level
     candidate_centres = session.exec(
@@ -682,7 +847,7 @@ def match_centres(
             profile_id=request.profile_id,
         )
 
-    # 3. Prefetch vacancy records for all candidate centres for requested level and target month
+    # 3. Prefetch vacancy and service records for all candidate centres
     candidate_ids = [c.centre_id for c in candidate_centres if c.centre_id is not None]
     vacancies = session.exec(
         select(VacancyRecord).where(
@@ -701,7 +866,29 @@ def match_centres(
         ):
             vacancy_map[v.centre_id] = v
 
-    # 4. Score Vacancy Fit for each candidate centre
+    services = session.exec(
+        select(PreschoolService).where(
+            col(PreschoolService.centre_id).in_(candidate_ids),
+            col(PreschoolService.level) == requested_level,
+        )
+    ).all()
+
+    services_map: dict[int, list[PreschoolService]] = defaultdict(list)
+    for s in services:
+        if s.centre_id is not None:
+            services_map[s.centre_id].append(s)
+
+    care_type = map_level_to_care_type(requested_level)
+    estimated_subsidy = evaluate_government_subsidy(
+        session=session,
+        care_type=care_type,
+        citizenship=citizenship_status,
+        applicant_status=applicant_status,
+        household_income=household_income,
+        household_member_count=household_member_count,
+    )
+
+    # 4. Score Vacancy Fit and Cost Fit for each candidate centre
     scored_candidates: list[MatchCandidateItem] = []
     for centre in candidate_centres:
         v_rec = (
@@ -709,6 +896,43 @@ def match_centres(
         )
         v_status = v_rec.vacancy_status if v_rec else None
         v_score = score_vacancy_fit(v_status)
+
+        centre_services = (
+            services_map.get(centre.centre_id, [])
+            if centre.centre_id is not None
+            else []
+        )
+        published_fee, remarks = resolve_published_programme_fee(
+            services=centre_services,
+            requested_level=requested_level,
+            service_required=service_required,
+            citizenship_status=citizenship_status,
+        )
+        payable_fee = max(0.0, round(published_fee - estimated_subsidy, 2))
+        cost_fit = calculate_cost_fit(payable_fee, budget_max)
+
+        fee_breakdown = FeeBreakdownItem(
+            published_fee=published_fee,
+            estimated_subsidy=estimated_subsidy,
+            estimated_monthly_payable_fee=payable_fee,
+            cost_fit=cost_fit,
+            remarks=remarks,
+            incidental_fee_remarks=remarks,
+        )
+
+        if cost_fit is not None:
+            active_weight = vacancy_weight + cost_weight
+            overall_fit_score = (
+                round(
+                    ((v_score * vacancy_weight) + (cost_fit * cost_weight))
+                    / active_weight,
+                    2,
+                )
+                if active_weight > 0
+                else 0.0
+            )
+        else:
+            overall_fit_score = v_score
 
         candidate_item = MatchCandidateItem(
             centre_id=centre.centre_id,  # type: ignore[arg-type]
@@ -732,18 +956,23 @@ def match_centres(
             enrollment_month_year=enrollment_month_str,
             vacancy_status=v_status,
             vacancy_fit_score=v_score,
-            cost_fit_score=None,
+            cost_fit_score=cost_fit,
             travel_fit_score=None,
-            overall_fit_score=v_score,
-            fee_breakdown=None,
+            overall_fit_score=overall_fit_score,
+            fee_breakdown=fee_breakdown,
             travel_breakdown=None,
             highlight=None,
         )
         scored_candidates.append(candidate_item)
 
-    # 5. Rank candidate centres: vacancy_fit_score desc, centre_name asc, centre_id asc
+    # 5. Rank candidate centres: overall_fit_score desc, vacancy_fit_score desc, centre_name asc, centre_id asc
     scored_candidates.sort(
-        key=lambda item: (-item.vacancy_fit_score, item.centre_name, item.centre_id)
+        key=lambda item: (
+            -item.overall_fit_score,
+            -item.vacancy_fit_score,
+            item.centre_name,
+            item.centre_id,
+        )
     )
 
     # 6. Apply top_n limit

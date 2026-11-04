@@ -31,7 +31,15 @@ class FeeBreakdownItem(BaseModel):
     estimated_monthly_payable_fee: float = Field(
         description="Net out-of-pocket estimated monthly payable fee in SGD"
     )
+    cost_fit: float | None = Field(
+        default=None,
+        description="Quantitative Cost Fit percentage score (0-100%)",
+    )
     remarks: str | None = Field(
+        default=None,
+        description="Incidental and registration fee remarks or notes",
+    )
+    incidental_fee_remarks: str | None = Field(
         default=None,
         description="Incidental and registration fee remarks or notes",
     )

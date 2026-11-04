@@ -16,11 +16,14 @@ from kidcarematch_backend.auth.security import (
 from kidcarematch_backend.db.db import (
     AccountStatus,
     ApplicantStatus,
+    CareType,
     CitizenshipType,
     FamilyPreferenceProfile,
     PreschoolCentre,
     PreschoolLevel,
     PreschoolService,
+    SubsidyMetric,
+    SubsidyRule,
     User,
     UserRole,
     VacancyRecord,
@@ -757,3 +760,661 @@ def test_match_response_serializes_centre_details_and_district(
     assert item["travel_fit_score"] is None
     assert item["highlight"] is None
     assert data["explanation"] is None
+
+
+# ==============================================================================
+# Subsidy Engine and Cost Fit Integration Tests (Ticket #69)
+# ==============================================================================
+
+
+def seed_ecda_subsidy_rules(test_engine):
+    """Seed comprehensive ECDA subsidy rules for Infant Care and Child Care."""
+    with Session(test_engine) as session:
+        rules = [
+            # 1. Infant Care - Basic Subsidy (Universal for Working Applicant SC)
+            SubsidyRule(
+                rule_id="RULE_BASIC_INFANT_WA",
+                subsidy_name="Basic Subsidy",
+                tier_name="Standard",
+                care_type=CareType.INFANT_CARE,
+                metric=SubsidyMetric.FIXED,
+                applicant_status=ApplicantStatus.WORKING_APPLICANT,
+                citizenship=CitizenshipType.SC,
+                subsidy_amount=600.0,
+            ),
+            # 2. Infant Care - Basic Subsidy for Non-Working Applicant SC
+            SubsidyRule(
+                rule_id="RULE_BASIC_INFANT_NWA",
+                subsidy_name="Basic Subsidy",
+                tier_name="Standard",
+                care_type=CareType.INFANT_CARE,
+                metric=SubsidyMetric.FIXED,
+                applicant_status=ApplicantStatus.NON_WORKING_APPLICANT,
+                citizenship=CitizenshipType.SC,
+                subsidy_amount=150.0,
+            ),
+            # 3. Child Care - Basic Subsidy for Working Applicant SC
+            SubsidyRule(
+                rule_id="RULE_BASIC_CC_WA",
+                subsidy_name="Basic Subsidy",
+                tier_name="Standard",
+                care_type=CareType.CHILD_CARE,
+                metric=SubsidyMetric.FIXED,
+                applicant_status=ApplicantStatus.WORKING_APPLICANT,
+                citizenship=CitizenshipType.SC,
+                subsidy_amount=300.0,
+            ),
+            # 4. Child Care - Basic Subsidy for Non-Working Applicant SC
+            SubsidyRule(
+                rule_id="RULE_BASIC_CC_NWA",
+                subsidy_name="Basic Subsidy",
+                tier_name="Standard",
+                care_type=CareType.CHILD_CARE,
+                metric=SubsidyMetric.FIXED,
+                applicant_status=ApplicantStatus.NON_WORKING_APPLICANT,
+                citizenship=CitizenshipType.SC,
+                subsidy_amount=150.0,
+            ),
+            # 5. Infant Care - Additional Subsidy (HHI Tiers)
+            SubsidyRule(
+                rule_id="RULE_ADD_INFANT_HHI_T1",
+                subsidy_name="Additional Subsidy",
+                tier_name="Tier 1",
+                care_type=CareType.INFANT_CARE,
+                metric=SubsidyMetric.HOUSEHOLD_INCOME,
+                applicant_status=ApplicantStatus.WORKING_APPLICANT,
+                citizenship=CitizenshipType.SC,
+                income_min=0.0,
+                income_max=3000.0,
+                subsidy_amount=710.0,
+            ),
+            SubsidyRule(
+                rule_id="RULE_ADD_INFANT_HHI_T2",
+                subsidy_name="Additional Subsidy",
+                tier_name="Tier 2",
+                care_type=CareType.INFANT_CARE,
+                metric=SubsidyMetric.HOUSEHOLD_INCOME,
+                applicant_status=ApplicantStatus.WORKING_APPLICANT,
+                citizenship=CitizenshipType.SC,
+                income_min=3000.01,
+                income_max=6000.0,
+                subsidy_amount=540.0,
+            ),
+            # 6. Infant Care - Additional Subsidy (PCI Tiers)
+            SubsidyRule(
+                rule_id="RULE_ADD_INFANT_PCI_T1",
+                subsidy_name="Additional Subsidy",
+                tier_name="Tier 1 PCI",
+                care_type=CareType.INFANT_CARE,
+                metric=SubsidyMetric.PER_CAPITA_INCOME,
+                applicant_status=ApplicantStatus.WORKING_APPLICANT,
+                citizenship=CitizenshipType.SC,
+                income_min=0.0,
+                income_max=1500.0,
+                subsidy_amount=710.0,
+            ),
+            SubsidyRule(
+                rule_id="RULE_ADD_INFANT_PCI_T2",
+                subsidy_name="Additional Subsidy",
+                tier_name="Tier 2 PCI",
+                care_type=CareType.INFANT_CARE,
+                metric=SubsidyMetric.PER_CAPITA_INCOME,
+                applicant_status=ApplicantStatus.WORKING_APPLICANT,
+                citizenship=CitizenshipType.SC,
+                income_min=1500.01,
+                income_max=2500.0,
+                subsidy_amount=540.0,
+            ),
+            # 7. Child Care - Additional Subsidy (HHI Tiers)
+            SubsidyRule(
+                rule_id="RULE_ADD_CC_HHI_T1",
+                subsidy_name="Additional Subsidy",
+                tier_name="Tier 1",
+                care_type=CareType.CHILD_CARE,
+                metric=SubsidyMetric.HOUSEHOLD_INCOME,
+                applicant_status=ApplicantStatus.WORKING_APPLICANT,
+                citizenship=CitizenshipType.SC,
+                income_min=0.0,
+                income_max=3000.0,
+                subsidy_amount=467.0,
+            ),
+            SubsidyRule(
+                rule_id="RULE_ADD_CC_HHI_T2",
+                subsidy_name="Additional Subsidy",
+                tier_name="Tier 2",
+                care_type=CareType.CHILD_CARE,
+                metric=SubsidyMetric.HOUSEHOLD_INCOME,
+                applicant_status=ApplicantStatus.WORKING_APPLICANT,
+                citizenship=CitizenshipType.SC,
+                income_min=3000.01,
+                income_max=6000.0,
+                subsidy_amount=340.0,
+            ),
+            # 8. Child Care - Additional Subsidy (PCI Tiers)
+            SubsidyRule(
+                rule_id="RULE_ADD_CC_PCI_T1",
+                subsidy_name="Additional Subsidy",
+                tier_name="Tier 1 PCI",
+                care_type=CareType.CHILD_CARE,
+                metric=SubsidyMetric.PER_CAPITA_INCOME,
+                applicant_status=ApplicantStatus.WORKING_APPLICANT,
+                citizenship=CitizenshipType.SC,
+                income_min=0.0,
+                income_max=1500.0,
+                subsidy_amount=467.0,
+            ),
+            SubsidyRule(
+                rule_id="RULE_ADD_CC_PCI_T2",
+                subsidy_name="Additional Subsidy",
+                tier_name="Tier 2 PCI",
+                care_type=CareType.CHILD_CARE,
+                metric=SubsidyMetric.PER_CAPITA_INCOME,
+                applicant_status=ApplicantStatus.WORKING_APPLICANT,
+                citizenship=CitizenshipType.SC,
+                income_min=1500.01,
+                income_max=2500.0,
+                subsidy_amount=340.0,
+            ),
+        ]
+        session.add_all(rules)
+        session.commit()
+
+
+def test_match_resolves_published_fee_exact_service_and_citizenship(
+    client: TestClient, test_engine
+):
+    """Preschool service lookup resolves exact match for requested level, service type, and citizenship."""
+    create_centres_with_cohorts(test_engine)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "service_required": "Full Day",
+        "citizenship_status": "SC",
+        "top_n": 1,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["results"]) == 1
+    item = data["results"][0]
+
+    # Centre 1 Alpha has fee=1200.0 for infant Full Day SC
+    assert item["fee_breakdown"] is not None
+    assert item["fee_breakdown"]["published_fee"] == 1200.0
+    assert item["fee_breakdown"]["estimated_monthly_payable_fee"] == 1200.0
+
+
+def test_match_resolves_published_fee_citizenship_fallback_to_others(
+    client: TestClient, test_engine
+):
+    """When child's citizenship tier (e.g. SPR) is not published, service lookup falls back to OTHERS tier."""
+    # Seed centre with only OTHERS fee
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_id=101,
+            centre_code="C101",
+            centre_name="International Montessori",
+            postal="123456",
+        )
+        session.add(centre)
+        session.commit()
+
+        service = PreschoolService(
+            centre_id=101,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1850.0,
+            citizenship_type=CitizenshipType.OTHERS,
+        )
+        vacancy = VacancyRecord(
+            record_id="VR101",
+            centre_id=101,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            vacancy_status="Available",
+        )
+        session.add_all([service, vacancy])
+        session.commit()
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SPR",
+        "service_required": "Full Day",
+        "top_n": 1,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    item = data["results"][0]
+
+    assert item["centre_code"] == "C101"
+    assert item["fee_breakdown"] is not None
+    assert item["fee_breakdown"]["published_fee"] == 1850.0
+
+
+def test_match_resolves_published_fee_service_type_fallback_to_full_day(
+    client: TestClient, test_engine
+):
+    """When requested service type (e.g. Half Day) is not offered, lookup falls back to Full Day."""
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_id=102,
+            centre_code="C102",
+            centre_name="Full Day Only Academy",
+            postal="234567",
+        )
+        session.add(centre)
+        session.commit()
+
+        service = PreschoolService(
+            centre_id=102,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1400.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        vacancy = VacancyRecord(
+            record_id="VR102",
+            centre_id=102,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            vacancy_status="Available",
+        )
+        session.add_all([service, vacancy])
+        session.commit()
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "service_required": "Half Day",
+        "citizenship_status": "SC",
+        "top_n": 1,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    item = data["results"][0]
+
+    assert item["centre_code"] == "C102"
+    assert item["fee_breakdown"] is not None
+    assert item["fee_breakdown"]["published_fee"] == 1400.0
+
+
+def test_match_extracts_incidental_fee_remarks(
+    client: TestClient, test_engine
+):
+    """Published service remarks and incidental fees are captured in fee_breakdown."""
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_id=103,
+            centre_code="C103",
+            centre_name="Sunny Days Learning",
+            postal="345678",
+        )
+        session.add(centre)
+        session.commit()
+
+        service = PreschoolService(
+            centre_id=103,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1250.0,
+            citizenship_type=CitizenshipType.SC,
+            remarks="Registration Fee: $80 (non-refundable), Deposit: 1 month, Uniform: $35/set",
+        )
+        vacancy = VacancyRecord(
+            record_id="VR103",
+            centre_id=103,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            vacancy_status="Available",
+        )
+        session.add_all([service, vacancy])
+        session.commit()
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "service_required": "Full Day",
+        "citizenship_status": "SC",
+        "top_n": 1,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    item = data["results"][0]
+
+    assert item["centre_code"] == "C103"
+    assert item["fee_breakdown"] is not None
+    assert "Registration Fee: $80" in item["fee_breakdown"]["remarks"]
+    assert "Registration Fee: $80" in item["fee_breakdown"]["incidental_fee_remarks"]
+
+
+def test_match_subsidy_engine_infant_care_basic_and_additional_subsidy(
+    client: TestClient, test_engine
+):
+    """Subsidy engine sums Fixed Basic Subsidy and means-tested Additional Subsidy for working applicants."""
+    create_centres_with_cohorts(test_engine)
+    seed_ecda_subsidy_rules(test_engine)
+
+    # Working mother with HHI $5,000, 3 members (PCI = $1,666.67)
+    # Basic Subsidy = $600
+    # HHI $5,000 -> Tier 2 ($540)
+    # PCI $1,666.67 -> Tier 2 PCI ($540)
+    # Total Subsidy = 600 + 540 = $1,140
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "applicant_status": "WORKING_APPLICANT",
+        "household_income": 5000.0,
+        "household_member_count": 3,
+        "budget_max": 200.0,
+        "top_n": 1,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    item = data["results"][0]
+
+    assert item["fee_breakdown"] is not None
+    assert item["fee_breakdown"]["published_fee"] == 1200.0
+    assert item["fee_breakdown"]["estimated_subsidy"] == 1140.0
+    # Net payable fee = 1200 - 1140 = $60.0
+    assert item["fee_breakdown"]["estimated_monthly_payable_fee"] == 60.0
+    # Budget max = 200.0 >= 60.0 -> Cost Fit = 100.0%
+    assert item["fee_breakdown"]["cost_fit"] == 100.0
+    assert item["cost_fit_score"] == 100.0
+
+
+def test_match_subsidy_engine_pci_generosity_for_large_households(
+    client: TestClient, test_engine
+):
+    """Large household qualifies for higher Additional Subsidy under Per-Capita Income (PCI) than HHI."""
+    create_centres_with_cohorts(test_engine)
+    seed_ecda_subsidy_rules(test_engine)
+
+    # Household income = $6,000, 5 members:
+    # HHI $6,000 falls in Tier 2 ($540)
+    # PCI = $6,000 / 5 = $1,200 falls in Tier 1 ($710)!
+    # Engine must apply the maximum eligible benefit -> $710
+    # Total Subsidy = Basic ($600) + Additional ($710) = $1,310
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "applicant_status": "WORKING_APPLICANT",
+        "household_income": 6000.0,
+        "household_member_count": 5,
+        "budget_max": 100.0,
+        "top_n": 1,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    item = data["results"][0]
+
+    assert item["fee_breakdown"] is not None
+    assert item["fee_breakdown"]["published_fee"] == 1200.0
+    assert item["fee_breakdown"]["estimated_subsidy"] == 1310.0
+    # Published fee 1200.0 < Subsidy 1310.0 -> payable fee is capped at 0.0 (never negative)
+    assert item["fee_breakdown"]["estimated_monthly_payable_fee"] == 0.0
+    assert item["fee_breakdown"]["cost_fit"] == 100.0
+    assert item["cost_fit_score"] == 100.0
+
+
+def test_match_subsidy_engine_care_type_mapping_child_care(
+    client: TestClient, test_engine
+):
+    """Preschool cohort levels PG, N1, N2, K1, K2 map to CareType.CHILD_CARE."""
+    create_centres_with_cohorts(test_engine)
+    seed_ecda_subsidy_rules(test_engine)
+
+    # Level PG -> CareType.CHILD_CARE
+    # Working applicant, HHI $2,500, 3 members (PCI = $833.33)
+    # CC Basic Subsidy = $300
+    # CC Additional Subsidy Tier 1 (HHI <= 3000) = $467
+    # Total Subsidy = 300 + 467 = $767.0
+    payload = {
+        "level": "pg",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "applicant_status": "WORKING_APPLICANT",
+        "household_income": 2500.0,
+        "household_member_count": 3,
+        "budget_max": 300.0,
+        "top_n": 1,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    item = data["results"][0]
+
+    # Centre 1 offers PG at $900.0
+    assert item["fee_breakdown"] is not None
+    assert item["fee_breakdown"]["published_fee"] == 900.0
+    assert item["fee_breakdown"]["estimated_subsidy"] == 767.0
+    # Net payable fee = 900 - 767 = $133.0
+    assert item["fee_breakdown"]["estimated_monthly_payable_fee"] == 133.0
+    assert item["fee_breakdown"]["cost_fit"] == 100.0  # 133 <= 300
+
+
+def test_match_subsidy_engine_non_working_applicant_subsidy(
+    client: TestClient, test_engine
+):
+    """Non-working applicants receive non-working subsidy schedules ($150) and no Additional Subsidy."""
+    create_centres_with_cohorts(test_engine)
+    seed_ecda_subsidy_rules(test_engine)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "applicant_status": "NON_WORKING_APPLICANT",
+        "household_income": 2000.0,
+        "household_member_count": 3,
+        "top_n": 1,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    item = data["results"][0]
+
+    # Non-working applicant gets fixed basic subsidy = $150.0 only
+    assert item["fee_breakdown"] is not None
+    assert item["fee_breakdown"]["published_fee"] == 1200.0
+    assert item["fee_breakdown"]["estimated_subsidy"] == 150.0
+    assert item["fee_breakdown"]["estimated_monthly_payable_fee"] == 1050.0
+
+
+def test_match_subsidy_engine_foreigner_child_zero_subsidy(
+    client: TestClient, test_engine
+):
+    """Children with citizenship_status OTHERS receive 0 government subsidy."""
+    create_centres_with_cohorts(test_engine)
+    seed_ecda_subsidy_rules(test_engine)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "OTHERS",
+        "household_income": 3000.0,
+        "household_member_count": 3,
+        "top_n": 1,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    item = data["results"][0]
+
+    assert item["fee_breakdown"] is not None
+    assert item["fee_breakdown"]["estimated_subsidy"] == 0.0
+    assert item["fee_breakdown"]["estimated_monthly_payable_fee"] == item["fee_breakdown"]["published_fee"]
+
+
+def test_match_cost_fit_scoring_proportional_scaling_when_budget_exceeded(
+    client: TestClient, test_engine
+):
+    """Cost Fit scales down proportionally when payable fee exceeds parent's budget ceiling."""
+    create_centres_with_cohorts(test_engine)
+    seed_ecda_subsidy_rules(test_engine)
+
+    # Published fee = $1200. Basic Subsidy only = $600 (high income $15,000 -> no Additional Subsidy)
+    # Net payable fee = $600.
+    # Budget max = $450.
+    # Cost Fit = min(100.0, (450 / 600) * 100) = 75.0%
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "household_income": 15000.0,
+        "household_member_count": 3,
+        "budget_max": 450.0,
+        "top_n": 1,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    item = data["results"][0]
+
+    assert item["fee_breakdown"]["published_fee"] == 1200.0
+    assert item["fee_breakdown"]["estimated_subsidy"] == 600.0
+    assert item["fee_breakdown"]["estimated_monthly_payable_fee"] == 600.0
+    assert item["fee_breakdown"]["cost_fit"] == 75.0
+    assert item["cost_fit_score"] == 75.0
+
+
+def test_match_candidate_ranking_incorporates_cost_fit_and_vacancy_fit(
+    client: TestClient, test_engine
+):
+    """Centres with identical Vacancy Fit are differentiated by Cost Fit in ranking."""
+    seed_ecda_subsidy_rules(test_engine)
+
+    with Session(test_engine) as session:
+        # Centre A: Available, Net fee = $800
+        # Centre B: Available, Net fee = $1200
+        cA = PreschoolCentre(
+            centre_id=201,
+            centre_code="C201",
+            centre_name="Affordable Centre",
+            postal="560201",
+        )
+        cB = PreschoolCentre(
+            centre_id=202,
+            centre_code="C202",
+            centre_name="Expensive Centre",
+            postal="560202",
+        )
+        session.add_all([cA, cB])
+        session.commit()
+
+        sA = PreschoolService(
+            centre_id=201,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=800.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        sB = PreschoolService(
+            centre_id=202,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1200.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        vA = VacancyRecord(
+            record_id="VR201",
+            centre_id=201,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            vacancy_status="Available",
+        )
+        vB = VacancyRecord(
+            record_id="VR202",
+            centre_id=202,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            vacancy_status="Available",
+        )
+        session.add_all([sA, sB, vA, vB])
+        session.commit()
+
+    # Budget max = 500, Income = 15000 (Basic subsidy $600 only)
+    # Centre A payable = 800 - 600 = $200 <= 500 -> Cost Fit = 100.0%
+    # Centre B payable = 1200 - 600 = $600 > 500 -> Cost Fit = (500 / 600) * 100 = 83.33%
+    # Both have Vacancy Fit = 100.0%.
+    # Centre A has overall fit > Centre B -> Centre A ranks 1st!
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "household_income": 15000.0,
+        "household_member_count": 3,
+        "budget_max": 500.0,
+        "vacancy_weight": 0.40,
+        "cost_weight": 0.30,
+        "travel_weight": 0.30,
+        "top_n": 2,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    results = data["results"]
+    assert len(results) == 2
+    assert results[0]["centre_code"] == "C201"
+    assert results[0]["cost_fit_score"] == 100.0
+    assert results[0]["overall_fit_score"] == 100.0
+
+    assert results[1]["centre_code"] == "C202"
+    assert results[1]["cost_fit_score"] == 83.33
+    assert results[1]["overall_fit_score"] < 100.0
+
+
+def test_match_profile_linked_end_to_end_fee_and_cost_fit(
+    client: TestClient, sample_parent: User, test_engine
+):
+    """Profile-linked match executes complete fee resolution, subsidy means-testing, and cost fit scoring."""
+    create_centres_with_cohorts(test_engine)
+    seed_ecda_subsidy_rules(test_engine)
+    set_mock_auth(sample_parent)
+
+    assert sample_parent.user_id is not None
+    with Session(test_engine) as session:
+        profile = FamilyPreferenceProfile(
+            profile_id="profile-subsidy-001",
+            user_id=sample_parent.user_id,
+            profile_name="Baby Emma",
+            level=PreschoolLevel.INFANT,
+            citizenship_status=CitizenshipType.SC,
+            service_required="Full Day",
+            home_postal_code="560123",
+            household_income=5000.0,
+            household_member_count=3,
+            budget_max=100.0,
+            enrollment_month_year=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            vacancy_weight=0.50,
+            cost_weight=0.30,
+            travel_weight=0.20,
+            applicant_status=ApplicantStatus.WORKING_APPLICANT,
+        )
+        session.add(profile)
+        session.commit()
+
+    payload = {"profile_id": "profile-subsidy-001", "top_n": 1}
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["profile_id"] == "profile-subsidy-001"
+    item = data["results"][0]
+    assert item["fee_breakdown"] is not None
+    assert item["fee_breakdown"]["published_fee"] == 1200.0
+    # Basic ($600) + Additional ($540) = $1140
+    assert item["fee_breakdown"]["estimated_subsidy"] == 1140.0
+    assert item["fee_breakdown"]["estimated_monthly_payable_fee"] == 60.0
+    assert item["fee_breakdown"]["cost_fit"] == 100.0
+    assert item["cost_fit_score"] == 100.0
+
