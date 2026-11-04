@@ -1,6 +1,6 @@
 """Preschool centre API endpoints."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -9,7 +9,10 @@ from sqlalchemy import false, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
-from kidcarematch_backend.auth.security import get_current_user
+from kidcarematch_backend.auth.security import (
+    get_current_user,
+    get_optional_current_user,
+)
 from kidcarematch_backend.core.postal_districts import (
     get_all_postal_districts,
     get_postal_sectors_for_districts,
@@ -17,6 +20,7 @@ from kidcarematch_backend.core.postal_districts import (
 from kidcarematch_backend.db.db import (
     CitizenshipType,
     ExternalDataSourceStatus,
+    FamilyPreferenceProfile,
     ModerationStatus,
     PreschoolCentre,
     PreschoolLevel,
@@ -38,6 +42,14 @@ from kidcarematch_backend.schemas.centre import (
     PreschoolServiceResponse,
     ReviewSummaryResponse,
     VacancyRecordResponse,
+)
+from kidcarematch_backend.schemas.match import (
+    CentreMatchRequest,
+    CentreMatchResponse,
+    MatchCandidateItem,
+)
+from kidcarematch_backend.schemas.profile import (
+    parse_year_month,
 )
 from kidcarematch_backend.schemas.review import (
     ReviewCreateRequest,
@@ -75,8 +87,29 @@ def _level_order_key(level: PreschoolLevel | str) -> int:
 
 
 def _citizenship_order_key(citizenship: CitizenshipType | str) -> int:
-    val = citizenship.value if isinstance(citizenship, CitizenshipType) else str(citizenship)
+    val = (
+        citizenship.value
+        if isinstance(citizenship, CitizenshipType)
+        else str(citizenship)
+    )
     return CITIZENSHIP_PRIORITY_ORDER.get(val, 99)
+
+
+def score_vacancy_fit(status: str | None) -> float:
+    """Score Vacancy Fit based on ECDA vacancy status for the target enrollment month.
+
+    - Available / Immediate: 100.0%
+    - Limited: 50.0%
+    - Full / Not Applicable / unrecorded / other: 0.0%
+    """
+    if not status:
+        return 0.0
+    normalized = status.strip().lower()
+    if normalized in ("available", "immediate"):
+        return 100.0
+    if normalized == "limited":
+        return 50.0
+    return 0.0
 
 
 def get_centre_or_404(centre_id: int, session: Session) -> PreschoolCentre:
@@ -135,9 +168,7 @@ def get_centre_summary(
     centres_with_vacancies_count = (
         session.exec(
             select(func.count(func.distinct(col(VacancyRecord.centre_id)))).where(
-                func.lower(col(VacancyRecord.vacancy_status)).in_(
-                    OPEN_VACANCY_STATUSES
-                )
+                func.lower(col(VacancyRecord.vacancy_status)).in_(OPEN_VACANCY_STATUSES)
             )
         ).one()
         or 0
@@ -194,7 +225,9 @@ def list_centres(
     ] = None,
     level: Annotated[
         PreschoolLevel | None,
-        Query(description="Filter centres with open vacancies for preschool cohort level"),
+        Query(
+            description="Filter centres with open vacancies for preschool cohort level"
+        ),
     ] = None,
     limit: Annotated[
         int,
@@ -215,9 +248,9 @@ def list_centres(
             conditions.append(
                 or_(
                     func.lower(col(PreschoolCentre.centre_name)).like(pattern),
-                    func.lower(
-                        func.coalesce(col(PreschoolCentre.address), "")
-                    ).like(pattern),
+                    func.lower(func.coalesce(col(PreschoolCentre.address), "")).like(
+                        pattern
+                    ),
                 )
             )
 
@@ -235,9 +268,7 @@ def list_centres(
     if postal_prefix is not None:
         cleaned_postal = postal_prefix.strip()
         if cleaned_postal:
-            conditions.append(
-                col(PreschoolCentre.postal).startswith(cleaned_postal)
-            )
+            conditions.append(col(PreschoolCentre.postal).startswith(cleaned_postal))
 
     if spark_certified is not None:
         conditions.append(col(PreschoolCentre.spark_certified) == spark_certified)
@@ -300,7 +331,9 @@ def _build_centre_detail_response(
     )
 
     services = session.exec(
-        select(PreschoolService).where(col(PreschoolService.centre_id) == centre.centre_id)
+        select(PreschoolService).where(
+            col(PreschoolService.centre_id) == centre.centre_id
+        )
     ).all()
     sorted_services = sorted(
         services,
@@ -575,3 +608,153 @@ def get_centre_by_id(
     return _build_centre_detail_response(centre, session)
 
 
+@router.post(
+    "/match",
+    response_model=CentreMatchResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Multi-Criteria Preschool Centre Matching",
+)
+def match_centres(
+    request: CentreMatchRequest,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User | None, Depends(get_optional_current_user)] = None,
+) -> CentreMatchResponse:
+    """Evaluate and rank candidate preschool centres against multi-criteria requirements."""
+    # 1. Resolve search criteria from profile or inline payload
+    if request.profile_id is not None:
+        if current_user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required when profile_id is provided",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        profile = session.exec(
+            select(FamilyPreferenceProfile).where(
+                FamilyPreferenceProfile.profile_id == request.profile_id,
+                FamilyPreferenceProfile.user_id == current_user.user_id,
+            )
+        ).first()
+        if not profile:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Family preference profile not found",
+            )
+        requested_level = profile.level
+        enrollment_month_str = profile.enrollment_month_year.strftime("%Y-%m")
+        target_dt = datetime(
+            profile.enrollment_month_year.year,
+            profile.enrollment_month_year.month,
+            1,
+            0,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        )
+    else:
+        assert request.level is not None
+        assert request.enrollment_month_year is not None
+        requested_level = request.level
+        enrollment_month_str = request.enrollment_month_year
+        target_dt = parse_year_month(enrollment_month_str)
+
+    # 2. Strict cohort filtering: candidates must offer requested level
+    candidate_centres = session.exec(
+        select(PreschoolCentre)
+        .where(
+            col(PreschoolCentre.centre_id).in_(
+                select(PreschoolService.centre_id).where(
+                    col(PreschoolService.level) == requested_level
+                )
+            )
+        )
+        .order_by(col(PreschoolCentre.centre_name).asc())
+    ).all()
+
+    total_candidates = len(candidate_centres)
+    if total_candidates == 0:
+        return CentreMatchResponse(
+            total_candidates=0,
+            returned_count=0,
+            level=requested_level,
+            enrollment_month_year=enrollment_month_str,
+            results=[],
+            explanation=None,
+            profile_id=request.profile_id,
+        )
+
+    # 3. Prefetch vacancy records for all candidate centres for requested level and target month
+    candidate_ids = [c.centre_id for c in candidate_centres if c.centre_id is not None]
+    vacancies = session.exec(
+        select(VacancyRecord).where(
+            col(VacancyRecord.centre_id).in_(candidate_ids),
+            col(VacancyRecord.level_type) == requested_level,
+        )
+    ).all()
+
+    vacancy_map: dict[int, VacancyRecord] = {}
+    for v in vacancies:
+        if (
+            v.centre_id is not None
+            and v.enrollment_month_year is not None
+            and v.enrollment_month_year.year == target_dt.year
+            and v.enrollment_month_year.month == target_dt.month
+        ):
+            vacancy_map[v.centre_id] = v
+
+    # 4. Score Vacancy Fit for each candidate centre
+    scored_candidates: list[MatchCandidateItem] = []
+    for centre in candidate_centres:
+        v_rec = (
+            vacancy_map.get(centre.centre_id) if centre.centre_id is not None else None
+        )
+        v_status = v_rec.vacancy_status if v_rec else None
+        v_score = score_vacancy_fit(v_status)
+
+        candidate_item = MatchCandidateItem(
+            centre_id=centre.centre_id,  # type: ignore[arg-type]
+            centre_code=centre.centre_code,
+            centre_name=centre.centre_name,
+            contact=centre.contact,
+            email=centre.email,
+            postal=centre.postal,
+            website_url=centre.website_url,
+            food_offered=centre.food_offered,
+            address=centre.address,
+            second_languages=centre.second_languages,
+            spark_certified=centre.spark_certified,
+            weekday_full_day_hours=centre.weekday_full_day_hours,
+            saturday_hours=centre.saturday_hours,
+            extended_operating_hours=centre.extended_operating_hours,
+            transport_provided=centre.transport_provided,
+            gov_subsidy=centre.gov_subsidy,
+            last_updated=centre.last_updated,
+            level=requested_level,
+            enrollment_month_year=enrollment_month_str,
+            vacancy_status=v_status,
+            vacancy_fit_score=v_score,
+            cost_fit_score=None,
+            travel_fit_score=None,
+            overall_fit_score=v_score,
+            fee_breakdown=None,
+            travel_breakdown=None,
+            highlight=None,
+        )
+        scored_candidates.append(candidate_item)
+
+    # 5. Rank candidate centres: vacancy_fit_score desc, centre_name asc, centre_id asc
+    scored_candidates.sort(
+        key=lambda item: (-item.vacancy_fit_score, item.centre_name, item.centre_id)
+    )
+
+    # 6. Apply top_n limit
+    top_results = scored_candidates[: request.top_n]
+
+    return CentreMatchResponse(
+        total_candidates=total_candidates,
+        returned_count=len(top_results),
+        level=requested_level,
+        enrollment_month_year=enrollment_month_str,
+        results=top_results,
+        explanation=None,
+        profile_id=request.profile_id,
+    )
