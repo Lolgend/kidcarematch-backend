@@ -14,6 +14,7 @@ from pydantic import (
 )
 
 from kidcarematch_backend.db.db import (
+    ApplicantStatus,
     CitizenshipType,
     LocationPreference,
     PreschoolLevel,
@@ -74,6 +75,7 @@ def validate_enrollment_month_format(
 def validate_location_and_weights(
     location_preference: LocationPreference,
     workplace_postal_code: str | None,
+    vacancy_weight: float,
     cost_weight: float,
     travel_weight: float,
 ) -> None:
@@ -89,8 +91,10 @@ def validate_location_and_weights(
         raise ValueError(
             "Workplace postal code is required when location preference is WORKPLACE or EITHER"
         )
-    if round(cost_weight + travel_weight, 2) != 1.0:
-        raise ValueError("cost_weight and travel_weight must sum to 1.0")
+    if round(vacancy_weight + cost_weight + travel_weight, 2) != 1.0:
+        raise ValueError(
+            "vacancy_weight, cost_weight, and travel_weight must sum to 1.0"
+        )
 
 
 class ProfileCreateRequest(BaseModel):
@@ -139,17 +143,27 @@ class ProfileCreateRequest(BaseModel):
     enrollment_month_year: str = Field(
         description="Target enrollment month and year in YYYY-MM format",
     )
+    vacancy_weight: float = Field(
+        default=0.40,
+        ge=0.0,
+        le=1.0,
+        description="Trade-off weight assigned to vacancy factor (0.0 to 1.0)",
+    )
     cost_weight: float = Field(
-        default=0.5,
+        default=0.30,
         ge=0.0,
         le=1.0,
         description="Trade-off weight assigned to cost factor (0.0 to 1.0)",
     )
     travel_weight: float = Field(
-        default=0.5,
+        default=0.30,
         ge=0.0,
         le=1.0,
         description="Trade-off weight assigned to travel factor (0.0 to 1.0)",
+    )
+    applicant_status: ApplicantStatus = Field(
+        default=ApplicantStatus.WORKING_APPLICANT,
+        description="Parent employment status for ECDA subsidy eligibility tier determination",
     )
 
     @field_validator("profile_name", "service_required")
@@ -186,6 +200,7 @@ class ProfileCreateRequest(BaseModel):
         validate_location_and_weights(
             self.location_preference,
             self.workplace_postal_code,
+            self.vacancy_weight,
             self.cost_weight,
             self.travel_weight,
         )
@@ -212,8 +227,10 @@ class ProfileResponse(BaseModel):
     household_member_count: int
     budget_max: float
     enrollment_month_year: str
+    vacancy_weight: float
     cost_weight: float
     travel_weight: float
+    applicant_status: ApplicantStatus
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -284,6 +301,12 @@ class ProfilePatchRequest(BaseModel):
         default=None,
         description="Target enrollment month and year in YYYY-MM format",
     )
+    vacancy_weight: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Trade-off weight assigned to vacancy factor (0.0 to 1.0)",
+    )
     cost_weight: float | None = Field(
         default=None,
         ge=0.0,
@@ -296,6 +319,10 @@ class ProfilePatchRequest(BaseModel):
         le=1.0,
         description="Trade-off weight assigned to travel factor (0.0 to 1.0)",
     )
+    applicant_status: ApplicantStatus | None = Field(
+        default=None,
+        description="Parent employment status for ECDA subsidy eligibility tier determination",
+    )
 
     @field_validator(
         "level",
@@ -304,8 +331,10 @@ class ProfilePatchRequest(BaseModel):
         "household_income",
         "household_member_count",
         "budget_max",
+        "vacancy_weight",
         "cost_weight",
         "travel_weight",
+        "applicant_status",
     )
     @classmethod
     def validate_non_nullable_fields(cls, v: Any, info: ValidationInfo) -> Any:

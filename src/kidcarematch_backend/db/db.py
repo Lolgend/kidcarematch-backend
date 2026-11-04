@@ -214,8 +214,10 @@ class FamilyPreferenceProfile(SQLModel, table=True):
     household_member_count: int = Field()
     budget_max: float = Field()
     enrollment_month_year: datetime = Field()
-    cost_weight: float = Field(default=0.5)
-    travel_weight: float = Field(default=0.5)
+    vacancy_weight: float = Field(default=0.40)
+    cost_weight: float = Field(default=0.30)
+    travel_weight: float = Field(default=0.30)
+    applicant_status: ApplicantStatus = Field(default=ApplicantStatus.WORKING_APPLICANT)
 
     user: User | None = Relationship(back_populates="preference_profiles")
 
