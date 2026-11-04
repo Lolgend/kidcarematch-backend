@@ -84,3 +84,31 @@ _Avoid_: Nationality status, resident type, citizen tier
 **Postal District**:
 One of Singapore's 28 official geographical postal districts (D01 through D28), each grouping one or more two-digit postal code sectors (the first two digits of a six-digit Singapore postal code) and associated with a canonical set of locality names.
 _Avoid_: Region, zone, planning area, neighbourhood
+
+**Vacancy Fit**:
+The normalized percentage score (0% to 100%) indicating how well a preschool centre's reported ECDA vacancy status matches a child's required developmental level and target enrollment month.
+_Avoid_: Availability score, opening rating
+
+**Cost Fit**:
+The normalized percentage score (0% to 100%) comparing an estimated monthly payable fee against a parent's preferred budget ceiling.
+_Avoid_: Price score, affordability index, budget rating
+
+**Travel Fit**:
+The normalized percentage score (0% to 100%) evaluating a parent's total morning commute time (Home to Centre, and optionally Centre to Workplace) against preferred and maximum duration thresholds.
+_Avoid_: Commute score, distance score, transit rating
+
+**Overall Fit**:
+The composite weighted matching score (0% to 100%) calculated as the linear combination of Vacancy Fit, Cost Fit, and Travel Fit weighted by parental priorities.
+_Avoid_: Total match, recommendation score, rank score
+
+**Commute Deviation**:
+The additional morning travel time and distance incurred by detouring through a preschool centre relative to the direct baseline morning route from Home to Workplace.
+_Avoid_: Detour delay, detour distance, route overhead
+
+**Estimated Monthly Payable Fee**:
+The net estimated monthly childcare expense after deducting all applicable Singapore government preschool subsidies (Basic and Additional Subsidies) from the centre's published programme fee.
+_Avoid_: Out-of-pocket price, net school fee, subsidised rate
+
+**Fit Explanation**:
+The AI-generated explanatory rationale and comparative summary explaining the quantitative scoring breakdown and why a particular centre ranks as the top recommendation for a family profile.
+_Avoid_: AI justification, match summary, reasoning notes
