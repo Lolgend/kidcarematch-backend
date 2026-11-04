@@ -1,7 +1,6 @@
 """Preschool centre API endpoints."""
 
-from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -14,32 +13,27 @@ from kidcarematch_backend.auth.security import (
     get_current_user,
     get_optional_current_user,
 )
-from kidcarematch_backend.core.explanation import generate_fit_explanation
-from kidcarematch_backend.core.onemap import (
-    STAGE1_MAX_CANDIDATES,
-    get_route_duration_and_distance,
-    haversine_distance_km,
-    normalize_travel_fit,
-    resolve_coordinates_batch,
-    resolve_postal_coordinates,
+from kidcarematch_backend.core.matching import (
+    calculate_cost_fit,
+    evaluate_government_subsidy,
+    execute_multi_criteria_match,
+    map_level_to_care_type,
+    resolve_match_criteria,
+    resolve_published_programme_fee,
+    score_vacancy_fit,
 )
 from kidcarematch_backend.core.postal_districts import (
     get_all_postal_districts,
     get_postal_sectors_for_districts,
 )
 from kidcarematch_backend.db.db import (
-    ApplicantStatus,
-    CareType,
     CitizenshipType,
     ExternalDataSourceStatus,
-    FamilyPreferenceProfile,
     ModerationStatus,
     PreschoolCentre,
     PreschoolLevel,
     PreschoolService,
     Review,
-    SubsidyMetric,
-    SubsidyRule,
     User,
     VacancyRecord,
     WatchlistEntry,
@@ -60,12 +54,6 @@ from kidcarematch_backend.schemas.centre import (
 from kidcarematch_backend.schemas.match import (
     CentreMatchRequest,
     CentreMatchResponse,
-    FeeBreakdownItem,
-    MatchCandidateItem,
-    TravelBreakdownItem,
-)
-from kidcarematch_backend.schemas.profile import (
-    parse_year_month,
 )
 from kidcarematch_backend.schemas.review import (
     ReviewCreateRequest,
@@ -96,6 +84,17 @@ CITIZENSHIP_PRIORITY_ORDER: dict[str, int] = {
     CitizenshipType.OTHERS.value: 2,
 }
 
+__all__ = [
+    "calculate_cost_fit",
+    "evaluate_government_subsidy",
+    "get_centre_or_404",
+    "map_level_to_care_type",
+    "resolve_match_criteria",
+    "resolve_published_programme_fee",
+    "router",
+    "score_vacancy_fit",
+]
+
 
 def _level_order_key(level: PreschoolLevel | str) -> int:
     val = level.value if isinstance(level, PreschoolLevel) else str(level)
@@ -109,162 +108,6 @@ def _citizenship_order_key(citizenship: CitizenshipType | str) -> int:
         else str(citizenship)
     )
     return CITIZENSHIP_PRIORITY_ORDER.get(val, 99)
-
-
-def score_vacancy_fit(status: str | None) -> float:
-    """Score Vacancy Fit based on ECDA vacancy status for the target enrollment month.
-
-    - Available / Immediate: 100.0%
-    - Limited: 50.0%
-    - Full / Not Applicable / unrecorded / other: 0.0%
-    """
-    if not status:
-        return 0.0
-    normalized = status.strip().lower()
-    if normalized in ("available", "immediate"):
-        return 100.0
-    if normalized == "limited":
-        return 50.0
-    return 0.0
-
-
-def map_level_to_care_type(level: PreschoolLevel) -> CareType:
-    """Map developmental preschool cohort level to ECDA subsidy CareType category."""
-    if level == PreschoolLevel.INFANT:
-        return CareType.INFANT_CARE
-    return CareType.CHILD_CARE
-
-
-def resolve_published_programme_fee(
-    services: list[PreschoolService],
-    requested_level: PreschoolLevel,
-    service_required: str,
-    citizenship_status: CitizenshipType,
-) -> tuple[float, str | None]:
-    """Resolve centre published programme fee matching requested level, service type, and citizenship.
-
-    Priority and fallback logic:
-    - Service Type: exact match (case-insensitive) -> fallback to "Full Day" -> fallback to any available service type.
-    - Citizenship: exact match -> fallback to OTHERS -> fallback to any available citizenship tier.
-    Returns (published_fee, remarks).
-    """
-    level_services = [s for s in services if s.level == requested_level]
-    if not level_services:
-        return 0.0, None
-
-    req_clean = service_required.strip().lower()
-    type_matches = [
-        s for s in level_services if s.type_of_service.strip().lower() == req_clean
-    ]
-    if not type_matches and req_clean != "full day":
-        type_matches = [
-            s
-            for s in level_services
-            if s.type_of_service.strip().lower() == "full day"
-        ]
-    if not type_matches:
-        type_matches = level_services
-
-    cit_match = next(
-        (s for s in type_matches if s.citizenship_type == citizenship_status),
-        None,
-    )
-    if cit_match is None and citizenship_status != CitizenshipType.OTHERS:
-        cit_match = next(
-            (
-                s
-                for s in type_matches
-                if s.citizenship_type == CitizenshipType.OTHERS
-            ),
-            None,
-        )
-    if cit_match is None:
-        cit_match = type_matches[0]
-
-    return cit_match.fee, cit_match.remarks
-
-
-def evaluate_government_subsidy(
-    session: Session,
-    care_type: CareType,
-    citizenship: CitizenshipType,
-    applicant_status: ApplicantStatus,
-    household_income: float,
-    household_member_count: int,
-) -> float:
-    """Evaluate eligible government early childhood subsidies according to ECDA means-tested policy.
-
-    - Fixed subsidies (e.g. Basic Subsidy) are summed universally.
-    - Means-tested tiered subsidies (e.g. Additional Subsidy) evaluate both Gross Household Income (HHI)
-      and Per-Capita Income (PCI = HHI / household_member_count), taking the maximum eligible benefit.
-    """
-    statement = (
-        select(SubsidyRule)
-        .where(
-            col(SubsidyRule.care_type) == care_type,
-            col(SubsidyRule.citizenship) == citizenship,
-            or_(
-                col(SubsidyRule.applicant_status) == applicant_status,
-                col(SubsidyRule.applicant_status).is_(None),
-            ),
-        )
-    )
-    rules = session.exec(statement).all()
-    if not rules:
-        return 0.0
-
-    member_count = max(1, household_member_count)
-    pci = household_income / member_count
-
-    fixed_subsidy = 0.0
-    tiered_rules_by_name: dict[str, list[SubsidyRule]] = defaultdict(list)
-
-    for r in rules:
-        if r.metric == SubsidyMetric.FIXED:
-            fixed_subsidy += r.subsidy_amount
-        elif r.metric in (
-            SubsidyMetric.HOUSEHOLD_INCOME,
-            SubsidyMetric.PER_CAPITA_INCOME,
-        ):
-            tiered_rules_by_name[r.subsidy_name].append(r)
-
-    total_tiered_subsidy = 0.0
-    for sub_rules in tiered_rules_by_name.values():
-        hhi_benefit = 0.0
-        pci_benefit = 0.0
-        for r in sub_rules:
-            if (
-                r.metric == SubsidyMetric.HOUSEHOLD_INCOME
-                and (r.income_min is None or household_income >= r.income_min)
-                and (r.income_max is None or household_income <= r.income_max)
-            ):
-                hhi_benefit = max(hhi_benefit, r.subsidy_amount)
-            elif (
-                r.metric == SubsidyMetric.PER_CAPITA_INCOME
-                and (r.income_min is None or pci >= r.income_min)
-                and (r.income_max is None or pci <= r.income_max)
-            ):
-                pci_benefit = max(pci_benefit, r.subsidy_amount)
-        total_tiered_subsidy += max(hhi_benefit, pci_benefit)
-
-    return round(fixed_subsidy + total_tiered_subsidy, 2)
-
-
-def calculate_cost_fit(
-    estimated_payable_fee: float,
-    budget_max: float | None,
-) -> float | None:
-    """Calculate Cost Fit percentage (0% - 100%) comparing net payable fee against budget ceiling.
-
-    - 100% if payable fee <= budget_max (or <= 0.0)
-    - min(100.0, (budget_max / payable_fee) * 100.0) otherwise
-    - None if budget_max is None
-    """
-    if budget_max is None:
-        return None
-    if estimated_payable_fee <= budget_max or estimated_payable_fee <= 0.0:
-        return 100.0
-    return round(min(100.0, (budget_max / estimated_payable_fee) * 100.0), 2)
 
 
 def get_centre_or_404(centre_id: int, session: Session) -> PreschoolCentre:
@@ -453,7 +296,10 @@ def list_centres(
     if conditions:
         items_query = items_query.where(*conditions)
     items_query = (
-        items_query.order_by(col(PreschoolCentre.centre_id).asc())
+        items_query.order_by(
+            col(PreschoolCentre.centre_name).asc(),
+            col(PreschoolCentre.centre_id).asc(),
+        )
         .offset(offset)
         .limit(limit)
     )
@@ -775,453 +621,5 @@ def match_centres(
     current_user: Annotated[User | None, Depends(get_optional_current_user)] = None,
 ) -> CentreMatchResponse:
     """Evaluate and rank candidate preschool centres against multi-criteria requirements."""
-    # 1. Resolve search criteria from profile or inline payload
-    home_postal_code: str | None = None
-    workplace_postal_code: str | None = None
-    if request.profile_id is not None:
-        if current_user is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required when profile_id is provided",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        profile = session.exec(
-            select(FamilyPreferenceProfile).where(
-                FamilyPreferenceProfile.profile_id == request.profile_id,
-                FamilyPreferenceProfile.user_id == current_user.user_id,
-            )
-        ).first()
-        if not profile:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Family preference profile not found",
-            )
-        requested_level = profile.level
-        enrollment_month_str = profile.enrollment_month_year.strftime("%Y-%m")
-        target_dt = datetime(
-            profile.enrollment_month_year.year,
-            profile.enrollment_month_year.month,
-            1,
-            0,
-            0,
-            0,
-            tzinfo=timezone.utc,
-        )
-        citizenship_status = profile.citizenship_status
-        service_required = profile.service_required
-        household_income = profile.household_income
-        household_member_count = profile.household_member_count
-        budget_max: float | None = profile.budget_max
-        applicant_status = profile.applicant_status
-        vacancy_weight = profile.vacancy_weight
-        cost_weight = profile.cost_weight
-        travel_weight = profile.travel_weight
-        home_postal_code = profile.home_postal_code
-        workplace_postal_code = profile.workplace_postal_code
-    else:
-        assert request.level is not None
-        assert request.enrollment_month_year is not None
-        requested_level = request.level
-        enrollment_month_str = request.enrollment_month_year
-        target_dt = parse_year_month(enrollment_month_str)
-        citizenship_status = request.citizenship_status
-        service_required = request.service_required
-        household_income = request.household_income
-        household_member_count = request.household_member_count
-        budget_max = request.budget_max
-        applicant_status = request.applicant_status
-        vacancy_weight = request.vacancy_weight
-        cost_weight = request.cost_weight
-        travel_weight = request.travel_weight
-        home_postal_code = request.home_postal_code
-        workplace_postal_code = request.workplace_postal_code
-
-    # 2. Strict cohort filtering: candidates must offer requested level
-    candidate_centres = session.exec(
-        select(PreschoolCentre)
-        .where(
-            col(PreschoolCentre.centre_id).in_(
-                select(PreschoolService.centre_id).where(
-                    col(PreschoolService.level) == requested_level
-                )
-            )
-        )
-        .order_by(col(PreschoolCentre.centre_name).asc())
-    ).all()
-
-    total_candidates = len(candidate_centres)
-    if total_candidates == 0:
-        empty_explanation = generate_fit_explanation(
-            level=requested_level,
-            enrollment_month_year=enrollment_month_str,
-            household_income=household_income,
-            household_member_count=household_member_count,
-            budget_max=budget_max,
-            home_postal_code=home_postal_code,
-            workplace_postal_code=workplace_postal_code,
-            vacancy_weight=vacancy_weight,
-            cost_weight=cost_weight,
-            travel_weight=travel_weight,
-            applicant_status=applicant_status,
-            total_candidates=0,
-            candidates=[],
-        )
-        return CentreMatchResponse(
-            total_candidates=0,
-            returned_count=0,
-            level=requested_level,
-            enrollment_month_year=enrollment_month_str,
-            results=[],
-            explanation=empty_explanation,
-            profile_id=request.profile_id,
-        )
-
-    # 3. Two-Stage Spatial Corridor Detour Routing (Ticket #70)
-    has_home_postal = bool(
-        home_postal_code and len(home_postal_code.strip()) == 6
-    )
-    has_workplace_postal = bool(
-        workplace_postal_code and len(workplace_postal_code.strip()) == 6
-    )
-    is_dual_anchor = has_home_postal and has_workplace_postal
-    is_single_anchor = (
-        (has_home_postal and not has_workplace_postal)
-        or (has_workplace_postal and not has_home_postal)
-    )
-
-    travel_dev_map: dict[int, float] = {}
-    travel_fit_map: dict[int, float] = {}
-    travel_breakdown_map: dict[int, TravelBreakdownItem | None] = {}
-    has_travel_anchors = False
-
-    if is_dual_anchor:
-        home_coords = resolve_postal_coordinates(
-            home_postal_code, session=session
-        )
-        workplace_coords = resolve_postal_coordinates(
-            workplace_postal_code, session=session
-        )
-        if home_coords and workplace_coords:
-            has_travel_anchors = True
-            centre_postals = [c.postal for c in candidate_centres if c.postal]
-            coords_map = resolve_coordinates_batch(
-                centre_postals, session=session
-            )
-
-            # Stage 1: Spatial corridor pre-filtering (prunes distant outliers)
-            if len(candidate_centres) > STAGE1_MAX_CANDIDATES:
-                d_hw = haversine_distance_km(
-                    home_coords[0],
-                    home_coords[1],
-                    workplace_coords[0],
-                    workplace_coords[1],
-                )
-
-                def _dual_corridor_deviation(c: PreschoolCentre) -> float:
-                    c_pt = coords_map.get(c.postal) if c.postal else None
-                    if not c_pt:
-                        return 999999.0
-                    d_hc = haversine_distance_km(
-                        home_coords[0], home_coords[1], c_pt[0], c_pt[1]
-                    )
-                    d_cw = haversine_distance_km(
-                        c_pt[0], c_pt[1], workplace_coords[0], workplace_coords[1]
-                    )
-                    return d_hc + d_cw - d_hw
-
-                candidate_centres = sorted(
-                    candidate_centres, key=_dual_corridor_deviation
-                )[:STAGE1_MAX_CANDIDATES]
-
-            # Stage 2: Detour Routing
-            base_dur, base_dist = get_route_duration_and_distance(
-                home_coords, workplace_coords
-            )
-            for c in candidate_centres:
-                if c.centre_id is None:
-                    continue
-                c_pt = coords_map.get(c.postal) if c.postal else None
-                if c_pt:
-                    t_hc, d_hc = get_route_duration_and_distance(
-                        home_coords, c_pt
-                    )
-                    t_cw, d_cw = get_route_duration_and_distance(
-                        c_pt, workplace_coords
-                    )
-                    tot_dur = t_hc + t_cw
-                    tot_dist = d_hc + d_cw
-                    delta_time = tot_dur - base_dur
-                    deviation = max(0.0, delta_time)
-                    travel_dev_map[c.centre_id] = deviation
-                    travel_breakdown_map[c.centre_id] = TravelBreakdownItem(
-                        commute_duration_mins=round(tot_dur, 1),
-                        commute_deviation_mins=round(deviation, 1),
-                        commute_distance_km=round(tot_dist, 2),
-                        baseline_duration_mins=round(base_dur, 1),
-                        baseline_distance_km=round(base_dist, 2),
-                    )
-                else:
-                    travel_dev_map[c.centre_id] = 999999.0
-                    travel_breakdown_map[c.centre_id] = None
-
-    elif is_single_anchor:
-        anchor_postal = home_postal_code or workplace_postal_code
-        anchor_coords = resolve_postal_coordinates(
-            anchor_postal, session=session
-        )
-        if anchor_coords:
-            has_travel_anchors = True
-            centre_postals = [c.postal for c in candidate_centres if c.postal]
-            coords_map = resolve_coordinates_batch(
-                centre_postals, session=session
-            )
-
-            # Stage 1: Spatial corridor pre-filtering (single-anchor distance)
-            if len(candidate_centres) > STAGE1_MAX_CANDIDATES:
-
-                def _single_anchor_distance(c: PreschoolCentre) -> float:
-                    c_pt = coords_map.get(c.postal) if c.postal else None
-                    if not c_pt:
-                        return 999999.0
-                    return haversine_distance_km(
-                        anchor_coords[0], anchor_coords[1], c_pt[0], c_pt[1]
-                    )
-
-                candidate_centres = sorted(
-                    candidate_centres, key=_single_anchor_distance
-                )[:STAGE1_MAX_CANDIDATES]
-
-            # Stage 2: Detour Routing / Physical distance
-            for c in candidate_centres:
-                if c.centre_id is None:
-                    continue
-                c_pt = coords_map.get(c.postal) if c.postal else None
-                if c_pt:
-                    dur, dist = get_route_duration_and_distance(
-                        anchor_coords, c_pt
-                    )
-                    travel_dev_map[c.centre_id] = dist
-                    travel_breakdown_map[c.centre_id] = TravelBreakdownItem(
-                        commute_duration_mins=round(dur, 1),
-                        commute_deviation_mins=None,
-                        commute_distance_km=round(dist, 2),
-                        baseline_duration_mins=None,
-                        baseline_distance_km=None,
-                    )
-                else:
-                    travel_dev_map[c.centre_id] = 999999.0
-                    travel_breakdown_map[c.centre_id] = None
-
-    # Pool-relative Travel Fit normalization
-    if has_travel_anchors:
-        valid_centres = [
-            c
-            for c in candidate_centres
-            if c.centre_id is not None
-            and travel_dev_map.get(c.centre_id, 999999.0) < 999998.0
-        ]
-        if valid_centres:
-            valid_devs = [
-                travel_dev_map[c.centre_id]
-                for c in valid_centres
-                if c.centre_id is not None
-            ]
-            norm_scores = normalize_travel_fit(valid_devs)
-            for c, score in zip(valid_centres, norm_scores):
-                if c.centre_id is not None:
-                    travel_fit_map[c.centre_id] = score
-
-    # 4. Prefetch vacancy and service records for evaluated candidate centres
-    candidate_ids = [
-        c.centre_id for c in candidate_centres if c.centre_id is not None
-    ]
-    vacancies = session.exec(
-        select(VacancyRecord).where(
-            col(VacancyRecord.centre_id).in_(candidate_ids),
-            col(VacancyRecord.level_type) == requested_level,
-        )
-    ).all()
-
-    vacancy_map: dict[int, VacancyRecord] = {}
-    for v in vacancies:
-        if (
-            v.centre_id is not None
-            and v.enrollment_month_year is not None
-            and v.enrollment_month_year.year == target_dt.year
-            and v.enrollment_month_year.month == target_dt.month
-        ):
-            vacancy_map[v.centre_id] = v
-
-    services = session.exec(
-        select(PreschoolService).where(
-            col(PreschoolService.centre_id).in_(candidate_ids),
-            col(PreschoolService.level) == requested_level,
-        )
-    ).all()
-
-    services_map: dict[int, list[PreschoolService]] = defaultdict(list)
-    for s in services:
-        if s.centre_id is not None:
-            services_map[s.centre_id].append(s)
-
-    care_type = map_level_to_care_type(requested_level)
-    estimated_subsidy = evaluate_government_subsidy(
-        session=session,
-        care_type=care_type,
-        citizenship=citizenship_status,
-        applicant_status=applicant_status,
-        household_income=household_income,
-        household_member_count=household_member_count,
-    )
-
-    # 5. Score Vacancy Fit, Cost Fit, and Travel Fit for each candidate centre
-    scored_candidates: list[MatchCandidateItem] = []
-    for centre in candidate_centres:
-        v_rec = (
-            vacancy_map.get(centre.centre_id) if centre.centre_id is not None else None
-        )
-        v_status = v_rec.vacancy_status if v_rec else None
-        v_score = score_vacancy_fit(v_status)
-
-        centre_services = (
-            services_map.get(centre.centre_id, [])
-            if centre.centre_id is not None
-            else []
-        )
-        published_fee, remarks = resolve_published_programme_fee(
-            services=centre_services,
-            requested_level=requested_level,
-            service_required=service_required,
-            citizenship_status=citizenship_status,
-        )
-        payable_fee = max(0.0, round(published_fee - estimated_subsidy, 2))
-        cost_fit = calculate_cost_fit(payable_fee, budget_max)
-
-        fee_breakdown = FeeBreakdownItem(
-            published_fee=published_fee,
-            estimated_subsidy=estimated_subsidy,
-            estimated_monthly_payable_fee=payable_fee,
-            cost_fit=cost_fit,
-            remarks=remarks,
-            incidental_fee_remarks=remarks,
-        )
-
-        travel_fit = (
-            travel_fit_map.get(centre.centre_id)
-            if has_travel_anchors and centre.centre_id is not None
-            else None
-        )
-        travel_breakdown = (
-            travel_breakdown_map.get(centre.centre_id)
-            if has_travel_anchors and centre.centre_id is not None
-            else None
-        )
-
-        if cost_fit is not None and travel_fit is not None:
-            overall_fit_score = round(
-                (v_score * vacancy_weight)
-                + (cost_fit * cost_weight)
-                + (travel_fit * travel_weight),
-                2,
-            )
-        elif cost_fit is not None and travel_fit is None:
-            active_weight = vacancy_weight + cost_weight
-            overall_fit_score = (
-                round(
-                    ((v_score * vacancy_weight) + (cost_fit * cost_weight))
-                    / active_weight,
-                    2,
-                )
-                if active_weight > 0
-                else 0.0
-            )
-        elif cost_fit is None and travel_fit is not None:
-            active_weight = vacancy_weight + travel_weight
-            overall_fit_score = (
-                round(
-                    ((v_score * vacancy_weight) + (travel_fit * travel_weight))
-                    / active_weight,
-                    2,
-                )
-                if active_weight > 0
-                else 0.0
-            )
-        else:
-            overall_fit_score = v_score
-
-        candidate_item = MatchCandidateItem(
-            centre_id=centre.centre_id,  # type: ignore[arg-type]
-            centre_code=centre.centre_code,
-            centre_name=centre.centre_name,
-            contact=centre.contact,
-            email=centre.email,
-            postal=centre.postal,
-            website_url=centre.website_url,
-            food_offered=centre.food_offered,
-            address=centre.address,
-            second_languages=centre.second_languages,
-            spark_certified=centre.spark_certified,
-            weekday_full_day_hours=centre.weekday_full_day_hours,
-            saturday_hours=centre.saturday_hours,
-            extended_operating_hours=centre.extended_operating_hours,
-            transport_provided=centre.transport_provided,
-            gov_subsidy=centre.gov_subsidy,
-            last_updated=centre.last_updated,
-            level=requested_level,
-            enrollment_month_year=enrollment_month_str,
-            vacancy_status=v_status,
-            vacancy_fit_score=v_score,
-            cost_fit_score=cost_fit,
-            travel_fit_score=travel_fit,
-            overall_fit_score=overall_fit_score,
-            fee_breakdown=fee_breakdown,
-            travel_breakdown=travel_breakdown,
-            highlight=None,
-        )
-        scored_candidates.append(candidate_item)
-
-    # 6. Rank candidate centres: overall_fit desc, vacancy_fit desc, cost_fit desc, travel_fit desc, centre_name asc, centre_id asc
-    scored_candidates.sort(
-        key=lambda item: (
-            -item.overall_fit_score,
-            -item.vacancy_fit_score,
-            -(item.cost_fit_score or 0.0),
-            -(item.travel_fit_score or 0.0),
-            item.centre_name,
-            item.centre_id,
-        )
-    )
-
-    # 7. Apply top_n limit
-    top_results = scored_candidates[: request.top_n]
-
-    # 8. Generate Gemini AI explanation with resilient fallback (Ticket #71)
-    explanation = generate_fit_explanation(
-        level=requested_level,
-        enrollment_month_year=enrollment_month_str,
-        household_income=household_income,
-        household_member_count=household_member_count,
-        budget_max=budget_max,
-        home_postal_code=home_postal_code,
-        workplace_postal_code=workplace_postal_code,
-        vacancy_weight=vacancy_weight,
-        cost_weight=cost_weight,
-        travel_weight=travel_weight,
-        applicant_status=applicant_status,
-        total_candidates=total_candidates,
-        candidates=top_results,
-    )
-
-    for i, item in enumerate(top_results):
-        if i < len(explanation.candidate_highlights):
-            item.highlight = explanation.candidate_highlights[i]
-
-    return CentreMatchResponse(
-        total_candidates=total_candidates,
-        returned_count=len(top_results),
-        level=requested_level,
-        enrollment_month_year=enrollment_month_str,
-        results=top_results,
-        explanation=explanation,
-        profile_id=request.profile_id,
-    )
+    criteria = resolve_match_criteria(request, session, current_user)
+    return execute_multi_criteria_match(session, criteria)

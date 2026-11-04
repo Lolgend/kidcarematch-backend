@@ -44,6 +44,16 @@ class FeeBreakdownItem(BaseModel):
         description="Incidental and registration fee remarks or notes",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _sync_remarks(cls, data: object) -> object:
+        if isinstance(data, dict):
+            if "remarks" in data and "incidental_fee_remarks" not in data:
+                data["incidental_fee_remarks"] = data["remarks"]
+            elif "incidental_fee_remarks" in data and "remarks" not in data:
+                data["remarks"] = data["incidental_fee_remarks"]
+        return data
+
 
 class TravelBreakdownItem(BaseModel):
     """Commute route and detour travel metrics (Ticket #70)."""

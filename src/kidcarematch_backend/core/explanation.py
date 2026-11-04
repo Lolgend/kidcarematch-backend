@@ -2,13 +2,19 @@
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from google import genai
 from google.genai import types
 
 from kidcarematch_backend.core.config import settings
-from kidcarematch_backend.db.db import ApplicantStatus, PreschoolLevel
+from kidcarematch_backend.db.db import (
+    ApplicantStatus,
+    CitizenshipType,
+    LocationPreference,
+    PreschoolLevel,
+)
 from kidcarematch_backend.schemas.match import (
     FitExplanationResponse,
     MatchCandidateItem,
@@ -17,22 +23,69 @@ from kidcarematch_backend.schemas.match import (
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class MatchCriteria:
+    """Encapsulated criteria and parameters for multi-criteria preschool matching (ADR-0007)."""
+
+    level: PreschoolLevel
+    enrollment_month_year: str
+    citizenship_status: CitizenshipType = CitizenshipType.SC
+    service_required: str = "Full Day"
+    household_income: float = 0.0
+    household_member_count: int = 1
+    budget_max: float | None = None
+    home_postal_code: str | None = None
+    workplace_postal_code: str | None = None
+    location_preference: LocationPreference = LocationPreference.HOME
+    is_default_location_preference: bool = False
+    vacancy_weight: float = 0.40
+    cost_weight: float = 0.30
+    travel_weight: float = 0.30
+    applicant_status: ApplicantStatus = ApplicantStatus.WORKING_APPLICANT
+    top_n: int = 5
+    profile_id: str | None = None
+
+
 def build_explanation_prompt(
-    level: PreschoolLevel,
-    enrollment_month_year: str,
-    household_income: float,
-    household_member_count: int,
-    budget_max: float | None,
-    home_postal_code: str | None,
-    workplace_postal_code: str | None,
-    vacancy_weight: float,
-    cost_weight: float,
-    travel_weight: float,
-    applicant_status: ApplicantStatus,
-    total_candidates: int,
-    candidates: list[MatchCandidateItem],
+    criteria: MatchCriteria | None = None,
+    total_candidates: int = 0,
+    candidates: list[MatchCandidateItem] | None = None,
+    *,
+    level: PreschoolLevel | None = None,
+    enrollment_month_year: str | None = None,
+    household_income: float = 0.0,
+    household_member_count: int = 1,
+    budget_max: float | None = None,
+    home_postal_code: str | None = None,
+    workplace_postal_code: str | None = None,
+    vacancy_weight: float = 0.40,
+    cost_weight: float = 0.30,
+    travel_weight: float = 0.30,
+    applicant_status: ApplicantStatus = ApplicantStatus.WORKING_APPLICANT,
+    **kwargs: Any,
 ) -> str:
     """Build structured prompt for Gemini AI model (gemini-2.5-flash)."""
+    if candidates is None:
+        candidates = []
+    if criteria is None:
+        if level is None or enrollment_month_year is None:
+            raise ValueError(
+                "Either criteria or (level, enrollment_month_year) must be provided"
+            )
+        criteria = MatchCriteria(
+            level=level,
+            enrollment_month_year=enrollment_month_year,
+            household_income=household_income,
+            household_member_count=household_member_count,
+            budget_max=budget_max,
+            home_postal_code=home_postal_code,
+            workplace_postal_code=workplace_postal_code,
+            vacancy_weight=vacancy_weight,
+            cost_weight=cost_weight,
+            travel_weight=travel_weight,
+            applicant_status=applicant_status,
+        )
+
     candidates_lines: list[str] = []
     for rank, cand in enumerate(candidates, start=1):
         line = [
@@ -82,27 +135,27 @@ def build_explanation_prompt(
     candidates_text = "\n\n".join(candidates_lines)
 
     budget_text = (
-        f"${budget_max:.2f}/month"
-        if budget_max is not None
+        f"${criteria.budget_max:.2f}/month"
+        if criteria.budget_max is not None
         else "No ceiling specified"
     )
     applicant_status_str = (
-        applicant_status.value
-        if hasattr(applicant_status, "value")
-        else str(applicant_status)
+        criteria.applicant_status.value
+        if hasattr(criteria.applicant_status, "value")
+        else str(criteria.applicant_status)
     )
 
     prompt = f"""You are KidCareMatch's expert preschool recommendation advisor in Singapore.
 Your role is to explain multi-criteria preschool matching recommendations to parents in clear, transparent, and empathetic natural language based on quantitative scoring.
 
 Parent Search Profile & Criteria:
-- Developmental Level: {level.value.upper()}
-- Target Enrollment Month: {enrollment_month_year}
-- Monthly Household Income: ${household_income:.2f} (Household Size: {household_member_count})
+- Developmental Level: {criteria.level.value.upper()}
+- Target Enrollment Month: {criteria.enrollment_month_year}
+- Monthly Household Income: ${criteria.household_income:.2f} (Household Size: {criteria.household_member_count})
 - Applicant Employment Status: {applicant_status_str}
 - Preferred Maximum Budget: {budget_text}
-- Anchor Locations: Home Postal: {home_postal_code or 'Not specified'}, Workplace Postal: {workplace_postal_code or 'Not specified'}
-- Preference Weights: Vacancy Weight: {vacancy_weight * 100:.0f}%, Cost Weight: {cost_weight * 100:.0f}%, Travel Weight: {travel_weight * 100:.0f}%
+- Anchor Locations: Home Postal: {criteria.home_postal_code or 'Not specified'}, Workplace Postal: {criteria.workplace_postal_code or 'Not specified'}
+- Preference Weights: Vacancy Weight: {criteria.vacancy_weight * 100:.0f}%, Cost Weight: {criteria.cost_weight * 100:.0f}%, Travel Weight: {criteria.travel_weight * 100:.0f}%
 - Total Eligible Cohort Centres Evaluated: {total_candidates}
 
 Top Candidate Recommendations:
@@ -118,42 +171,69 @@ Generate a structured JSON response matching the following schema:
 
 
 def generate_deterministic_fallback(
-    level: PreschoolLevel,
-    enrollment_month_year: str,
-    budget_max: float | None,
-    home_postal_code: str | None,
-    workplace_postal_code: str | None,
-    vacancy_weight: float,
-    cost_weight: float,
-    travel_weight: float,
-    total_candidates: int,
-    candidates: list[MatchCandidateItem],
+    criteria: MatchCriteria | None = None,
+    total_candidates: int = 0,
+    candidates: list[MatchCandidateItem] | None = None,
+    *,
+    level: PreschoolLevel | None = None,
+    enrollment_month_year: str | None = None,
+    household_income: float = 0.0,
+    household_member_count: int = 1,
+    budget_max: float | None = None,
+    home_postal_code: str | None = None,
+    workplace_postal_code: str | None = None,
+    vacancy_weight: float = 0.40,
+    cost_weight: float = 0.30,
+    travel_weight: float = 0.30,
+    applicant_status: ApplicantStatus = ApplicantStatus.WORKING_APPLICANT,
+    **kwargs: Any,
 ) -> FitExplanationResponse:
     """Generate structured deterministic explanation template when Gemini AI is unavailable."""
-    level_name = level.value.upper()
+    if candidates is None:
+        candidates = []
+    if criteria is None:
+        if level is None or enrollment_month_year is None:
+            raise ValueError(
+                "Either criteria or (level, enrollment_month_year) must be provided"
+            )
+        criteria = MatchCriteria(
+            level=level,
+            enrollment_month_year=enrollment_month_year,
+            household_income=household_income,
+            household_member_count=household_member_count,
+            budget_max=budget_max,
+            home_postal_code=home_postal_code,
+            workplace_postal_code=workplace_postal_code,
+            vacancy_weight=vacancy_weight,
+            cost_weight=cost_weight,
+            travel_weight=travel_weight,
+            applicant_status=applicant_status,
+        )
+
+    level_name = criteria.level.value.upper()
 
     if not candidates:
         return FitExplanationResponse(
             summary_narrative=(
                 f"No preschool centres offering {level_name} cohort were found "
-                f"for enrollment in {enrollment_month_year} matching your criteria."
+                f"for enrollment in {criteria.enrollment_month_year} matching your criteria."
             ),
             top_centre_rationale="No candidate centres available to recommend.",
             candidate_highlights=[],
         )
 
-    v_pct = round(vacancy_weight * 100)
-    c_pct = round(cost_weight * 100)
-    t_pct = round(travel_weight * 100)
+    v_pct = round(criteria.vacancy_weight * 100)
+    c_pct = round(criteria.cost_weight * 100)
+    t_pct = round(criteria.travel_weight * 100)
     budget_desc = (
-        f" with a preferred budget ceiling of ${budget_max:.2f}/month"
-        if budget_max is not None
+        f" with a preferred budget ceiling of ${criteria.budget_max:.2f}/month"
+        if criteria.budget_max is not None
         else ""
     )
 
     summary_narrative = (
         f"Evaluated {total_candidates} candidate centres offering {level_name} cohort "
-        f"for enrollment in {enrollment_month_year}{budget_desc}. "
+        f"for enrollment in {criteria.enrollment_month_year}{budget_desc}. "
         f"Rankings reflect your preference weights of {v_pct}% Vacancy Fit, "
         f"{c_pct}% Cost Fit, and {t_pct}% Travel Fit."
     )
@@ -246,30 +326,47 @@ def _parse_gemini_response(
 
 
 def generate_fit_explanation(
-    level: PreschoolLevel,
-    enrollment_month_year: str,
-    household_income: float,
-    household_member_count: int,
-    budget_max: float | None,
-    home_postal_code: str | None,
-    workplace_postal_code: str | None,
-    vacancy_weight: float,
-    cost_weight: float,
-    travel_weight: float,
-    applicant_status: ApplicantStatus,
-    total_candidates: int,
-    candidates: list[MatchCandidateItem],
+    criteria: MatchCriteria | None = None,
+    total_candidates: int = 0,
+    candidates: list[MatchCandidateItem] | None = None,
+    *,
+    level: PreschoolLevel | None = None,
+    enrollment_month_year: str | None = None,
+    household_income: float = 0.0,
+    household_member_count: int = 1,
+    budget_max: float | None = None,
+    home_postal_code: str | None = None,
+    workplace_postal_code: str | None = None,
+    vacancy_weight: float = 0.40,
+    cost_weight: float = 0.30,
+    travel_weight: float = 0.30,
+    applicant_status: ApplicantStatus = ApplicantStatus.WORKING_APPLICANT,
+    **kwargs: Any,
 ) -> FitExplanationResponse:
     """Generate synthesized Gemini AI explanation with resilient fallback."""
+    if candidates is None:
+        candidates = []
+    if criteria is None:
+        if level is None or enrollment_month_year is None:
+            raise ValueError(
+                "Either criteria or (level, enrollment_month_year) must be provided"
+            )
+        criteria = MatchCriteria(
+            level=level,
+            enrollment_month_year=enrollment_month_year,
+            household_income=household_income,
+            household_member_count=household_member_count,
+            budget_max=budget_max,
+            home_postal_code=home_postal_code,
+            workplace_postal_code=workplace_postal_code,
+            vacancy_weight=vacancy_weight,
+            cost_weight=cost_weight,
+            travel_weight=travel_weight,
+            applicant_status=applicant_status,
+        )
+
     fallback = generate_deterministic_fallback(
-        level=level,
-        enrollment_month_year=enrollment_month_year,
-        budget_max=budget_max,
-        home_postal_code=home_postal_code,
-        workplace_postal_code=workplace_postal_code,
-        vacancy_weight=vacancy_weight,
-        cost_weight=cost_weight,
-        travel_weight=travel_weight,
+        criteria=criteria,
         total_candidates=total_candidates,
         candidates=candidates,
     )
@@ -286,17 +383,7 @@ def generate_fit_explanation(
     try:
         client = genai.Client(api_key=settings.GEMINI_API_KEY)
         prompt = build_explanation_prompt(
-            level=level,
-            enrollment_month_year=enrollment_month_year,
-            household_income=household_income,
-            household_member_count=household_member_count,
-            budget_max=budget_max,
-            home_postal_code=home_postal_code,
-            workplace_postal_code=workplace_postal_code,
-            vacancy_weight=vacancy_weight,
-            cost_weight=cost_weight,
-            travel_weight=travel_weight,
-            applicant_status=applicant_status,
+            criteria=criteria,
             total_candidates=total_candidates,
             candidates=candidates,
         )
