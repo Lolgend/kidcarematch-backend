@@ -14,6 +14,7 @@ from kidcarematch_backend.auth.security import (
     get_current_user,
     get_optional_current_user,
 )
+from kidcarematch_backend.core.explanation import generate_fit_explanation
 from kidcarematch_backend.core.onemap import (
     STAGE1_MAX_CANDIDATES,
     get_route_duration_and_distance,
@@ -850,13 +851,28 @@ def match_centres(
 
     total_candidates = len(candidate_centres)
     if total_candidates == 0:
+        empty_explanation = generate_fit_explanation(
+            level=requested_level,
+            enrollment_month_year=enrollment_month_str,
+            household_income=household_income,
+            household_member_count=household_member_count,
+            budget_max=budget_max,
+            home_postal_code=home_postal_code,
+            workplace_postal_code=workplace_postal_code,
+            vacancy_weight=vacancy_weight,
+            cost_weight=cost_weight,
+            travel_weight=travel_weight,
+            applicant_status=applicant_status,
+            total_candidates=0,
+            candidates=[],
+        )
         return CentreMatchResponse(
             total_candidates=0,
             returned_count=0,
             level=requested_level,
             enrollment_month_year=enrollment_month_str,
             results=[],
-            explanation=None,
+            explanation=empty_explanation,
             profile_id=request.profile_id,
         )
 
@@ -1179,12 +1195,33 @@ def match_centres(
     # 7. Apply top_n limit
     top_results = scored_candidates[: request.top_n]
 
+    # 8. Generate Gemini AI explanation with resilient fallback (Ticket #71)
+    explanation = generate_fit_explanation(
+        level=requested_level,
+        enrollment_month_year=enrollment_month_str,
+        household_income=household_income,
+        household_member_count=household_member_count,
+        budget_max=budget_max,
+        home_postal_code=home_postal_code,
+        workplace_postal_code=workplace_postal_code,
+        vacancy_weight=vacancy_weight,
+        cost_weight=cost_weight,
+        travel_weight=travel_weight,
+        applicant_status=applicant_status,
+        total_candidates=total_candidates,
+        candidates=top_results,
+    )
+
+    for i, item in enumerate(top_results):
+        if i < len(explanation.candidate_highlights):
+            item.highlight = explanation.candidate_highlights[i]
+
     return CentreMatchResponse(
         total_candidates=total_candidates,
         returned_count=len(top_results),
         level=requested_level,
         enrollment_month_year=enrollment_month_str,
         results=top_results,
-        explanation=None,
+        explanation=explanation,
         profile_id=request.profile_id,
     )

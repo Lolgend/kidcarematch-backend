@@ -1,8 +1,9 @@
 """Tests for Multi-Criteria Centre Matching API endpoint (POST /api/v1/centres/match - Ticket #68)."""
 
+import json
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -15,6 +16,7 @@ from kidcarematch_backend.auth.security import (
     get_optional_token_claims,
     get_token_claims,
 )
+from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.db.db import (
     AccountStatus,
     ApplicantStatus,
@@ -34,6 +36,7 @@ from kidcarematch_backend.db.db import (
     init_db,
 )
 from kidcarematch_backend.main import app
+from kidcarematch_backend.schemas.match import FitExplanationResponse
 
 
 @pytest.fixture
@@ -761,8 +764,9 @@ def test_match_response_serializes_centre_details_and_district(
     assert item["overall_fit_score"] == 100.0
     assert item["cost_fit_score"] is None
     assert item["travel_fit_score"] is None
-    assert item["highlight"] is None
-    assert data["explanation"] is None
+    assert item["highlight"] is not None
+    assert data["explanation"] is not None
+    assert "Alpha Preschool" in data["explanation"]["top_centre_rationale"]
 
 
 # ==============================================================================
@@ -2098,3 +2102,286 @@ def test_three_factor_overall_fit_composite_ranking(
     assert results[1]["overall_fit_score"] == 35.0
 
 
+
+
+# ==============================================================================
+# Gemini AI Explanation Service and Resilient Fallback Tests (Ticket #71)
+# ==============================================================================
+
+
+def test_match_gemini_ai_explanation_success(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Verify Gemini AI explanation service produces synthesized narrative, top rationale, and candidate highlights."""
+    create_centres_with_cohorts(test_engine)
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr(settings, "GEMINI_MODEL", "gemini-2.5-flash")
+
+    mock_explanation_data = {
+        "summary_narrative": "Alpha Preschool is the top recommendation for infant care enrollment in June 2026 based on high vacancy certainty and balanced affordability.",
+        "top_centre_rationale": "Alpha Preschool achieved the #1 rank with 100% Vacancy Fit and competitive monthly fees.",
+        "candidate_highlights": [
+            "Alpha Preschool: Immediate availability for infant care.",
+            "Zeta Early Years: Legacy immediate vacancy status.",
+            "Beta Childcare: Limited availability with moderate fees.",
+        ],
+    }
+
+    mock_client_instance = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = json.dumps(mock_explanation_data)
+    mock_response.parsed = FitExplanationResponse.model_validate(mock_explanation_data)
+    mock_client_instance.models.generate_content.return_value = mock_response
+
+    with patch("google.genai.Client", return_value=mock_client_instance):
+        payload = {
+            "level": "infant",
+            "enrollment_month_year": "2026-06",
+            "citizenship_status": "SC",
+            "top_n": 3,
+        }
+        response = client.post("/api/v1/centres/match", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["explanation"] is not None
+        assert data["explanation"]["summary_narrative"] == mock_explanation_data["summary_narrative"]
+        assert data["explanation"]["top_centre_rationale"] == mock_explanation_data["top_centre_rationale"]
+        assert data["explanation"]["candidate_highlights"] == mock_explanation_data["candidate_highlights"]
+
+        results = data["results"]
+        assert len(results) == 3
+        assert results[0]["highlight"] == mock_explanation_data["candidate_highlights"][0]
+        assert results[1]["highlight"] == mock_explanation_data["candidate_highlights"][1]
+        assert results[2]["highlight"] == mock_explanation_data["candidate_highlights"][2]
+
+        assert mock_client_instance.models.generate_content.called
+        call_kwargs = mock_client_instance.models.generate_content.call_args.kwargs
+        assert call_kwargs["model"] == "gemini-2.5-flash"
+        contents = call_kwargs["contents"]
+        assert "INFANT" in contents
+        assert "2026-06" in contents
+        assert "Alpha Preschool" in contents
+
+
+def test_match_resilient_fallback_when_gemini_api_key_is_none(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Verify that when GEMINI_API_KEY is None, the endpoint gracefully falls back to deterministic structured explanation."""
+    create_centres_with_cohorts(test_engine)
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", None)
+
+    with patch("google.genai.Client") as mock_client:
+        payload = {
+            "level": "infant",
+            "enrollment_month_year": "2026-06",
+            "citizenship_status": "SC",
+            "top_n": 2,
+        }
+        response = client.post("/api/v1/centres/match", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        assert not mock_client.called
+
+        explanation = data["explanation"]
+        assert explanation is not None
+        assert "INFANT" in explanation["summary_narrative"]
+        assert "2026-06" in explanation["summary_narrative"]
+        assert "Alpha Preschool" in explanation["top_centre_rationale"]
+        assert len(explanation["candidate_highlights"]) == 2
+        assert "Alpha Preschool" in explanation["candidate_highlights"][0]
+
+        results = data["results"]
+        assert results[0]["highlight"] == explanation["candidate_highlights"][0]
+        assert results[1]["highlight"] == explanation["candidate_highlights"][1]
+
+
+def test_match_resilient_fallback_when_gemini_times_out(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Verify graceful fallback to deterministic explanation when Gemini API times out."""
+    create_centres_with_cohorts(test_engine)
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.models.generate_content.side_effect = TimeoutError("Request to Gemini API timed out")
+
+    with patch("google.genai.Client", return_value=mock_client_instance):
+        payload = {
+            "level": "infant",
+            "enrollment_month_year": "2026-06",
+            "citizenship_status": "SC",
+            "top_n": 2,
+        }
+        response = client.post("/api/v1/centres/match", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["explanation"] is not None
+        assert "Alpha Preschool" in data["explanation"]["top_centre_rationale"]
+        assert len(data["explanation"]["candidate_highlights"]) == 2
+
+
+def test_match_resilient_fallback_when_gemini_quota_exceeded(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Verify graceful fallback when Gemini quota/rate limits are exceeded."""
+    create_centres_with_cohorts(test_engine)
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.models.generate_content.side_effect = Exception("429 Resource has been exhausted (check quota)")
+
+    with patch("google.genai.Client", return_value=mock_client_instance):
+        payload = {
+            "level": "infant",
+            "enrollment_month_year": "2026-06",
+            "citizenship_status": "SC",
+            "top_n": 2,
+        }
+        response = client.post("/api/v1/centres/match", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["explanation"] is not None
+        assert "Alpha Preschool" in data["explanation"]["top_centre_rationale"]
+
+
+def test_match_resilient_fallback_when_gemini_network_error(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Verify graceful fallback when network error occurs during Gemini call."""
+    create_centres_with_cohorts(test_engine)
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.models.generate_content.side_effect = httpx.ConnectError("Failed to connect to generativelanguage.googleapis.com")
+
+    with patch("google.genai.Client", return_value=mock_client_instance):
+        payload = {
+            "level": "infant",
+            "enrollment_month_year": "2026-06",
+            "citizenship_status": "SC",
+            "top_n": 2,
+        }
+        response = client.post("/api/v1/centres/match", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["explanation"] is not None
+        assert len(data["explanation"]["candidate_highlights"]) == 2
+
+
+def test_match_resilient_fallback_when_gemini_returns_malformed_json(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Verify graceful fallback when Gemini returns invalid non-JSON output."""
+    create_centres_with_cohorts(test_engine)
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+
+    mock_client_instance = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = "Here is the explanation without JSON structure."
+    mock_response.parsed = None
+    mock_client_instance.models.generate_content.return_value = mock_response
+
+    with patch("google.genai.Client", return_value=mock_client_instance):
+        payload = {
+            "level": "infant",
+            "enrollment_month_year": "2026-06",
+            "citizenship_status": "SC",
+            "top_n": 2,
+        }
+        response = client.post("/api/v1/centres/match", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["explanation"] is not None
+        assert "Alpha Preschool" in data["explanation"]["top_centre_rationale"]
+
+
+def test_match_explanation_empty_candidate_pool(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Verify explanation behavior when no candidate centres match the requested cohort."""
+    create_centres_with_cohorts(test_engine)
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+
+    payload = {
+        "level": "student_care",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["results"] == []
+    assert data["explanation"] is not None
+    assert "No preschool centres" in data["explanation"]["summary_narrative"]
+    assert "No candidate centres available" in data["explanation"]["top_centre_rationale"]
+    assert data["explanation"]["candidate_highlights"] == []
+
+
+def test_match_prompt_structure_includes_search_params_and_candidate_breakdowns(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Verify that Gemini prompt contains all search parameters and candidate metrics."""
+    create_centres_with_cohorts(test_engine)
+    seed_ecda_subsidy_rules(test_engine)
+    setup_onemap_mock(monkeypatch)
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+
+    mock_client_instance = MagicMock()
+    mock_response = MagicMock()
+    mock_explanation_data = {
+        "summary_narrative": "Detailed narrative test.",
+        "top_centre_rationale": "Top rationale test.",
+        "candidate_highlights": ["Highlight 1"],
+    }
+    mock_response.text = json.dumps(mock_explanation_data)
+    mock_response.parsed = FitExplanationResponse.model_validate(mock_explanation_data)
+    mock_client_instance.models.generate_content.return_value = mock_response
+
+    with patch("google.genai.Client", return_value=mock_client_instance):
+        payload = {
+            "level": "infant",
+            "enrollment_month_year": "2026-06",
+            "citizenship_status": "SC",
+            "household_income": 6000.0,
+            "household_member_count": 3,
+            "budget_max": 800.0,
+            "home_postal_code": "560123",
+            "workplace_postal_code": "018989",
+            "location_preference": "HOME",
+            "vacancy_weight": 0.50,
+            "cost_weight": 0.25,
+            "travel_weight": 0.25,
+            "applicant_status": "WORKING_APPLICANT",
+            "top_n": 1,
+        }
+        response = client.post("/api/v1/centres/match", json=payload)
+        assert response.status_code == 200
+
+        assert mock_client_instance.models.generate_content.called
+        call_kwargs = mock_client_instance.models.generate_content.call_args.kwargs
+        contents = call_kwargs["contents"]
+
+        # Search parameters
+        assert "INFANT" in contents
+        assert "2026-06" in contents
+        assert "6000" in contents
+        assert "800" in contents
+        assert "560123" in contents
+        assert "018989" in contents
+        assert "50%" in contents
+        assert "25%" in contents
+        assert "WORKING_APPLICANT" in contents
+
+        # Candidate breakdown metrics
+        assert "Alpha Preschool" in contents
+        assert "Overall Fit" in contents
+        assert "Vacancy Fit" in contents
+        assert "Cost Fit" in contents
+        assert "Travel Fit" in contents
+        assert "Payable Fee" in contents or "payable fee" in contents.lower()

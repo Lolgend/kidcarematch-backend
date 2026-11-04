@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     ONEMAP_API_URL: str = "https://www.onemap.gov.sg/api/common/elastic/search"
     ONEMAP_ROUTING_API_URL: str = "https://www.onemap.gov.sg/api/public/routingsvc/route"
     ONEMAP_API_TOKEN: str | None = None
+    GEMINI_API_KEY: str | None = None
+    GEMINI_MODEL: str = "gemini-2.5-flash"
     FIREBASE_PROJECT_ID: str | None = "kidcare-match-sg"
     FIREBASE_CREDENTIALS_PATH: str | None = "./firebase_svc_acc.json"
     CORS_ALLOWED_ORIGINS: list[str] = [
