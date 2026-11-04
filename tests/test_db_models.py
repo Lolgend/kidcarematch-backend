@@ -14,6 +14,7 @@ from kidcarematch_backend.db.db import (
     FamilyPreferenceProfile,
     LocationPreference,
     ModerationStatus,
+    PostalCoordinateCache,
     PreschoolCentre,
     PreschoolLevel,
     PreschoolService,
@@ -964,4 +965,29 @@ def test_family_preference_profile_custom_3_factor_weights_and_applicant_status(
     assert loaded.cost_weight == 0.25
     assert loaded.travel_weight == 0.25
     assert loaded.applicant_status == ApplicantStatus.NON_WORKING_APPLICANT
+
+
+def test_postal_coordinate_cache_persistence(test_session: Session):
+    """PostalCoordinateCache stores and retrieves geocoded Singapore postal coordinates."""
+    entry = PostalCoordinateCache(
+        postal_code="560123",
+        latitude=1.369123,
+        longitude=103.851234,
+        x_coord=29871.23,
+        y_coord=39123.45,
+        address="123 ANG MO KIO AVE 3 SINGAPORE 560123",
+    )
+    test_session.add(entry)
+    test_session.commit()
+
+    loaded = test_session.get(PostalCoordinateCache, "560123")
+    assert loaded is not None
+    assert loaded.postal_code == "560123"
+    assert loaded.latitude == 1.369123
+    assert loaded.longitude == 103.851234
+    assert loaded.x_coord == 29871.23
+    assert loaded.y_coord == 39123.45
+    assert loaded.address == "123 ANG MO KIO AVE 3 SINGAPORE 560123"
+    assert loaded.last_updated is not None
+
 

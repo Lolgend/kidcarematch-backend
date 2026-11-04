@@ -324,6 +324,20 @@ class ExternalDataSourceStatus(SQLModel, table=True):
     error_message: str | None = Field(default=None, max_length=1000)
 
 
+class PostalCoordinateCache(SQLModel, table=True):
+    """Persistent cache for resolved Singapore postal coordinates (OneMap)."""
+
+    postal_code: str = Field(primary_key=True, max_length=6, index=True)
+    latitude: float
+    longitude: float
+    x_coord: float | None = Field(default=None)
+    y_coord: float | None = Field(default=None)
+    address: str | None = Field(default=None, max_length=500)
+    last_updated: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+
+
 database_url = settings.DATABASE_URL
 engine = create_engine(database_url, echo=settings.DB_ECHO)
 

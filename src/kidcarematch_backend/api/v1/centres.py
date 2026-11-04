@@ -14,6 +14,14 @@ from kidcarematch_backend.auth.security import (
     get_current_user,
     get_optional_current_user,
 )
+from kidcarematch_backend.core.onemap import (
+    STAGE1_MAX_CANDIDATES,
+    get_route_duration_and_distance,
+    haversine_distance_km,
+    normalize_travel_fit,
+    resolve_coordinates_batch,
+    resolve_postal_coordinates,
+)
 from kidcarematch_backend.core.postal_districts import (
     get_all_postal_districts,
     get_postal_sectors_for_districts,
@@ -53,6 +61,7 @@ from kidcarematch_backend.schemas.match import (
     CentreMatchResponse,
     FeeBreakdownItem,
     MatchCandidateItem,
+    TravelBreakdownItem,
 )
 from kidcarematch_backend.schemas.profile import (
     parse_year_month,
@@ -766,6 +775,8 @@ def match_centres(
 ) -> CentreMatchResponse:
     """Evaluate and rank candidate preschool centres against multi-criteria requirements."""
     # 1. Resolve search criteria from profile or inline payload
+    home_postal_code: str | None = None
+    workplace_postal_code: str | None = None
     if request.profile_id is not None:
         if current_user is None:
             raise HTTPException(
@@ -804,6 +815,8 @@ def match_centres(
         vacancy_weight = profile.vacancy_weight
         cost_weight = profile.cost_weight
         travel_weight = profile.travel_weight
+        home_postal_code = profile.home_postal_code
+        workplace_postal_code = profile.workplace_postal_code
     else:
         assert request.level is not None
         assert request.enrollment_month_year is not None
@@ -819,8 +832,8 @@ def match_centres(
         vacancy_weight = request.vacancy_weight
         cost_weight = request.cost_weight
         travel_weight = request.travel_weight
-
-    _ = travel_weight  # Travel Fit integration scheduled for Ticket #70
+        home_postal_code = request.home_postal_code
+        workplace_postal_code = request.workplace_postal_code
 
     # 2. Strict cohort filtering: candidates must offer requested level
     candidate_centres = session.exec(
@@ -847,8 +860,165 @@ def match_centres(
             profile_id=request.profile_id,
         )
 
-    # 3. Prefetch vacancy and service records for all candidate centres
-    candidate_ids = [c.centre_id for c in candidate_centres if c.centre_id is not None]
+    # 3. Two-Stage Spatial Corridor Detour Routing (Ticket #70)
+    has_home_postal = bool(
+        home_postal_code and len(home_postal_code.strip()) == 6
+    )
+    has_workplace_postal = bool(
+        workplace_postal_code and len(workplace_postal_code.strip()) == 6
+    )
+    is_dual_anchor = has_home_postal and has_workplace_postal
+    is_single_anchor = (
+        (has_home_postal and not has_workplace_postal)
+        or (has_workplace_postal and not has_home_postal)
+    )
+
+    travel_dev_map: dict[int, float] = {}
+    travel_fit_map: dict[int, float] = {}
+    travel_breakdown_map: dict[int, TravelBreakdownItem | None] = {}
+    has_travel_anchors = False
+
+    if is_dual_anchor:
+        home_coords = resolve_postal_coordinates(
+            home_postal_code, session=session
+        )
+        workplace_coords = resolve_postal_coordinates(
+            workplace_postal_code, session=session
+        )
+        if home_coords and workplace_coords:
+            has_travel_anchors = True
+            centre_postals = [c.postal for c in candidate_centres if c.postal]
+            coords_map = resolve_coordinates_batch(
+                centre_postals, session=session
+            )
+
+            # Stage 1: Spatial corridor pre-filtering (prunes distant outliers)
+            if len(candidate_centres) > STAGE1_MAX_CANDIDATES:
+                d_hw = haversine_distance_km(
+                    home_coords[0],
+                    home_coords[1],
+                    workplace_coords[0],
+                    workplace_coords[1],
+                )
+
+                def _dual_corridor_deviation(c: PreschoolCentre) -> float:
+                    c_pt = coords_map.get(c.postal) if c.postal else None
+                    if not c_pt:
+                        return 999999.0
+                    d_hc = haversine_distance_km(
+                        home_coords[0], home_coords[1], c_pt[0], c_pt[1]
+                    )
+                    d_cw = haversine_distance_km(
+                        c_pt[0], c_pt[1], workplace_coords[0], workplace_coords[1]
+                    )
+                    return d_hc + d_cw - d_hw
+
+                candidate_centres = sorted(
+                    candidate_centres, key=_dual_corridor_deviation
+                )[:STAGE1_MAX_CANDIDATES]
+
+            # Stage 2: Detour Routing
+            base_dur, base_dist = get_route_duration_and_distance(
+                home_coords, workplace_coords
+            )
+            for c in candidate_centres:
+                if c.centre_id is None:
+                    continue
+                c_pt = coords_map.get(c.postal) if c.postal else None
+                if c_pt:
+                    t_hc, d_hc = get_route_duration_and_distance(
+                        home_coords, c_pt
+                    )
+                    t_cw, d_cw = get_route_duration_and_distance(
+                        c_pt, workplace_coords
+                    )
+                    tot_dur = t_hc + t_cw
+                    tot_dist = d_hc + d_cw
+                    delta_time = tot_dur - base_dur
+                    deviation = max(0.0, delta_time)
+                    travel_dev_map[c.centre_id] = deviation
+                    travel_breakdown_map[c.centre_id] = TravelBreakdownItem(
+                        commute_duration_mins=round(tot_dur, 1),
+                        commute_deviation_mins=round(deviation, 1),
+                        commute_distance_km=round(tot_dist, 2),
+                        baseline_duration_mins=round(base_dur, 1),
+                        baseline_distance_km=round(base_dist, 2),
+                    )
+                else:
+                    travel_dev_map[c.centre_id] = 999999.0
+                    travel_breakdown_map[c.centre_id] = None
+
+    elif is_single_anchor:
+        anchor_postal = home_postal_code or workplace_postal_code
+        anchor_coords = resolve_postal_coordinates(
+            anchor_postal, session=session
+        )
+        if anchor_coords:
+            has_travel_anchors = True
+            centre_postals = [c.postal for c in candidate_centres if c.postal]
+            coords_map = resolve_coordinates_batch(
+                centre_postals, session=session
+            )
+
+            # Stage 1: Spatial corridor pre-filtering (single-anchor distance)
+            if len(candidate_centres) > STAGE1_MAX_CANDIDATES:
+
+                def _single_anchor_distance(c: PreschoolCentre) -> float:
+                    c_pt = coords_map.get(c.postal) if c.postal else None
+                    if not c_pt:
+                        return 999999.0
+                    return haversine_distance_km(
+                        anchor_coords[0], anchor_coords[1], c_pt[0], c_pt[1]
+                    )
+
+                candidate_centres = sorted(
+                    candidate_centres, key=_single_anchor_distance
+                )[:STAGE1_MAX_CANDIDATES]
+
+            # Stage 2: Detour Routing / Physical distance
+            for c in candidate_centres:
+                if c.centre_id is None:
+                    continue
+                c_pt = coords_map.get(c.postal) if c.postal else None
+                if c_pt:
+                    dur, dist = get_route_duration_and_distance(
+                        anchor_coords, c_pt
+                    )
+                    travel_dev_map[c.centre_id] = dist
+                    travel_breakdown_map[c.centre_id] = TravelBreakdownItem(
+                        commute_duration_mins=round(dur, 1),
+                        commute_deviation_mins=None,
+                        commute_distance_km=round(dist, 2),
+                        baseline_duration_mins=None,
+                        baseline_distance_km=None,
+                    )
+                else:
+                    travel_dev_map[c.centre_id] = 999999.0
+                    travel_breakdown_map[c.centre_id] = None
+
+    # Pool-relative Travel Fit normalization
+    if has_travel_anchors:
+        valid_centres = [
+            c
+            for c in candidate_centres
+            if c.centre_id is not None
+            and travel_dev_map.get(c.centre_id, 999999.0) < 999998.0
+        ]
+        if valid_centres:
+            valid_devs = [
+                travel_dev_map[c.centre_id]
+                for c in valid_centres
+                if c.centre_id is not None
+            ]
+            norm_scores = normalize_travel_fit(valid_devs)
+            for c, score in zip(valid_centres, norm_scores):
+                if c.centre_id is not None:
+                    travel_fit_map[c.centre_id] = score
+
+    # 4. Prefetch vacancy and service records for evaluated candidate centres
+    candidate_ids = [
+        c.centre_id for c in candidate_centres if c.centre_id is not None
+    ]
     vacancies = session.exec(
         select(VacancyRecord).where(
             col(VacancyRecord.centre_id).in_(candidate_ids),
@@ -888,7 +1058,7 @@ def match_centres(
         household_member_count=household_member_count,
     )
 
-    # 4. Score Vacancy Fit and Cost Fit for each candidate centre
+    # 5. Score Vacancy Fit, Cost Fit, and Travel Fit for each candidate centre
     scored_candidates: list[MatchCandidateItem] = []
     for centre in candidate_centres:
         v_rec = (
@@ -920,11 +1090,40 @@ def match_centres(
             incidental_fee_remarks=remarks,
         )
 
-        if cost_fit is not None:
+        travel_fit = (
+            travel_fit_map.get(centre.centre_id)
+            if has_travel_anchors and centre.centre_id is not None
+            else None
+        )
+        travel_breakdown = (
+            travel_breakdown_map.get(centre.centre_id)
+            if has_travel_anchors and centre.centre_id is not None
+            else None
+        )
+
+        if cost_fit is not None and travel_fit is not None:
+            overall_fit_score = round(
+                (v_score * vacancy_weight)
+                + (cost_fit * cost_weight)
+                + (travel_fit * travel_weight),
+                2,
+            )
+        elif cost_fit is not None and travel_fit is None:
             active_weight = vacancy_weight + cost_weight
             overall_fit_score = (
                 round(
                     ((v_score * vacancy_weight) + (cost_fit * cost_weight))
+                    / active_weight,
+                    2,
+                )
+                if active_weight > 0
+                else 0.0
+            )
+        elif cost_fit is None and travel_fit is not None:
+            active_weight = vacancy_weight + travel_weight
+            overall_fit_score = (
+                round(
+                    ((v_score * vacancy_weight) + (travel_fit * travel_weight))
                     / active_weight,
                     2,
                 )
@@ -957,25 +1156,27 @@ def match_centres(
             vacancy_status=v_status,
             vacancy_fit_score=v_score,
             cost_fit_score=cost_fit,
-            travel_fit_score=None,
+            travel_fit_score=travel_fit,
             overall_fit_score=overall_fit_score,
             fee_breakdown=fee_breakdown,
-            travel_breakdown=None,
+            travel_breakdown=travel_breakdown,
             highlight=None,
         )
         scored_candidates.append(candidate_item)
 
-    # 5. Rank candidate centres: overall_fit_score desc, vacancy_fit_score desc, centre_name asc, centre_id asc
+    # 6. Rank candidate centres: overall_fit desc, vacancy_fit desc, cost_fit desc, travel_fit desc, centre_name asc, centre_id asc
     scored_candidates.sort(
         key=lambda item: (
             -item.overall_fit_score,
             -item.vacancy_fit_score,
+            -(item.cost_fit_score or 0.0),
+            -(item.travel_fit_score or 0.0),
             item.centre_name,
             item.centre_id,
         )
     )
 
-    # 6. Apply top_n limit
+    # 7. Apply top_n limit
     top_results = scored_candidates[: request.top_n]
 
     return CentreMatchResponse(

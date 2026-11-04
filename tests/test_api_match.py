@@ -2,7 +2,9 @@
 
 import uuid
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, create_engine
@@ -19,6 +21,7 @@ from kidcarematch_backend.db.db import (
     CareType,
     CitizenshipType,
     FamilyPreferenceProfile,
+    PostalCoordinateCache,
     PreschoolCentre,
     PreschoolLevel,
     PreschoolService,
@@ -1417,4 +1420,681 @@ def test_match_profile_linked_end_to_end_fee_and_cost_fit(
     assert item["fee_breakdown"]["estimated_monthly_payable_fee"] == 60.0
     assert item["fee_breakdown"]["cost_fit"] == 100.0
     assert item["cost_fit_score"] == 100.0
+
+
+# ==============================================================================
+# OneMap Two-Stage Detour Routing and Travel Fit Tests (Ticket #70)
+# ==============================================================================
+
+
+def setup_onemap_mock(
+    monkeypatch,
+    postal_coords: dict[str, tuple[float, float]] | None = None,
+    route_durations: dict[str, int] | None = None,
+    route_fails: bool = False,
+):
+    """Setup mock for OneMap search (geocoding) and routing endpoints."""
+    default_coords = {
+        "560123": (1.3691, 103.8512),  # Ang Mo Kio (Home)
+        "560124": (1.3695, 103.8520),  # Close to Home
+        "560125": (1.3780, 103.8550),  # Moderate distance
+        "048581": (1.2840, 103.8510),  # Raffles Place (Workplace)
+        "600123": (1.3320, 103.7430),  # Jurong East (Far outlier)
+        "520123": (1.3520, 103.9440),  # Tampines
+    }
+    coords_table = {**default_coords, **(postal_coords or {})}
+    search_call_count = {"count": 0}
+    route_call_count = {"count": 0}
+
+    original_get = httpx.Client.get
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        if "onemap.gov.sg/api/common/elastic/search" in url_str:
+            search_call_count["count"] += 1
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", "")).strip()
+            if postal in coords_table:
+                lat, lon = coords_table[postal]
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_resp.json.return_value = {
+                    "found": 1,
+                    "totalNumPages": 1,
+                    "pageNum": 1,
+                    "results": [
+                        {
+                            "SEARCHVAL": f"POSTAL_{postal}",
+                            "POSTAL": postal,
+                            "LATITUDE": str(lat),
+                            "LONGITUDE": str(lon),
+                            "X": "29800.0",
+                            "Y": "39100.0",
+                            "ADDRESS": f"Address for {postal}",
+                        }
+                    ],
+                }
+                mock_resp.raise_for_status = MagicMock()
+                return mock_resp
+            else:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_resp.json.return_value = {"found": 0, "results": []}
+                mock_resp.raise_for_status = MagicMock()
+                return mock_resp
+
+        elif "onemap.gov.sg/api/public/routingsvc/route" in url_str:
+            route_call_count["count"] += 1
+            if route_fails:
+                raise httpx.ConnectError("OneMap Routing service unavailable")
+
+            params = kwargs.get("params", {})
+            start_str = str(params.get("start", ""))
+            end_str = str(params.get("end", ""))
+
+            def _norm_coord(s: str) -> str:
+                parts = s.split(",")
+                if len(parts) == 2:
+                    return f"{float(parts[0]):.4f},{float(parts[1]):.4f}"
+                return s
+
+            norm_durations = {
+                f"{_norm_coord(k.split('->')[0])}->{_norm_coord(k.split('->')[1])}": v
+                for k, v in (route_durations or {}).items()
+            }
+            norm_key = f"{_norm_coord(start_str)}->{_norm_coord(end_str)}"
+            duration_secs = norm_durations.get(norm_key, 1200)
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "plan": {
+                    "itineraries": [
+                        {
+                            "duration": duration_secs,
+                        }
+                    ]
+                }
+            }
+            mock_resp.raise_for_status = MagicMock()
+            return mock_resp
+
+        return original_get(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+    return search_call_count, route_call_count
+
+
+def test_onemap_coordinate_resolution_and_persistent_caching(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Postal codes are resolved via OneMap API and persistently cached in database."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_id=101,
+            centre_code="C_GEO_01",
+            centre_name="Geo Centre 1",
+            postal="560124",
+        )
+        session.add(c1)
+        s1 = PreschoolService(
+            centre_id=101,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1000.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        session.add(s1)
+        v1 = VacancyRecord(
+            record_id="v_geo_01",
+            centre_id=101,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+        session.add(v1)
+        session.commit()
+
+    search_count, _ = setup_onemap_mock(monkeypatch)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "top_n": 5,
+    }
+
+    # 1. First invocation: resolves postal codes via OneMap Search API
+    response1 = client.post("/api/v1/centres/match", json=payload)
+    assert response1.status_code == 200
+    first_calls = search_count["count"]
+    assert first_calls >= 2  # Home "560123" and Centre "560124"
+
+    # Verify cached in database table PostalCoordinateCache
+    with Session(test_engine) as session:
+        home_cached = session.get(PostalCoordinateCache, "560123")
+        assert home_cached is not None
+        assert home_cached.latitude == 1.3691
+        assert home_cached.longitude == 103.8512
+
+        centre_cached = session.get(PostalCoordinateCache, "560124")
+        assert centre_cached is not None
+        assert centre_cached.latitude == 1.3695
+        assert centre_cached.longitude == 103.8520
+
+    # 2. Second invocation: must hit persistent database cache and NOT query OneMap
+    response2 = client.post("/api/v1/centres/match", json=payload)
+    assert response2.status_code == 200
+    assert search_count["count"] == first_calls  # Zero additional API calls!
+
+
+def test_single_anchor_travel_fit_normalization(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Single-anchor search computes physical distance; best candidate receives 100%, worst receives 0%."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        # Centre A: very close (postal 560124)
+        c_a = PreschoolCentre(
+            centre_id=111,
+            centre_code="C_A",
+            centre_name="Centre Close",
+            postal="560124",
+        )
+        s_a = PreschoolService(
+            centre_id=111,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1000.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v_a = VacancyRecord(
+            record_id="v_a",
+            centre_id=111,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+
+        # Centre B: moderate distance (postal 560125)
+        c_b = PreschoolCentre(
+            centre_id=112,
+            centre_code="C_B",
+            centre_name="Centre Mid",
+            postal="560125",
+        )
+        s_b = PreschoolService(
+            centre_id=112,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1000.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v_b = VacancyRecord(
+            record_id="v_b",
+            centre_id=112,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+
+        # Centre C: distant (postal 600123)
+        c_c = PreschoolCentre(
+            centre_id=113,
+            centre_code="C_C",
+            centre_name="Centre Far",
+            postal="600123",
+        )
+        s_c = PreschoolService(
+            centre_id=113,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1000.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v_c = VacancyRecord(
+            record_id="v_c",
+            centre_id=113,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+
+        session.add_all([c_a, s_a, v_a, c_b, s_b, v_b, c_c, s_c, v_c])
+        session.commit()
+
+    setup_onemap_mock(monkeypatch)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "top_n": 3,
+    }
+
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    results = data["results"]
+    assert len(results) == 3
+
+    # Close centre ranks 1st with 100.0% travel fit
+    assert results[0]["centre_code"] == "C_A"
+    assert results[0]["travel_fit_score"] == 100.0
+    assert results[0]["travel_breakdown"] is not None
+    assert results[0]["travel_breakdown"]["commute_distance_km"] is not None
+    assert results[0]["travel_breakdown"]["commute_duration_mins"] is not None
+
+    # Far centre ranks last with 0.0% travel fit
+    assert results[2]["centre_code"] == "C_C"
+    assert results[2]["travel_fit_score"] == 0.0
+
+    # Middle centre has linear normalized score between 0 and 100
+    assert results[1]["centre_code"] == "C_B"
+    assert 0.0 < results[1]["travel_fit_score"] < 100.0
+
+
+def test_dual_anchor_commute_deviation_detour_routing(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Dual-anchor search evaluates detour delay deviation relative to direct baseline commute route."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        # Centre 1: on corridor with small detour
+        c1 = PreschoolCentre(
+            centre_id=121,
+            centre_code="C_DETOUR_01",
+            centre_name="On-Route Centre",
+            postal="560124",
+        )
+        s1 = PreschoolService(
+            centre_id=121,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1000.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v1 = VacancyRecord(
+            record_id="v_d1",
+            centre_id=121,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+
+        # Centre 2: big detour
+        c2 = PreschoolCentre(
+            centre_id=122,
+            centre_code="C_DETOUR_02",
+            centre_name="Off-Route Centre",
+            postal="520123",
+        )
+        s2 = PreschoolService(
+            centre_id=122,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1000.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v2 = VacancyRecord(
+            record_id="v_d2",
+            centre_id=122,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+
+        session.add_all([c1, s1, v1, c2, s2, v2])
+        session.commit()
+
+    # Define route travel times:
+    # Home: 1.3691,103.8512
+    # Workplace: 1.2840,103.8510
+    # C1: 1.3695,103.8520
+    # C2: 1.3520,103.9440
+    route_durations = {
+        # Baseline: Home -> Workplace = 1800s (30 mins)
+        "1.3691,103.8512->1.2840,103.8510": 1800,
+        # C1 route: Home -> C1 (600s = 10 mins) + C1 -> Workplace (1500s = 25 mins) => 35 mins (detour = 5 mins)
+        "1.3691,103.8512->1.3695,103.852": 600,
+        "1.3695,103.852->1.2840,103.8510": 1500,
+        # C2 route: Home -> C2 (1800s = 30 mins) + C2 -> Workplace (2700s = 45 mins) => 75 mins (detour = 45 mins)
+        "1.3691,103.8512->1.352,103.944": 1800,
+        "1.352,103.944->1.2840,103.8510": 2700,
+    }
+    setup_onemap_mock(monkeypatch, route_durations=route_durations)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "workplace_postal_code": "048581",
+        "top_n": 2,
+    }
+
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    results = data["results"]
+    assert len(results) == 2
+
+    # C1 has least detour delay (5 mins vs 45 mins) -> 100.0% Travel Fit
+    assert results[0]["centre_code"] == "C_DETOUR_01"
+    assert results[0]["travel_fit_score"] == 100.0
+    tb1 = results[0]["travel_breakdown"]
+    assert tb1 is not None
+    assert tb1["commute_duration_mins"] == 35.0
+    assert tb1["commute_deviation_mins"] == 5.0
+    assert tb1["baseline_duration_mins"] == 30.0
+
+    # C2 has greatest detour delay -> 0.0% Travel Fit
+    assert results[1]["centre_code"] == "C_DETOUR_02"
+    assert results[1]["travel_fit_score"] == 0.0
+    tb2 = results[1]["travel_breakdown"]
+    assert tb2 is not None
+    assert tb2["commute_duration_mins"] == 75.0
+    assert tb2["commute_deviation_mins"] == 45.0
+    assert tb2["baseline_duration_mins"] == 30.0
+
+
+def test_stage1_spatial_corridor_prefiltering_top_30(
+    client: TestClient, test_engine, monkeypatch
+):
+    """When candidate pool has > 30 candidates, Stage 1 prunes distant outliers down to top 30."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    coords_dict = {"560123": (1.3691, 103.8512)}  # Home
+
+    with Session(test_engine) as session:
+        # Create 30 centres close to Home (small variations in lat/lon)
+        for i in range(1, 31):
+            p_code = f"56{i:04d}"
+            coords_dict[p_code] = (1.3691 + (i * 0.001), 103.8512 + (i * 0.001))
+            c = PreschoolCentre(
+                centre_id=200 + i,
+                centre_code=f"C_NEAR_{i:02d}",
+                centre_name=f"Near Centre {i:02d}",
+                postal=p_code,
+            )
+            s = PreschoolService(
+                centre_id=200 + i,
+                type_of_service="Full Day",
+                level=PreschoolLevel.INFANT,
+                fee=1000.0,
+                citizenship_type=CitizenshipType.SC,
+            )
+            v = VacancyRecord(
+                record_id=f"v_near_{i}",
+                centre_id=200 + i,
+                level_type=PreschoolLevel.INFANT,
+                enrollment_month_year=target_month,
+                vacancy_status="Available",
+            )
+            session.add_all([c, s, v])
+
+        # Create 5 distant outlier centres (e.g. Tuas / Jurong > 20 km away)
+        for j in range(1, 6):
+            p_code = f"63{j:04d}"
+            coords_dict[p_code] = (1.3100, 103.6500 + (j * 0.005))
+            c = PreschoolCentre(
+                centre_id=300 + j,
+                centre_code=f"C_OUTLIER_{j:02d}",
+                centre_name=f"Outlier Centre {j:02d}",
+                postal=p_code,
+            )
+            s = PreschoolService(
+                centre_id=300 + j,
+                type_of_service="Full Day",
+                level=PreschoolLevel.INFANT,
+                fee=1000.0,
+                citizenship_type=CitizenshipType.SC,
+            )
+            v = VacancyRecord(
+                record_id=f"v_outlier_{j}",
+                centre_id=300 + j,
+                level_type=PreschoolLevel.INFANT,
+                enrollment_month_year=target_month,
+                vacancy_status="Available",
+            )
+            session.add_all([c, s, v])
+
+        session.commit()
+
+    setup_onemap_mock(monkeypatch, postal_coords=coords_dict)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "top_n": 20,
+    }
+
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    # Total candidates in database is 35
+    assert data["total_candidates"] == 35
+    assert data["returned_count"] == 20
+
+    # Ensure none of the 5 distant outliers are returned in the top results
+    returned_codes = {r["centre_code"] for r in data["results"]}
+    for j in range(1, 6):
+        assert f"C_OUTLIER_{j:02d}" not in returned_codes
+
+
+def test_travel_fit_normalization_identical_deviations_receives_100(
+    client: TestClient, test_engine, monkeypatch
+):
+    """When candidates have identical travel deviations (dev_max == dev_min), all receive 100.0%."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_id=401,
+            centre_code="C_SAME_01",
+            centre_name="Same Distance 1",
+            postal="560124",
+        )
+        s1 = PreschoolService(
+            centre_id=401,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1000.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v1 = VacancyRecord(
+            record_id="v_same_1",
+            centre_id=401,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+
+        c2 = PreschoolCentre(
+            centre_id=402,
+            centre_code="C_SAME_02",
+            centre_name="Same Distance 2",
+            postal="560124",  # Exactly same postal / distance
+        )
+        s2 = PreschoolService(
+            centre_id=402,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1000.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v2 = VacancyRecord(
+            record_id="v_same_2",
+            centre_id=402,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+
+        session.add_all([c1, s1, v1, c2, s2, v2])
+        session.commit()
+
+    setup_onemap_mock(monkeypatch)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "top_n": 2,
+    }
+
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["results"]) == 2
+    assert data["results"][0]["travel_fit_score"] == 100.0
+    assert data["results"][1]["travel_fit_score"] == 100.0
+
+
+def test_travel_fit_graceful_fallback_when_onemap_routing_fails(
+    client: TestClient, test_engine, monkeypatch
+):
+    """When OneMap Routing API degrades or fails, endpoint falls back gracefully to straight-line estimation without crashing."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_id=501,
+            centre_code="C_FALLBACK_01",
+            centre_name="Fallback Centre 1",
+            postal="560124",
+        )
+        s1 = PreschoolService(
+            centre_id=501,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1000.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v1 = VacancyRecord(
+            record_id="v_fb_1",
+            centre_id=501,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+        session.add_all([c1, s1, v1])
+        session.commit()
+
+    # Configure mock with route_fails = True
+    setup_onemap_mock(monkeypatch, route_fails=True)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "workplace_postal_code": "048581",
+        "top_n": 1,
+    }
+
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200  # Zero API crashes!
+    data = response.json()
+    assert len(data["results"]) == 1
+    item = data["results"][0]
+    assert item["travel_fit_score"] == 100.0  # Only candidate
+    assert item["travel_breakdown"] is not None
+    assert item["travel_breakdown"]["commute_distance_km"] is not None
+    assert item["travel_breakdown"]["commute_duration_mins"] is not None
+
+
+def test_three_factor_overall_fit_composite_ranking(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Composite Overall Fit combines Vacancy Fit, Cost Fit, and Travel Fit weighted by parental priorities."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        # Centre 1: Vacancy=Available (100%), Fee=$400 (Cost Fit=100%), Travel=Close (100%)
+        # Overall = 100*0.4 + 100*0.3 + 100*0.3 = 100.0%
+        c1 = PreschoolCentre(
+            centre_id=601,
+            centre_code="C_COMP_01",
+            centre_name="Perfect Match Centre",
+            postal="560124",
+        )
+        s1 = PreschoolService(
+            centre_id=601,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=400.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v1 = VacancyRecord(
+            record_id="v_comp_1",
+            centre_id=601,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+
+        # Centre 2: Vacancy=Limited (50%), Fee=$1000 (Cost Fit=50% with $500 budget), Travel=Far (0%)
+        # Overall = 50*0.4 + 50*0.3 + 0*0.3 = 20 + 15 + 0 = 35.0%
+        c2 = PreschoolCentre(
+            centre_id=602,
+            centre_code="C_COMP_02",
+            centre_name="Lower Match Centre",
+            postal="600123",
+        )
+        s2 = PreschoolService(
+            centre_id=602,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1000.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v2 = VacancyRecord(
+            record_id="v_comp_2",
+            centre_id=602,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Limited",
+        )
+
+        session.add_all([c1, s1, v1, c2, s2, v2])
+        session.commit()
+
+    setup_onemap_mock(monkeypatch)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "budget_max": 500.0,
+        "vacancy_weight": 0.40,
+        "cost_weight": 0.30,
+        "travel_weight": 0.30,
+        "top_n": 2,
+    }
+
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    results = data["results"]
+    assert len(results) == 2
+
+    # Perfect match ranks 1st
+    assert results[0]["centre_code"] == "C_COMP_01"
+    assert results[0]["vacancy_fit_score"] == 100.0
+    assert results[0]["cost_fit_score"] == 100.0
+    assert results[0]["travel_fit_score"] == 100.0
+    assert results[0]["overall_fit_score"] == 100.0
+
+    # Lower match ranks 2nd
+    assert results[1]["centre_code"] == "C_COMP_02"
+    assert results[1]["vacancy_fit_score"] == 50.0
+    assert results[1]["cost_fit_score"] == 50.0
+    assert results[1]["travel_fit_score"] == 0.0
+    assert results[1]["overall_fit_score"] == 35.0
+
 

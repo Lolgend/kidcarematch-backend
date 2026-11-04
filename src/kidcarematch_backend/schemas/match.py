@@ -60,6 +60,14 @@ class TravelBreakdownItem(BaseModel):
         default=None,
         description="Total journey or detour distance in kilometers",
     )
+    baseline_duration_mins: float | None = Field(
+        default=None,
+        description="Direct baseline morning commute duration in minutes",
+    )
+    baseline_distance_km: float | None = Field(
+        default=None,
+        description="Direct baseline morning commute distance in kilometers",
+    )
 
 
 class FitExplanationResponse(BaseModel):
