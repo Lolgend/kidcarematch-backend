@@ -56,6 +56,14 @@ _Avoid_: Sync log, healthcheck record, source tracker
 The authoritative geospatial mapping, geocoding, and reverse-geocoding web services provided by the Singapore Land Authority (SLA), utilized for preschool centre coordinate resolution, postal code lookup, and parental travel proximity matching.
 _Avoid_: Google Maps Platform, SLA GIS, SLA Map service
 
+**OneMap Service Account**:
+A centralized system-level developer credential registered with SLA OneMap, utilized by the backend to programmatically authenticate and obtain short-lived access tokens for geospatial queries.
+_Avoid_: User account, developer profile, OneMap login, OneMap user
+
+**OneMap Access Token**:
+A time-limited JSON Web Token (JWT) issued by SLA OneMap to authorize backend API requests for geocoding and public transit routing.
+_Avoid_: OneMap API key, OneMap bearer, OneMap session
+
 **Family Preference Profile**:
 A parent-configured matching criteria profile representing a specific child or search scenario, capturing target service type, location postal anchors, household income, budget ceiling, and cost/travel trade-off weights. An authenticated parent may maintain a portfolio of multiple distinct preference profiles, each bearing a unique profile name within the parent's account.
 _Avoid_: Search filter, match config, family setting
