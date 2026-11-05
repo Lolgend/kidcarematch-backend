@@ -1,0 +1,19 @@
+{
+  "plan": {
+    "date": 1762300800000,
+    "itineraries": [
+      {
+        "duration": 1500,
+        "legs": [
+          {
+            "mode": "BUS",
+            "route": "159",
+            "duration": 1500,
+            "distance": 5000,
+            "legGeometry": null
+          }
+        ]
+      }
+    ]
+  }
+}

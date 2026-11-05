@@ -1,6 +1,6 @@
 """Preschool centre API endpoints."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated
 
 import httpx
@@ -16,7 +16,9 @@ from kidcarematch_backend.auth.security import (
     get_optional_current_user,
 )
 from kidcarematch_backend.core.commute import (
+    SGT,
     get_commute_leg,
+    get_next_representative_wednesday,
     resolve_commute_postal,
 )
 from kidcarematch_backend.core.config import settings
@@ -737,6 +739,39 @@ def get_centre_commute(
     if clean_workplace_postal is not None:
         anchors["workplace"] = workplace_coord
 
+    sample_kind = "single"
+    sampled_at: datetime | None = None
+    response_sample_pair = payload.sample_pair
+    leg1_departure: datetime | None = None
+
+    if payload.mode == "pt":
+        sample_kind = "weekday"
+        if payload.sample_pair and len(payload.sample_pair) > 0:
+            try:
+                candidate_dt = datetime.fromisoformat(payload.sample_pair[0])
+                if candidate_dt.tzinfo is None:
+                    candidate_dt = candidate_dt.replace(tzinfo=SGT)
+                else:
+                    candidate_dt = candidate_dt.astimezone(SGT)
+            except (ValueError, TypeError):
+                candidate_dt = None
+
+            if candidate_dt is not None:
+                now_sgt = datetime.now(SGT)
+                if candidate_dt < now_sgt:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="sample_expired",
+                    )
+                sampled_at = candidate_dt
+            else:
+                sampled_at = get_next_representative_wednesday()
+        else:
+            sampled_at = get_next_representative_wednesday()
+
+        leg1_departure = sampled_at
+        response_sample_pair = payload.sample_pair or [sampled_at.isoformat()]
+
     legs: list[RouteLeg] = []
 
     # Leg 1: home -> centre
@@ -769,6 +804,7 @@ def get_centre_commute(
             start=home_coord,
             end=centre_coord,
             mode=payload.mode,
+            departure=leg1_departure,
         )
     legs.append(leg1)
 
@@ -796,13 +832,37 @@ def get_centre_commute(
                 geometry=None,
                 message="Workplace postal code could not be resolved",
             )
+        elif payload.mode == "pt" and (
+            leg1.status != "available" or leg1.duration_seconds is None
+        ):
+            leg2 = RouteLeg(
+                from_anchor="centre",
+                to_anchor="workplace",
+                status="unavailable",
+                source=None,
+                duration_seconds=None,
+                distance_meters=None,
+                geometry=None,
+                message="Onward leg departure cannot be determined because first leg arrival is unavailable",
+            )
         else:
+            leg2_departure = None
+            if (
+                payload.mode == "pt"
+                and leg1_departure is not None
+                and leg1.duration_seconds is not None
+            ):
+                leg2_departure = leg1_departure + timedelta(
+                    seconds=leg1.duration_seconds
+                )
+
             leg2 = get_commute_leg(
                 from_anchor="centre",
                 to_anchor="workplace",
                 start=centre_coord,
                 end=workplace_coord,
                 mode=payload.mode,
+                departure=leg2_departure,
             )
         legs.append(leg2)
 
@@ -830,8 +890,8 @@ def get_centre_commute(
     )
 
     sample = CommuteSample(
-        kind="single",
-        sampled_at=None,
+        kind=sample_kind,
+        sampled_at=sampled_at,
         legs=legs,
         totals=totals,
     )
@@ -840,7 +900,7 @@ def get_centre_commute(
         centre_id=centre.centre_id or centre_id,
         profile_id=payload.profile_id,
         mode=payload.mode,
-        sample_pair=payload.sample_pair,
+        sample_pair=response_sample_pair,
         anchors=anchors,
         samples=[sample],
     )

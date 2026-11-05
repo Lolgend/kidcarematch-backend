@@ -1,0 +1,10 @@
+{
+  "status_message": "Found route between points",
+  "route_geometry": "sagGwhtxRsDkC",
+  "route_summary": {
+    "total_time": 900,
+    "total_distance": 3700,
+    "start_point": "ANG MO KIO AVENUE 3",
+    "end_point": "TOA PAYOH CENTRAL"
+  }
+}

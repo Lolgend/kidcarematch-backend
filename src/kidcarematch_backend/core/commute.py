@@ -1,17 +1,57 @@
 """Strict OneMap geospatial adapter for commute route display (separate from matching)."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, time, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from kidcarematch_backend.core.config import settings
-from kidcarematch_backend.schemas.commute import Coordinate, RouteLeg
+from kidcarematch_backend.schemas.commute import Coordinate, RouteLeg, TransitLeg
 
 logger = logging.getLogger(__name__)
 
+SGT: tzinfo
+try:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        SGT = ZoneInfo("Asia/Singapore")
+    except (ZoneInfoNotFoundError, OSError, KeyError, ValueError):
+        SGT = timezone(timedelta(hours=8))
+except ImportError:
+    SGT = timezone(timedelta(hours=8))
+
 # Bounded in-memory cache for verified exact-postcode resolutions
 _COMMUTE_POSTAL_CACHE: dict[str, Coordinate] = {}
+
+
+def get_next_representative_wednesday(now: datetime | None = None) -> datetime:
+    """Calculate the next upcoming Wednesday at 08:00 Asia/Singapore.
+
+    - If today is Wednesday before 08:00 SGT, use today 08:00 SGT.
+    - If today is Wednesday at or after 08:00 SGT, use next week Wednesday 08:00 SGT.
+    - If today is any other day, use the next upcoming Wednesday at 08:00 SGT.
+    """
+    if now is None:
+        now_sgt = datetime.now(SGT)
+    elif now.tzinfo is None:
+        now_sgt = now.replace(tzinfo=SGT)
+    else:
+        now_sgt = now.astimezone(SGT)
+
+    target_weekday = 2  # Wednesday (Monday=0, Tuesday=1, Wednesday=2, ...)
+    current_weekday = now_sgt.weekday()
+
+    if current_weekday == target_weekday:
+        if (now_sgt.hour, now_sgt.minute, now_sgt.second, now_sgt.microsecond) < (8, 0, 0, 0):
+            days_ahead = 0
+        else:
+            days_ahead = 7
+    else:
+        days_ahead = (target_weekday - current_weekday) % 7
+
+    target_date = (now_sgt + timedelta(days=days_ahead)).date()
+    return datetime.combine(target_date, time(8, 0, 0), tzinfo=SGT)
 
 
 def clear_commute_postal_cache() -> None:
@@ -164,11 +204,24 @@ def get_commute_leg(
     - If routing fails or geometry is missing, returns status='unavailable' with null metrics.
     - NEVER returns straight-line fallback.
     """
-    params: dict[str, str] = {
-        "start": f"{start.lat},{start.lng}",
-        "end": f"{end.lat},{end.lng}",
-        "routeType": mode,
-    }
+    if mode == "pt":
+        dep = departure or get_next_representative_wednesday()
+        params: dict[str, str | int] = {
+            "start": f"{start.lat},{start.lng}",
+            "end": f"{end.lat},{end.lng}",
+            "routeType": "pt",
+            "date": dep.strftime("%m-%d-%Y"),
+            "time": dep.strftime("%H:%M:%S"),
+            "mode": "TRANSIT",
+            "maxWalkDistance": 1000,
+            "numItineraries": 1,
+        }
+    else:
+        params = {
+            "start": f"{start.lat},{start.lng}",
+            "end": f"{end.lat},{end.lng}",
+            "routeType": mode,
+        }
 
     token = settings.ONEMAP_API_TOKEN or settings.ONEMAP_API_KEY
     headers: dict[str, str] = {}
@@ -196,6 +249,116 @@ def get_commute_leg(
                 )
                 response.raise_for_status()
                 data = response.json()
+
+        # Handle Public Transport plan / itinerary structure
+        if "plan" in data:
+            plan = data.get("plan")
+            itineraries = plan.get("itineraries") if plan else None
+            if not itineraries:
+                return RouteLeg(
+                    from_anchor=from_anchor,
+                    to_anchor=to_anchor,
+                    status="unavailable",
+                    source=None,
+                    duration_seconds=None,
+                    distance_meters=None,
+                    geometry=None,
+                    message="No public transport itinerary found",
+                )
+            itinerary = itineraries[0]
+            raw_legs = itinerary.get("legs") or []
+            transit_legs: list[TransitLeg] = []
+            all_coords: list[Coordinate] = []
+
+            for raw_leg in raw_legs:
+                sub_mode = str(raw_leg.get("mode", "TRANSIT")).upper()
+                sub_duration = float(raw_leg.get("duration", 0))
+                sub_distance = float(raw_leg.get("distance", 0))
+                sub_route = (
+                    raw_leg.get("route")
+                    or raw_leg.get("routeShortName")
+                    or raw_leg.get("routeLongName")
+                )
+                if sub_route:
+                    sub_route = str(sub_route)
+
+                geom_val = raw_leg.get("legGeometry")
+                if isinstance(geom_val, dict):
+                    geom_poly = geom_val.get("points") or ""
+                elif isinstance(geom_val, str):
+                    geom_poly = geom_val
+                else:
+                    geom_poly = ""
+
+                sub_coords = decode_polyline(geom_poly) if geom_poly else []
+                if sub_coords:
+                    all_coords.extend(sub_coords)
+
+                instruction = raw_leg.get("instruction")
+                if not instruction:
+                    if sub_mode == "WALK":
+                        dist_fmt = (
+                            f"{int(sub_distance)} m"
+                            if sub_distance < 1000
+                            else f"{sub_distance / 1000:.1f} km"
+                        )
+                        instruction = f"Walk ({dist_fmt})"
+                    elif sub_route:
+                        instruction = f"Take {sub_mode.title()} {sub_route}"
+                    else:
+                        instruction = f"Take {sub_mode.title()}"
+
+                transit_legs.append(
+                    TransitLeg(
+                        mode=sub_mode,
+                        duration_seconds=sub_duration,
+                        distance_meters=sub_distance,
+                        route=sub_route,
+                        instruction=instruction,
+                        geometry=sub_coords if sub_coords else None,
+                    )
+                )
+
+            if not all_coords:
+                top_poly = itinerary.get("route_geometry") or data.get(
+                    "route_geometry"
+                )
+                if top_poly and isinstance(top_poly, str):
+                    all_coords = decode_polyline(top_poly)
+
+            if not all_coords:
+                return RouteLeg(
+                    from_anchor=from_anchor,
+                    to_anchor=to_anchor,
+                    status="unavailable",
+                    source=None,
+                    duration_seconds=None,
+                    distance_meters=None,
+                    geometry=None,
+                    message="Route geometry unavailable",
+                )
+
+            duration_secs = float(
+                itinerary.get(
+                    "duration",
+                    sum(t.duration_seconds or 0 for t in transit_legs),
+                )
+            )
+            total_dist = sum(t.distance_meters or 0 for t in transit_legs)
+            if total_dist == 0 and "walkDistance" in itinerary:
+                total_dist = float(itinerary.get("walkDistance", 0))
+
+            return RouteLeg(
+                from_anchor=from_anchor,
+                to_anchor=to_anchor,
+                status="available",
+                source="onemap",
+                duration_seconds=duration_secs,
+                distance_meters=total_dist,
+                geometry=all_coords,
+                message=None,
+                transit_legs=transit_legs if transit_legs else None,
+            )
 
         route_geometry = data.get("route_geometry")
         if not route_geometry or not isinstance(route_geometry, str):

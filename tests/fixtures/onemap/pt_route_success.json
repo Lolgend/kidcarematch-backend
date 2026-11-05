@@ -1,0 +1,41 @@
+{
+  "plan": {
+    "date": 1762300800000,
+    "itineraries": [
+      {
+        "duration": 1500,
+        "walkTime": 600,
+        "transitTime": 900,
+        "waitingTime": 0,
+        "walkDistance": 500.0,
+        "legs": [
+          {
+            "mode": "WALK",
+            "duration": 300,
+            "distance": 250,
+            "legGeometry": {
+              "points": "sagGwhtxRsDkC"
+            }
+          },
+          {
+            "mode": "BUS",
+            "route": "159",
+            "duration": 900,
+            "distance": 4500,
+            "legGeometry": {
+              "points": "sagGwhtxRsDkC"
+            }
+          },
+          {
+            "mode": "WALK",
+            "duration": 300,
+            "distance": 250,
+            "legGeometry": {
+              "points": "sagGwhtxRsDkC"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

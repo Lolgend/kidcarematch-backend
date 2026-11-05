@@ -21,6 +21,15 @@ class RouteTotals(BaseModel):
     distance_meters: float
 
 
+class TransitLeg(BaseModel):
+    mode: str
+    duration_seconds: float | None = None
+    distance_meters: float | None = None
+    route: str | None = None
+    instruction: str | None = None
+    geometry: list[Coordinate] | None = None
+
+
 class RouteLeg(BaseModel):
     from_anchor: str
     to_anchor: str
@@ -30,6 +39,7 @@ class RouteLeg(BaseModel):
     distance_meters: float | None = None
     geometry: list[Coordinate] | None = None
     message: str | None = None
+    transit_legs: list[TransitLeg] | None = None
 
 
 class CommuteSample(BaseModel):

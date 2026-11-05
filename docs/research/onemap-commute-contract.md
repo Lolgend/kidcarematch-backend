@@ -66,7 +66,87 @@ It documents request shapes, authentication, response schemas, geometry encoding
   - OneMap driving routing does not offer verified historical/predictive time-of-day traffic matrices.
   - For driving, the display contract issues a **single representative estimate** with sample kind `"single"`. No invented or synthetic weekday vs weekend traffic difference is returned.
 
-## 4. Leg Failure & Fallback Policy
+## 4. Public Transport Routing Contract (`routeType=pt`)
+
+- **Endpoint**: `https://www.onemap.gov.sg/api/public/routingsvc/route`
+- **Method**: `GET`
+- **Parameters**:
+  - `start`: `"{start_lat},{start_lng}"` (WGS84 decimal degrees, e.g. `"1.3691,103.8512"`)
+  - `end`: `"{end_lat},{end_lng}"` (WGS84 decimal degrees, e.g. `"1.3521,103.8198"`)
+  - `routeType`: `"pt"`
+  - `date`: `"{MM-DD-YYYY}"` (e.g. `"11-11-2026"`, next representative Wednesday)
+  - `time`: `"{HH:MM:SS}"` (e.g. `"08:00:00"`)
+  - `mode`: `"TRANSIT"`
+  - `maxWalkDistance`: `1000`
+  - `numItineraries`: `1`
+- **Response Structure**:
+  ```json
+  {
+    "plan": {
+      "date": 1762300800000,
+      "itineraries": [
+        {
+          "duration": 1500,
+          "walkTime": 600,
+          "transitTime": 900,
+          "waitingTime": 0,
+          "walkDistance": 500.0,
+          "legs": [
+            {
+              "mode": "WALK",
+              "duration": 300,
+              "distance": 250,
+              "legGeometry": { "points": "sagGwhtxRsDkC..." }
+            },
+            {
+              "mode": "BUS",
+              "route": "159",
+              "duration": 900,
+              "distance": 4500,
+              "legGeometry": { "points": "sagGwhtxRsDkC..." }
+            },
+            {
+              "mode": "WALK",
+              "duration": 300,
+              "distance": 250,
+              "legGeometry": { "points": "sagGwhtxRsDkC..." }
+            }
+          ]
+        }
+      ]
+    }
+  }
+  ```
+- **Units & Normalization**:
+  - `itinerary.duration`: Total journey duration in seconds (`duration_seconds`).
+  - `sub_leg.distance`: Sub-leg distance in meters. Summed across legs for journey `distance_meters`.
+  - `itinerary.legs`: Parsed into `TransitLeg` objects capturing mode (`WALK`, `BUS`, `SUBWAY`), route designation, duration, distance, and per-leg geometry.
+- **Geometry**:
+  - Per-leg encoded polylines extracted from `legGeometry.points` and combined into complete leg geometry.
+  - If geometry is missing or decoded geometry is empty, status is `unavailable`.
+- **Representative Weekday Sampling & Sequential Onward Timing**:
+  - Evaluated at 08:00 Asia/Singapore on the next upcoming Wednesday (`kind="weekday"`).
+  - When workplace is present, Leg 2 (centre -> workplace) departs at Leg 1 estimated arrival time (`first_leg_arrival = departure + duration_seconds`) with 0 added drop-off duration.
+  - If Leg 1 arrival cannot be determined, Leg 2 is marked `unavailable` without making an invented onward request.
+  - Totals are withheld when any requested leg fails.
+  - NEVER fall back to straight-line approximations.
+
+## 5. Walking and Cycling Routing Contracts (`routeType=walk`, `routeType=cycle`)
+
+- **Endpoints**: Same OneMap routing endpoint (`https://www.onemap.gov.sg/api/public/routingsvc/route`)
+- **Method**: `GET`
+- **Parameters**:
+  - `start`: `"{start_lat},{start_lng}"`
+  - `end`: `"{end_lat},{end_lng}"`
+  - `routeType`: `"walk"` for walking, `"cycle"` for cycling
+- **Response Structure & Units**:
+  - Exactly matches the driving response structure with `route_geometry` (Google encoded polyline), `route_summary.total_time` in seconds, and `route_summary.total_distance` in meters.
+- **Day-Dependent Variation**:
+  - Walking and cycling do not have date- or time-dependent timetable schedules or variable congestion models in OneMap.
+  - Returns a single representative estimate with sample kind `"single"`.
+  - The UI and backend display contract present a single estimate without synthetic weekday or weekend differences.
+
+## 5. Leg Failure & Fallback Policy
 
 - Unlike matching algorithms (which use straight-line approximations for candidate ranking under ADR-0007), the **commute display contract strictly forbids straight-line fallback**.
 - If OneMap routing fails, times out, returns HTTP error, or yields unusable geometry:
