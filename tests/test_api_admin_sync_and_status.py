@@ -1,5 +1,6 @@
 """Tests for administrative ECDA dataset synchronization and external API health monitoring endpoints."""
 
+import time
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -9,7 +10,10 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, create_engine
 from sqlmodel.pool import StaticPool
 
+from kidcarematch_backend.api.v1.admin.status import probe_onemap_api
 from kidcarematch_backend.auth.security import FirebaseTokenClaims, get_token_claims
+from kidcarematch_backend.core.config import settings
+from kidcarematch_backend.core.onemap import onemap_token_manager
 from kidcarematch_backend.db.db import (
     AccountStatus,
     ExternalDataSourceStatus,
@@ -536,3 +540,350 @@ def test_status_refresh_preserves_last_successful_sync_on_probe_failure(
         assert hb.last_successful_sync == earlier_success
         assert hb.last_attempted_sync is not None
         assert hb.last_attempted_sync > earlier_success
+
+
+# --- OneMap Authentication Health Observability Tests (Ticket #76) ---
+
+
+def test_get_status_fresh_database_onemap_defaults(client: TestClient, seed_admin_user):
+    """GET /api/v1/admin/status on a fresh DB defaults ONEMAP_API to IDLE with 0 records and no errors."""
+    mock_claims = FirebaseTokenClaims(uid=seed_admin_user.firebase_uid, email=seed_admin_user.email)
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+
+    response = client.get(
+        "/api/v1/admin/status",
+        headers={"Authorization": "Bearer mock-admin-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    status_map = {item["source_id"]: item for item in data}
+
+    assert "ONEMAP_API" in status_map
+    onemap = status_map["ONEMAP_API"]
+    assert onemap["source_name"] == "OneMap Geocoding & Mapping API"
+    assert onemap["sync_state"] == "IDLE"
+    assert onemap["records_processed"] == 0
+    assert onemap["last_successful_sync"] is None
+    assert onemap["last_attempted_sync"] is None
+    assert onemap["error_message"] is None
+
+
+def test_status_refresh_onemap_authenticated_success(
+    client: TestClient,
+    seed_admin_user,
+    monkeypatch,
+):
+    """POST /api/v1/admin/status/refresh acquires token and executes authenticated search probe returning SUCCESS."""
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", "probe_admin@example.com")
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", "probe_secret_password")
+    monkeypatch.setattr(settings, "ONEMAP_API_TOKEN", None)
+    onemap_token_manager.invalidate_token()
+
+    mock_claims = FirebaseTokenClaims(uid=seed_admin_user.firebase_uid, email=seed_admin_user.email)
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+
+    auth_called = False
+    search_called = False
+    orig_post = httpx.Client.post
+    orig_get = httpx.Client.get
+
+    def mock_post(client_self, url, *args, **kwargs):
+        nonlocal auth_called
+        url_str = str(url)
+        if "getToken" in url_str:
+            auth_called = True
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {
+                "access_token": "probe-svc-token-success-xyz",
+                "expiry_timestamp": time.time() + 3600,
+            }
+            resp.raise_for_status = MagicMock()
+            return resp
+        return orig_post(client_self, url, *args, **kwargs)
+
+    def mock_get(client_self, url, *args, **kwargs):
+        nonlocal search_called
+        url_str = str(url)
+        headers = kwargs.get("headers", {})
+        if "elastic/search" in url_str:
+            search_called = True
+            assert headers.get("Authorization") == "Bearer probe-svc-token-success-xyz"
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"found": 1, "results": []}
+            resp.raise_for_status = MagicMock()
+            return resp
+        if "data.gov.sg" in url_str:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"success": True}
+            resp.raise_for_status = MagicMock()
+            return resp
+        return orig_get(client_self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    response = client.post(
+        "/api/v1/admin/status/refresh",
+        headers={"Authorization": "Bearer mock-admin-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    status_map = {item["source_id"]: item for item in data}
+
+    assert auth_called is True
+    assert search_called is True
+    assert status_map["ONEMAP_API"]["sync_state"] == "SUCCESS"
+    assert status_map["ONEMAP_API"]["error_message"] is None
+    assert status_map["ONEMAP_API"]["last_attempted_sync"] is not None
+
+    # Follow-up GET must also reflect SUCCESS
+    get_resp = client.get(
+        "/api/v1/admin/status",
+        headers={"Authorization": "Bearer mock-admin-token"},
+    )
+    assert get_resp.status_code == 200
+    get_map = {item["source_id"]: item for item in get_resp.json()}
+    assert get_map["ONEMAP_API"]["sync_state"] == "SUCCESS"
+    assert get_map["ONEMAP_API"]["error_message"] is None
+
+
+def test_status_refresh_onemap_authenticated_token_failure_401(
+    client: TestClient,
+    seed_admin_user,
+    monkeypatch,
+):
+    """POST /api/v1/admin/status/refresh marks ONEMAP_API as FAILED with diagnostic message when token auth fails."""
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", "probe_admin@example.com")
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", "wrong_credentials")
+    monkeypatch.setattr(settings, "ONEMAP_API_TOKEN", None)
+    onemap_token_manager.invalidate_token()
+
+    mock_claims = FirebaseTokenClaims(uid=seed_admin_user.firebase_uid, email=seed_admin_user.email)
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+    orig_post = httpx.Client.post
+    orig_get = httpx.Client.get
+
+    def mock_post(client_self, url, *args, **kwargs):
+        url_str = str(url)
+        if "getToken" in url_str:
+            resp = MagicMock()
+            resp.status_code = 401
+            resp.text = "Unauthorized: Invalid credentials"
+            resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+                "401 Unauthorized", request=MagicMock(), response=resp
+            )
+            return resp
+        return orig_post(client_self, url, *args, **kwargs)
+
+    def mock_get(client_self, url, *args, **kwargs):
+        url_str = str(url)
+        if "data.gov.sg" in url_str:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"success": True}
+            resp.raise_for_status = MagicMock()
+            return resp
+        return orig_get(client_self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    response = client.post(
+        "/api/v1/admin/status/refresh",
+        headers={"Authorization": "Bearer mock-admin-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    status_map = {item["source_id"]: item for item in data}
+
+    assert status_map["ONEMAP_API"]["sync_state"] == "FAILED"
+    assert status_map["ONEMAP_API"]["error_message"] is not None
+    assert "OneMap authentication failed" in status_map["ONEMAP_API"]["error_message"]
+
+    # Verify GET /api/v1/admin/status reports FAILED and diagnostic message
+    get_resp = client.get(
+        "/api/v1/admin/status",
+        headers={"Authorization": "Bearer mock-admin-token"},
+    )
+    assert get_resp.status_code == 200
+    get_map = {item["source_id"]: item for item in get_resp.json()}
+    assert get_map["ONEMAP_API"]["sync_state"] == "FAILED"
+    assert "OneMap authentication failed" in get_map["ONEMAP_API"]["error_message"]
+
+
+def test_status_refresh_onemap_authenticated_token_network_error(
+    client: TestClient,
+    seed_admin_user,
+    monkeypatch,
+):
+    """POST /api/v1/admin/status/refresh reports FAILED when token manager encounters network error."""
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", "probe_admin@example.com")
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", "probe_secret_password")
+    monkeypatch.setattr(settings, "ONEMAP_API_TOKEN", None)
+    onemap_token_manager.invalidate_token()
+
+    mock_claims = FirebaseTokenClaims(uid=seed_admin_user.firebase_uid, email=seed_admin_user.email)
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+    orig_post = httpx.Client.post
+    orig_get = httpx.Client.get
+
+    def mock_post(client_self, url, *args, **kwargs):
+        url_str = str(url)
+        if "getToken" in url_str:
+            raise httpx.ConnectError("Connection refused by auth endpoint")
+        return orig_post(client_self, url, *args, **kwargs)
+
+    def mock_get(client_self, url, *args, **kwargs):
+        url_str = str(url)
+        if "data.gov.sg" in url_str:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"success": True}
+            resp.raise_for_status = MagicMock()
+            return resp
+        return orig_get(client_self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    response = client.post(
+        "/api/v1/admin/status/refresh",
+        headers={"Authorization": "Bearer mock-admin-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    status_map = {item["source_id"]: item for item in data}
+
+    assert status_map["ONEMAP_API"]["sync_state"] == "FAILED"
+    assert "OneMap authentication failed" in status_map["ONEMAP_API"]["error_message"]
+
+
+def test_status_refresh_onemap_unauthenticated_without_credentials(
+    client: TestClient,
+    seed_admin_user,
+    monkeypatch,
+):
+    """POST /api/v1/admin/status/refresh executes unauthenticated public probe when credentials not configured."""
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", None)
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", None)
+    monkeypatch.setattr(settings, "ONEMAP_API_TOKEN", None)
+    onemap_token_manager.invalidate_token()
+
+    mock_claims = FirebaseTokenClaims(uid=seed_admin_user.firebase_uid, email=seed_admin_user.email)
+    app.dependency_overrides[get_token_claims] = lambda: mock_claims
+
+    search_headers_captured: dict[str, str] = {}
+    orig_get = httpx.Client.get
+
+    def mock_get(client_self, url, *args, **kwargs):
+        nonlocal search_headers_captured
+        url_str = str(url)
+        if "elastic/search" in url_str:
+            search_headers_captured = kwargs.get("headers", {})
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"found": 1, "results": []}
+            resp.raise_for_status = MagicMock()
+            return resp
+        if "data.gov.sg" in url_str:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"success": True}
+            resp.raise_for_status = MagicMock()
+            return resp
+        return orig_get(client_self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    response = client.post(
+        "/api/v1/admin/status/refresh",
+        headers={"Authorization": "Bearer mock-admin-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    status_map = {item["source_id"]: item for item in data}
+
+    assert "Authorization" not in search_headers_captured
+    assert status_map["ONEMAP_API"]["sync_state"] == "SUCCESS"
+    assert status_map["ONEMAP_API"]["error_message"] is None
+
+
+def test_probe_onemap_api_unit_behavior(monkeypatch):
+    """Unit tests for probe_onemap_api helper covering auth success, failure, 401 eviction, and public probe."""
+    # 1. Configured credentials + valid token + search 200 -> (True, None)
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", "svc@example.com")
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", "pass")
+    monkeypatch.setattr(settings, "ONEMAP_API_TOKEN", None)
+    onemap_token_manager.invalidate_token()
+
+    def mock_post(client_self, url, *args, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"access_token": "valid-token-abc", "expiry_timestamp": time.time() + 1000}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def mock_get_200(client_self, url, *args, **kwargs):
+        assert kwargs.get("headers", {}).get("Authorization") == "Bearer valid-token-abc"
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+    monkeypatch.setattr(httpx.Client, "get", mock_get_200)
+
+    with httpx.Client() as client:
+        ok, err = probe_onemap_api(client)
+        assert ok is True
+        assert err is None
+
+    # 2. Configured credentials + token manager raises exception -> (False, "OneMap authentication failed: ...")
+    def mock_get_valid_token_raising(*args, **kwargs):
+        raise httpx.RequestError("Upstream timeout")
+
+    monkeypatch.setattr(onemap_token_manager, "get_valid_token", mock_get_valid_token_raising)
+
+    with httpx.Client() as client:
+        ok, err = probe_onemap_api(client)
+        assert ok is False
+        assert err is not None
+        assert err.startswith("OneMap authentication failed: Upstream timeout")
+
+    # 3. Configured credentials + token manager returns None -> (False, "OneMap authentication failed: ...")
+    monkeypatch.setattr(onemap_token_manager, "get_valid_token", lambda *args, **kwargs: None)
+    with httpx.Client() as client:
+        ok, err = probe_onemap_api(client)
+        assert ok is False
+        assert err is not None
+        assert "OneMap authentication failed" in err
+        assert "Invalid credentials or token acquisition failed" in err
+
+    # 4. Search endpoint returns 401 -> invalidates token and returns (False, err)
+    onemap_token_manager.invalidate_token()
+    monkeypatch.undo()  # restore real methods
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", "svc@example.com")
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", "pass")
+    monkeypatch.setattr(settings, "ONEMAP_API_TOKEN", None)
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    def mock_get_401(client_self, url, *args, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 401
+        resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "401 Unauthorized", request=MagicMock(), response=resp
+        )
+        return resp
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get_401)
+
+    with httpx.Client() as client:
+        ok, err = probe_onemap_api(client)
+        assert ok is False
+        assert "401" in str(err)
+        assert onemap_token_manager.token is None
+
