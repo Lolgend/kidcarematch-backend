@@ -1,0 +1,8 @@
+{
+  "status_message": "Found route between points",
+  "route_geometry": null,
+  "route_summary": {
+    "total_time": 840,
+    "total_distance": 6800
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "found": 2,
+  "results": [
+    {
+      "SEARCHVAL": "SOME DISTANT PLACE",
+      "POSTAL": "560999",
+      "LATITUDE": "1.380000",
+      "LONGITUDE": "103.860000"
+    },
+    {
+      "SEARCHVAL": "ANG MO KIO BLK 123",
+      "POSTAL": "560123",
+      "LATITUDE": "1.369145",
+      "LONGITUDE": "103.851234"
+    }
+  ]
+}

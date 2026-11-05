@@ -11,8 +11,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from kidcarematch_backend.auth.security import (
+    get_current_parent,
     get_current_user,
     get_optional_current_user,
+)
+from kidcarematch_backend.core.commute import (
+    get_commute_leg,
+    resolve_commute_postal,
 )
 from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.core.matching import (
@@ -31,6 +36,7 @@ from kidcarematch_backend.core.postal_districts import (
 from kidcarematch_backend.db.db import (
     CitizenshipType,
     ExternalDataSourceStatus,
+    FamilyPreferenceProfile,
     ModerationStatus,
     PreschoolCentre,
     PreschoolLevel,
@@ -54,6 +60,16 @@ from kidcarematch_backend.schemas.centre import (
     PreschoolServiceResponse,
     ReviewSummaryResponse,
     VacancyRecordResponse,
+)
+from kidcarematch_backend.schemas.commute import (
+    CommuteRequest,
+    CommuteResponse,
+    CommuteSample,
+    RouteLeg,
+    RouteTotals,
+)
+from kidcarematch_backend.schemas.commute import (
+    Coordinate as CommuteCoordinate,
 )
 from kidcarematch_backend.schemas.match import (
     CentreMatchRequest,
@@ -661,6 +677,172 @@ def get_centre_location(
         centre_id=centre.centre_id or centre_id,
         coordinate=None,
         status="unavailable",
+    )
+
+
+@router.post(
+    "/{centre_id}/commute",
+    response_model=CommuteResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get personalised commute comparison to preschool centre",
+)
+def get_centre_commute(
+    centre_id: int,
+    payload: CommuteRequest,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_parent)],
+) -> CommuteResponse:
+    """Calculate personalised commute route(s) from home through centre (and optional workplace)."""
+    centre = session.get(PreschoolCentre, centre_id)
+    if not centre:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Centre not found",
+        )
+
+    profile = session.get(FamilyPreferenceProfile, str(payload.profile_id))
+    if not profile or profile.user_id != current_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Preference profile not found",
+        )
+
+    if payload.mode not in ("drive", "pt", "walk", "cycle"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid travel mode",
+        )
+
+    clean_centre_postal = (centre.postal or "").strip()
+    centre_coord = resolve_commute_postal(clean_centre_postal)
+
+    clean_home_postal = (profile.home_postal_code or "").strip()
+    home_coord = resolve_commute_postal(clean_home_postal)
+
+    clean_workplace_postal = (
+        profile.workplace_postal_code.strip()
+        if profile.workplace_postal_code
+        else None
+    )
+    workplace_coord = (
+        resolve_commute_postal(clean_workplace_postal)
+        if clean_workplace_postal
+        else None
+    )
+
+    anchors: dict[str, CommuteCoordinate | None] = {
+        "home": home_coord,
+        "centre": centre_coord,
+    }
+    if clean_workplace_postal is not None:
+        anchors["workplace"] = workplace_coord
+
+    legs: list[RouteLeg] = []
+
+    # Leg 1: home -> centre
+    if not home_coord:
+        leg1 = RouteLeg(
+            from_anchor="home",
+            to_anchor="centre",
+            status="unavailable",
+            source=None,
+            duration_seconds=None,
+            distance_meters=None,
+            geometry=None,
+            message="Home postal code could not be resolved",
+        )
+    elif not centre_coord:
+        leg1 = RouteLeg(
+            from_anchor="home",
+            to_anchor="centre",
+            status="unavailable",
+            source=None,
+            duration_seconds=None,
+            distance_meters=None,
+            geometry=None,
+            message="Centre postal code could not be resolved",
+        )
+    else:
+        leg1 = get_commute_leg(
+            from_anchor="home",
+            to_anchor="centre",
+            start=home_coord,
+            end=centre_coord,
+            mode=payload.mode,
+        )
+    legs.append(leg1)
+
+    # Leg 2: centre -> workplace (if workplace postal provided)
+    if clean_workplace_postal is not None:
+        if not centre_coord:
+            leg2 = RouteLeg(
+                from_anchor="centre",
+                to_anchor="workplace",
+                status="unavailable",
+                source=None,
+                duration_seconds=None,
+                distance_meters=None,
+                geometry=None,
+                message="Centre postal code could not be resolved",
+            )
+        elif not workplace_coord:
+            leg2 = RouteLeg(
+                from_anchor="centre",
+                to_anchor="workplace",
+                status="unavailable",
+                source=None,
+                duration_seconds=None,
+                distance_meters=None,
+                geometry=None,
+                message="Workplace postal code could not be resolved",
+            )
+        else:
+            leg2 = get_commute_leg(
+                from_anchor="centre",
+                to_anchor="workplace",
+                start=centre_coord,
+                end=workplace_coord,
+                mode=payload.mode,
+            )
+        legs.append(leg2)
+
+    all_available = all(
+        leg.status == "available"
+        and leg.duration_seconds is not None
+        and leg.distance_meters is not None
+        for leg in legs
+    )
+    totals = (
+        RouteTotals(
+            duration_seconds=sum(
+                leg.duration_seconds
+                for leg in legs
+                if leg.duration_seconds is not None
+            ),
+            distance_meters=sum(
+                leg.distance_meters
+                for leg in legs
+                if leg.distance_meters is not None
+            ),
+        )
+        if all_available
+        else None
+    )
+
+    sample = CommuteSample(
+        kind="single",
+        sampled_at=None,
+        legs=legs,
+        totals=totals,
+    )
+
+    return CommuteResponse(
+        centre_id=centre.centre_id or centre_id,
+        profile_id=payload.profile_id,
+        mode=payload.mode,
+        sample_pair=payload.sample_pair,
+        anchors=anchors,
+        samples=[sample],
     )
 
 
