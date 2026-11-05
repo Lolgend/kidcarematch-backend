@@ -1,6 +1,7 @@
 """Tests for Multi-Criteria Centre Matching API endpoint (POST /api/v1/centres/match - Ticket #68)."""
 
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -17,6 +18,7 @@ from kidcarematch_backend.auth.security import (
     get_token_claims,
 )
 from kidcarematch_backend.core.config import settings
+from kidcarematch_backend.core.onemap import onemap_token_manager
 from kidcarematch_backend.db.db import (
     AccountStatus,
     ApplicantStatus,
@@ -1436,8 +1438,20 @@ def setup_onemap_mock(
     postal_coords: dict[str, tuple[float, float]] | None = None,
     route_durations: dict[str, int] | None = None,
     route_fails: bool = False,
+    auth_token: str = "mock-onemap-token-jwt",
+    token_fails: bool = False,
+    auth_call_count: dict[str, int] | None = None,
+    route_401_first_n: int = 0,
+    search_401_first_n: int = 0,
+    recorded_headers: list[dict[str, str]] | None = None,
 ):
-    """Setup mock for OneMap search (geocoding) and routing endpoints."""
+    """Setup mock for OneMap auth, search (geocoding), and routing endpoints."""
+    onemap_token_manager.invalidate_token()
+
+    route_401_remaining = {"count": route_401_first_n}
+    search_401_remaining = {"count": search_401_first_n}
+    auth_calls = auth_call_count if auth_call_count is not None else {"count": 0}
+
     default_coords = {
         "560123": (1.3691, 103.8512),  # Ang Mo Kio (Home)
         "560124": (1.3695, 103.8520),  # Close to Home
@@ -1451,11 +1465,57 @@ def setup_onemap_mock(
     route_call_count = {"count": 0}
 
     original_get = httpx.Client.get
+    original_post = httpx.Client.post
+
+    def mock_post(self, url, *args, **kwargs):
+        url_str = str(url)
+        if "onemap.gov.sg/api/auth/post/getToken" in url_str:
+            auth_calls["count"] += 1
+            if token_fails:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 401
+
+                def _raise_auth():
+                    req = httpx.Request("POST", url)
+                    resp = httpx.Response(401, request=req)
+                    raise httpx.HTTPStatusError("401 Unauthorized", request=req, response=resp)
+
+                mock_resp.raise_for_status = _raise_auth
+                mock_resp.json.return_value = {"error": "Invalid service account credentials"}
+                return mock_resp
+
+            token = f"{auth_token}-v{auth_calls['count']}" if auth_calls["count"] > 1 else auth_token
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "access_token": token,
+                "expiry_timestamp": time.time() + 86400,
+            }
+            mock_resp.raise_for_status = MagicMock()
+            return mock_resp
+        return original_post(self, url, *args, **kwargs)
 
     def mock_get(self, url, *args, **kwargs):
         url_str = str(url)
+        if recorded_headers is not None:
+            recorded_headers.append(dict(kwargs.get("headers") or {}))
+
         if "onemap.gov.sg/api/common/elastic/search" in url_str:
             search_call_count["count"] += 1
+            if search_401_remaining["count"] > 0:
+                search_401_remaining["count"] -= 1
+                mock_resp = MagicMock()
+                mock_resp.status_code = 401
+
+                def _raise_search():
+                    req = httpx.Request("GET", url)
+                    resp = httpx.Response(401, request=req)
+                    raise httpx.HTTPStatusError("401 Unauthorized", request=req, response=resp)
+
+                mock_resp.raise_for_status = _raise_search
+                mock_resp.json.return_value = {"error": "Unauthorized"}
+                return mock_resp
+
             params = kwargs.get("params", {})
             postal = str(params.get("searchVal", "")).strip()
             if postal in coords_table:
@@ -1492,6 +1552,20 @@ def setup_onemap_mock(
             if route_fails:
                 raise httpx.ConnectError("OneMap Routing service unavailable")
 
+            if route_401_remaining["count"] > 0:
+                route_401_remaining["count"] -= 1
+                mock_resp = MagicMock()
+                mock_resp.status_code = 401
+
+                def _raise_route():
+                    req = httpx.Request("GET", url)
+                    resp = httpx.Response(401, request=req)
+                    raise httpx.HTTPStatusError("401 Unauthorized", request=req, response=resp)
+
+                mock_resp.raise_for_status = _raise_route
+                mock_resp.json.return_value = {"error": "Unauthorized"}
+                return mock_resp
+
             params = kwargs.get("params", {})
             start_str = str(params.get("start", ""))
             end_str = str(params.get("end", ""))
@@ -1526,6 +1600,7 @@ def setup_onemap_mock(
         return original_get(self, url, *args, **kwargs)
 
     monkeypatch.setattr(httpx.Client, "get", mock_get)
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
     return search_call_count, route_call_count
 
 
@@ -2385,3 +2460,182 @@ def test_match_prompt_structure_includes_search_params_and_candidate_breakdowns(
         assert "Cost Fit" in contents
         assert "Travel Fit" in contents
         assert "Payable Fee" in contents or "payable fee" in contents.lower()
+
+
+# ==============================================================================
+# OneMap Service Account Dynamic Token & Reactive 401 Tests (Ticket #75)
+# ==============================================================================
+
+
+def test_match_endpoint_with_authenticated_onemap_service_account(
+    client: TestClient, test_engine, monkeypatch
+):
+    """End-to-end matching succeeds with authenticated OneMap dynamic token management."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_id=601,
+            centre_code="C_AUTH_01",
+            centre_name="Authenticated Centre",
+            postal="560124",
+        )
+        s1 = PreschoolService(
+            centre_id=601,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1000.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v1 = VacancyRecord(
+            record_id="v_auth_01",
+            centre_id=601,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+        session.add_all([c1, s1, v1])
+        session.commit()
+
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", "svc_account@example.com")
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", "valid_secret_pass")
+
+    auth_calls = {"count": 0}
+    recorded_headers: list[dict[str, str]] = []
+    setup_onemap_mock(
+        monkeypatch,
+        auth_call_count=auth_calls,
+        recorded_headers=recorded_headers,
+    )
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "workplace_postal_code": "048581",
+        "top_n": 5,
+    }
+
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["results"]) >= 1
+    assert auth_calls["count"] >= 1
+    # Verify Authorization header was sent in OneMap requests
+    bearer_headers = [h["Authorization"] for h in recorded_headers if "Authorization" in h]
+    assert len(bearer_headers) > 0
+    assert any("Bearer mock-onemap-token-jwt" in b for b in bearer_headers)
+
+
+def test_match_endpoint_reactive_401_retry_on_routing(
+    client: TestClient, test_engine, monkeypatch
+):
+    """401 Unauthorized during match routing triggers token invalidation, refresh, and successful retry."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_id=602,
+            centre_code="C_AUTH_02",
+            centre_name="Retry Centre",
+            postal="560124",
+        )
+        s1 = PreschoolService(
+            centre_id=602,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1000.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v1 = VacancyRecord(
+            record_id="v_auth_02",
+            centre_id=602,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+        session.add_all([c1, s1, v1])
+        session.commit()
+
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", "svc_account@example.com")
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", "valid_secret_pass")
+
+    auth_calls = {"count": 0}
+    setup_onemap_mock(
+        monkeypatch,
+        route_401_first_n=1,
+        auth_call_count=auth_calls,
+    )
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "workplace_postal_code": "048581",
+        "top_n": 1,
+    }
+
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["results"]) == 1
+    # Two token fetches: initial + refresh after 401
+    assert auth_calls["count"] >= 2
+
+
+def test_match_endpoint_unrecoverable_auth_failure_graceful_fallback(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Unrecoverable authentication or routing failure degrades gracefully without crashing the match response."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_id=603,
+            centre_code="C_AUTH_03",
+            centre_name="Unauth Fallback Centre",
+            postal="560124",
+        )
+        s1 = PreschoolService(
+            centre_id=603,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1000.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v1 = VacancyRecord(
+            record_id="v_auth_03",
+            centre_id=603,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+        session.add_all([c1, s1, v1])
+        session.commit()
+
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", "svc_account@example.com")
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", "bad_password")
+
+    setup_onemap_mock(
+        monkeypatch,
+        token_fails=True,
+        route_401_first_n=999,
+    )
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "workplace_postal_code": "048581",
+        "top_n": 1,
+    }
+
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["results"]) == 1
+    item = data["results"][0]
+    assert item["travel_fit_score"] == 100.0
+    assert item["travel_breakdown"] is not None
+    assert item["travel_breakdown"]["commute_distance_km"] is not None
+    assert item["travel_breakdown"]["commute_duration_mins"] is not None

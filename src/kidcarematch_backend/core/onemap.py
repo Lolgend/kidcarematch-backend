@@ -200,6 +200,24 @@ def estimate_transit_duration_mins(distance_km: float) -> float:
     return max(1.0, round(duration_mins, 1))
 
 
+def _fetch_onemap_search(
+    params: dict[str, str | int],
+    client: httpx.Client,
+) -> httpx.Response:
+    """Execute OneMap Search API call with dynamic auth headers and reactive 401 retry."""
+    headers = onemap_token_manager.get_auth_headers(client=client)
+    response = client.get(
+        settings.ONEMAP_API_URL, params=params, headers=headers, timeout=5.0
+    )
+    if response.status_code == 401:
+        onemap_token_manager.invalidate_token()
+        retry_headers = onemap_token_manager.get_auth_headers(client=client)
+        response = client.get(
+            settings.ONEMAP_API_URL, params=params, headers=retry_headers, timeout=5.0
+        )
+    return response
+
+
 def resolve_postal_coordinates(
     postal: str | None,
     session: Session,
@@ -231,18 +249,13 @@ def resolve_postal_coordinates(
 
     try:
         if client is not None:
-            response = client.get(
-                settings.ONEMAP_API_URL, params=params, timeout=5.0
-            )
-            response.raise_for_status()
-            data = response.json()
+            response = _fetch_onemap_search(params=params, client=client)
         else:
             with httpx.Client(timeout=5.0) as http_client:
-                response = http_client.get(
-                    settings.ONEMAP_API_URL, params=params
-                )
-                response.raise_for_status()
-                data = response.json()
+                response = _fetch_onemap_search(params=params, client=http_client)
+
+        response.raise_for_status()
+        data = response.json()
 
         if data.get("found", 0) > 0 and data.get("results"):
             first = data["results"][0]
@@ -324,6 +337,30 @@ def resolve_coordinates_batch(
     return result_map
 
 
+def _fetch_onemap_routing(
+    params: dict[str, str | int],
+    client: httpx.Client,
+) -> httpx.Response:
+    """Execute OneMap Routing API call with dynamic auth headers and reactive 401 retry."""
+    headers = onemap_token_manager.get_auth_headers(client=client)
+    response = client.get(
+        settings.ONEMAP_ROUTING_API_URL,
+        params=params,
+        headers=headers,
+        timeout=5.0,
+    )
+    if response.status_code == 401:
+        onemap_token_manager.invalidate_token()
+        retry_headers = onemap_token_manager.get_auth_headers(client=client)
+        response = client.get(
+            settings.ONEMAP_ROUTING_API_URL,
+            params=params,
+            headers=retry_headers,
+            timeout=5.0,
+        )
+    return response
+
+
 def get_route_duration_and_distance(
     start: tuple[float, float],
     end: tuple[float, float],
@@ -348,29 +385,16 @@ def get_route_duration_and_distance(
         "maxWalkDistance": 1000,
         "numItineraries": 1,
     }
-    headers: dict[str, str] = {}
-    if settings.ONEMAP_API_TOKEN:
-        headers["Authorization"] = f"Bearer {settings.ONEMAP_API_TOKEN}"
 
     try:
         if client is not None:
-            response = client.get(
-                settings.ONEMAP_ROUTING_API_URL,
-                params=params,
-                headers=headers,
-                timeout=5.0,
-            )
-            response.raise_for_status()
-            data = response.json()
+            response = _fetch_onemap_routing(params=params, client=client)
         else:
             with httpx.Client(timeout=5.0) as http_client:
-                response = http_client.get(
-                    settings.ONEMAP_ROUTING_API_URL,
-                    params=params,
-                    headers=headers,
-                )
-                response.raise_for_status()
-                data = response.json()
+                response = _fetch_onemap_routing(params=params, client=http_client)
+
+        response.raise_for_status()
+        data = response.json()
 
         # Parse Public Transport itinerary response
         plan = data.get("plan")
