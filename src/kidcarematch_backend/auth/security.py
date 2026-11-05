@@ -29,16 +29,23 @@ def get_firebase_app() -> firebase_admin.App:
     try:
         return firebase_admin.get_app()
     except ValueError:
-        if settings.FIREBASE_CREDENTIALS_PATH and Path(settings.FIREBASE_CREDENTIALS_PATH).is_file():
+        if (
+            settings.FIREBASE_CREDENTIALS_PATH
+            and Path(settings.FIREBASE_CREDENTIALS_PATH).is_file()
+        ):
             cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
             return firebase_admin.initialize_app(cred)
         if settings.FIREBASE_PROJECT_ID:
-            return firebase_admin.initialize_app(options={"projectId": settings.FIREBASE_PROJECT_ID})
+            return firebase_admin.initialize_app(
+                options={"projectId": settings.FIREBASE_PROJECT_ID}
+            )
         return firebase_admin.initialize_app()
 
 
 def get_token_claims(
-    auth_credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)] = None,
+    auth_credentials: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(bearer_scheme)
+    ] = None,
 ) -> FirebaseTokenClaims:
     """Extract and verify Firebase ID token from the Bearer authorization header."""
     if not auth_credentials or auth_credentials.scheme.lower() != "bearer":
@@ -71,11 +78,43 @@ def get_token_claims(
     return FirebaseTokenClaims(uid=uid, email=email)
 
 
+def get_optional_token_claims(
+    auth_credentials: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(bearer_scheme)
+    ] = None,
+) -> FirebaseTokenClaims | None:
+    """Extract and verify Firebase ID token if Bearer header is present, returning None if absent."""
+    if not auth_credentials:
+        return None
+    return get_token_claims(auth_credentials)
+
+
 def get_current_user(
     claims: Annotated[FirebaseTokenClaims, Depends(get_token_claims)],
     session: Annotated[Session, Depends(get_session)],
 ) -> User:
     """Retrieve the current user from database by verified Firebase UID."""
+    user = session.exec(select(User).where(User.firebase_uid == claims.uid)).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User profile not found. Please complete user signup.",
+        )
+    if user.account_status == AccountStatus.SUSPENDED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is suspended.",
+        )
+    return user
+
+
+def get_optional_current_user(
+    claims: Annotated[FirebaseTokenClaims | None, Depends(get_optional_token_claims)],
+    session: Annotated[Session, Depends(get_session)],
+) -> User | None:
+    """Retrieve current user from database if authenticated, or None if no credentials provided."""
+    if claims is None:
+        return None
     user = session.exec(select(User).where(User.firebase_uid == claims.uid)).first()
     if not user:
         raise HTTPException(

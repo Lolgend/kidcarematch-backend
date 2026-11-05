@@ -14,6 +14,7 @@ from kidcarematch_backend.db.db import (
     FamilyPreferenceProfile,
     LocationPreference,
     ModerationStatus,
+    PostalCoordinateCache,
     PreschoolCentre,
     PreschoolLevel,
     PreschoolService,
@@ -890,4 +891,103 @@ def test_foreign_key_cascade_declarations():
 
     service_centre_fk = next(fk for fk in PreschoolService.__table__.c.centre_id.foreign_keys)
     assert service_centre_fk.ondelete == "CASCADE"
+
+
+def test_family_preference_profile_default_3_factor_weights_and_applicant_status(test_session: Session):
+    """FamilyPreferenceProfile defaults to vacancy_weight=0.40, cost_weight=0.30, travel_weight=0.30, applicant_status=WORKING_APPLICANT."""
+    user = User(
+        user_id="user_fpp_defaults",
+        firebase_uid="fb_fpp_defaults",
+        email="fpp_defaults@example.com",
+        full_name="Parent Defaults",
+    )
+    test_session.add(user)
+    test_session.commit()
+    assert user.user_id is not None
+
+    profile = FamilyPreferenceProfile(
+        profile_id="fpp_defaults_01",
+        user_id=user.user_id,
+        profile_name="Default Weights Profile",
+        service_required="Full Day",
+        level=PreschoolLevel.INFANT,
+        home_postal_code="123456",
+        household_income=5000.0,
+        household_member_count=3,
+        budget_max=1000.0,
+        enrollment_month_year=datetime(2027, 3, 1, tzinfo=timezone.utc),
+    )
+    test_session.add(profile)
+    test_session.commit()
+
+    loaded = test_session.get(FamilyPreferenceProfile, "fpp_defaults_01")
+    assert loaded is not None
+    assert loaded.vacancy_weight == 0.40
+    assert loaded.cost_weight == 0.30
+    assert loaded.travel_weight == 0.30
+    assert loaded.applicant_status == ApplicantStatus.WORKING_APPLICANT
+
+
+def test_family_preference_profile_custom_3_factor_weights_and_applicant_status(test_session: Session):
+    """FamilyPreferenceProfile persists custom vacancy_weight, cost_weight, travel_weight, and applicant_status."""
+    user = User(
+        user_id="user_fpp_custom",
+        firebase_uid="fb_fpp_custom",
+        email="fpp_custom@example.com",
+        full_name="Parent Custom",
+    )
+    test_session.add(user)
+    test_session.commit()
+    assert user.user_id is not None
+
+    profile = FamilyPreferenceProfile(
+        profile_id="fpp_custom_01",
+        user_id=user.user_id,
+        profile_name="Custom Weights Profile",
+        service_required="Full Day",
+        level=PreschoolLevel.PG,
+        home_postal_code="654321",
+        household_income=6000.0,
+        household_member_count=4,
+        budget_max=1200.0,
+        enrollment_month_year=datetime(2027, 4, 1, tzinfo=timezone.utc),
+        vacancy_weight=0.50,
+        cost_weight=0.25,
+        travel_weight=0.25,
+        applicant_status=ApplicantStatus.NON_WORKING_APPLICANT,
+    )
+    test_session.add(profile)
+    test_session.commit()
+
+    loaded = test_session.get(FamilyPreferenceProfile, "fpp_custom_01")
+    assert loaded is not None
+    assert loaded.vacancy_weight == 0.50
+    assert loaded.cost_weight == 0.25
+    assert loaded.travel_weight == 0.25
+    assert loaded.applicant_status == ApplicantStatus.NON_WORKING_APPLICANT
+
+
+def test_postal_coordinate_cache_persistence(test_session: Session):
+    """PostalCoordinateCache stores and retrieves geocoded Singapore postal coordinates."""
+    entry = PostalCoordinateCache(
+        postal_code="560123",
+        latitude=1.369123,
+        longitude=103.851234,
+        x_coord=29871.23,
+        y_coord=39123.45,
+        address="123 ANG MO KIO AVE 3 SINGAPORE 560123",
+    )
+    test_session.add(entry)
+    test_session.commit()
+
+    loaded = test_session.get(PostalCoordinateCache, "560123")
+    assert loaded is not None
+    assert loaded.postal_code == "560123"
+    assert loaded.latitude == 1.369123
+    assert loaded.longitude == 103.851234
+    assert loaded.x_coord == 29871.23
+    assert loaded.y_coord == 39123.45
+    assert loaded.address == "123 ANG MO KIO AVE 3 SINGAPORE 560123"
+    assert loaded.last_updated is not None
+
 

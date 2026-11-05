@@ -15,6 +15,14 @@ from kidcarematch_backend.schemas.centre import (
     ReviewSummaryResponse,
     VacancyRecordResponse,
 )
+from kidcarematch_backend.schemas.match import (
+    CentreMatchRequest,
+    CentreMatchResponse,
+    FeeBreakdownItem,
+    FitExplanationResponse,
+    MatchCandidateItem,
+    TravelBreakdownItem,
+)
 from kidcarematch_backend.schemas.profile import (
     ProfileCreateRequest,
     ProfilePatchRequest,
@@ -30,9 +38,14 @@ from kidcarematch_backend.schemas.user import (
 __all__ = [
     "AdminLogoutResponse",
     "AdminProfileResponse",
+    "CentreMatchRequest",
+    "CentreMatchResponse",
     "CentreReviewItem",
     "CentreReviewListResponse",
     "CentreSummaryResponse",
+    "FeeBreakdownItem",
+    "FitExplanationResponse",
+    "MatchCandidateItem",
     "PreschoolCentreDetailResponse",
     "PreschoolCentreItem",
     "PreschoolCentreListResponse",
@@ -42,6 +55,7 @@ __all__ = [
     "ProfileResponse",
     "ProfileUpdateRequest",
     "ReviewSummaryResponse",
+    "TravelBreakdownItem",
     "UserResponse",
     "UserSignupRequest",
     "UserUpdateRequest",

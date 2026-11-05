@@ -106,8 +106,10 @@ def create_profile(
         household_member_count=payload.household_member_count,
         budget_max=payload.budget_max,
         enrollment_month_year=payload.get_enrollment_datetime(),
+        vacancy_weight=payload.vacancy_weight,
         cost_weight=payload.cost_weight,
         travel_weight=payload.travel_weight,
+        applicant_status=payload.applicant_status,
     )
     session.add(profile)
     try:
@@ -215,8 +217,10 @@ def update_profile(
     existing_profile.household_member_count = payload.household_member_count
     existing_profile.budget_max = payload.budget_max
     existing_profile.enrollment_month_year = payload.get_enrollment_datetime()
+    existing_profile.vacancy_weight = payload.vacancy_weight
     existing_profile.cost_weight = payload.cost_weight
     existing_profile.travel_weight = payload.travel_weight
+    existing_profile.applicant_status = payload.applicant_status
 
     session.add(existing_profile)
     try:
@@ -288,6 +292,9 @@ def patch_profile(
     merged_workplace_postal = patch_data.get(
         "workplace_postal_code", existing_profile.workplace_postal_code
     )
+    merged_vacancy_weight = patch_data.get(
+        "vacancy_weight", existing_profile.vacancy_weight
+    )
     merged_cost_weight = patch_data.get("cost_weight", existing_profile.cost_weight)
     merged_travel_weight = patch_data.get(
         "travel_weight", existing_profile.travel_weight
@@ -297,6 +304,7 @@ def patch_profile(
         validate_location_and_weights(
             location_preference=merged_location_pref,
             workplace_postal_code=merged_workplace_postal,
+            vacancy_weight=merged_vacancy_weight,
             cost_weight=merged_cost_weight,
             travel_weight=merged_travel_weight,
         )

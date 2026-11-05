@@ -9,7 +9,19 @@ from sqlalchemy import false, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
-from kidcarematch_backend.auth.security import get_current_user
+from kidcarematch_backend.auth.security import (
+    get_current_user,
+    get_optional_current_user,
+)
+from kidcarematch_backend.core.matching import (
+    calculate_cost_fit,
+    evaluate_government_subsidy,
+    execute_multi_criteria_match,
+    map_level_to_care_type,
+    resolve_match_criteria,
+    resolve_published_programme_fee,
+    score_vacancy_fit,
+)
 from kidcarematch_backend.core.postal_districts import (
     get_all_postal_districts,
     get_postal_sectors_for_districts,
@@ -38,6 +50,10 @@ from kidcarematch_backend.schemas.centre import (
     PreschoolServiceResponse,
     ReviewSummaryResponse,
     VacancyRecordResponse,
+)
+from kidcarematch_backend.schemas.match import (
+    CentreMatchRequest,
+    CentreMatchResponse,
 )
 from kidcarematch_backend.schemas.review import (
     ReviewCreateRequest,
@@ -68,6 +84,17 @@ CITIZENSHIP_PRIORITY_ORDER: dict[str, int] = {
     CitizenshipType.OTHERS.value: 2,
 }
 
+__all__ = [
+    "calculate_cost_fit",
+    "evaluate_government_subsidy",
+    "get_centre_or_404",
+    "map_level_to_care_type",
+    "resolve_match_criteria",
+    "resolve_published_programme_fee",
+    "router",
+    "score_vacancy_fit",
+]
+
 
 def _level_order_key(level: PreschoolLevel | str) -> int:
     val = level.value if isinstance(level, PreschoolLevel) else str(level)
@@ -75,7 +102,11 @@ def _level_order_key(level: PreschoolLevel | str) -> int:
 
 
 def _citizenship_order_key(citizenship: CitizenshipType | str) -> int:
-    val = citizenship.value if isinstance(citizenship, CitizenshipType) else str(citizenship)
+    val = (
+        citizenship.value
+        if isinstance(citizenship, CitizenshipType)
+        else str(citizenship)
+    )
     return CITIZENSHIP_PRIORITY_ORDER.get(val, 99)
 
 
@@ -135,9 +166,7 @@ def get_centre_summary(
     centres_with_vacancies_count = (
         session.exec(
             select(func.count(func.distinct(col(VacancyRecord.centre_id)))).where(
-                func.lower(col(VacancyRecord.vacancy_status)).in_(
-                    OPEN_VACANCY_STATUSES
-                )
+                func.lower(col(VacancyRecord.vacancy_status)).in_(OPEN_VACANCY_STATUSES)
             )
         ).one()
         or 0
@@ -194,7 +223,9 @@ def list_centres(
     ] = None,
     level: Annotated[
         PreschoolLevel | None,
-        Query(description="Filter centres with open vacancies for preschool cohort level"),
+        Query(
+            description="Filter centres with open vacancies for preschool cohort level"
+        ),
     ] = None,
     limit: Annotated[
         int,
@@ -215,9 +246,9 @@ def list_centres(
             conditions.append(
                 or_(
                     func.lower(col(PreschoolCentre.centre_name)).like(pattern),
-                    func.lower(
-                        func.coalesce(col(PreschoolCentre.address), "")
-                    ).like(pattern),
+                    func.lower(func.coalesce(col(PreschoolCentre.address), "")).like(
+                        pattern
+                    ),
                 )
             )
 
@@ -235,9 +266,7 @@ def list_centres(
     if postal_prefix is not None:
         cleaned_postal = postal_prefix.strip()
         if cleaned_postal:
-            conditions.append(
-                col(PreschoolCentre.postal).startswith(cleaned_postal)
-            )
+            conditions.append(col(PreschoolCentre.postal).startswith(cleaned_postal))
 
     if spark_certified is not None:
         conditions.append(col(PreschoolCentre.spark_certified) == spark_certified)
@@ -267,7 +296,10 @@ def list_centres(
     if conditions:
         items_query = items_query.where(*conditions)
     items_query = (
-        items_query.order_by(col(PreschoolCentre.centre_id).asc())
+        items_query.order_by(
+            col(PreschoolCentre.centre_name).asc(),
+            col(PreschoolCentre.centre_id).asc(),
+        )
         .offset(offset)
         .limit(limit)
     )
@@ -300,7 +332,9 @@ def _build_centre_detail_response(
     )
 
     services = session.exec(
-        select(PreschoolService).where(col(PreschoolService.centre_id) == centre.centre_id)
+        select(PreschoolService).where(
+            col(PreschoolService.centre_id) == centre.centre_id
+        )
     ).all()
     sorted_services = sorted(
         services,
@@ -575,3 +609,17 @@ def get_centre_by_id(
     return _build_centre_detail_response(centre, session)
 
 
+@router.post(
+    "/match",
+    response_model=CentreMatchResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Multi-Criteria Preschool Centre Matching",
+)
+def match_centres(
+    request: CentreMatchRequest,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User | None, Depends(get_optional_current_user)] = None,
+) -> CentreMatchResponse:
+    """Evaluate and rank candidate preschool centres against multi-criteria requirements."""
+    criteria = resolve_match_criteria(request, session, current_user)
+    return execute_multi_criteria_match(session, criteria)

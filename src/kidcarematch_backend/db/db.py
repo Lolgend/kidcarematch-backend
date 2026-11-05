@@ -214,8 +214,10 @@ class FamilyPreferenceProfile(SQLModel, table=True):
     household_member_count: int = Field()
     budget_max: float = Field()
     enrollment_month_year: datetime = Field()
-    cost_weight: float = Field(default=0.5)
-    travel_weight: float = Field(default=0.5)
+    vacancy_weight: float = Field(default=0.40)
+    cost_weight: float = Field(default=0.30)
+    travel_weight: float = Field(default=0.30)
+    applicant_status: ApplicantStatus = Field(default=ApplicantStatus.WORKING_APPLICANT)
 
     user: User | None = Relationship(back_populates="preference_profiles")
 
@@ -320,6 +322,20 @@ class ExternalDataSourceStatus(SQLModel, table=True):
     last_attempted_sync: datetime | None = Field(default=None)
     records_processed: int = Field(default=0)
     error_message: str | None = Field(default=None, max_length=1000)
+
+
+class PostalCoordinateCache(SQLModel, table=True):
+    """Persistent cache for resolved Singapore postal coordinates (OneMap)."""
+
+    postal_code: str = Field(primary_key=True, max_length=6, index=True)
+    latitude: float
+    longitude: float
+    x_coord: float | None = Field(default=None)
+    y_coord: float | None = Field(default=None)
+    address: str | None = Field(default=None, max_length=500)
+    last_updated: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
 
 
 database_url = settings.DATABASE_URL
