@@ -22,9 +22,12 @@ from kidcarematch_backend.core.config import Settings, settings
 from kidcarematch_backend.core.onemap import OneMapTokenManager, onemap_token_manager
 
 
-def test_settings_onemap_service_account_configuration():
+def test_settings_onemap_service_account_configuration(monkeypatch):
     """Verify settings defaults for OneMap service account authentication."""
-    test_settings = Settings()
+    monkeypatch.delenv("ONEMAP_EMAIL", raising=False)
+    monkeypatch.delenv("ONEMAP_PASSWORD", raising=False)
+    monkeypatch.delenv("ONEMAP_API_TOKEN", raising=False)
+    test_settings = Settings(_env_file=None)
     assert test_settings.ONEMAP_AUTH_URL == "https://www.onemap.gov.sg/api/auth/post/getToken"
     assert test_settings.ONEMAP_EMAIL is None
     assert test_settings.ONEMAP_PASSWORD is None
