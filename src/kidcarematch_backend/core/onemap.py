@@ -1,9 +1,12 @@
-"""OneMap geospatial adapter for coordinate resolution, caching, and detour routing (ADR-0007, Ticket #70)."""
+"""OneMap geospatial adapter for coordinate resolution, caching, detour routing, and dynamic authentication (ADR-0007, ADR-0008, Ticket #70, Ticket #74)."""
 
 import logging
 import math
+import threading
+import time
 from collections.abc import Sequence
 from datetime import datetime, timezone
+from typing import Any
 
 import httpx
 from sqlmodel import Session, col, select
@@ -16,6 +19,214 @@ logger = logging.getLogger(__name__)
 STAGE1_MAX_CANDIDATES = 30
 EARTH_RADIUS_KM = 6371.0
 AVERAGE_TRANSIT_SPEED_KMH = 25.0
+
+
+class OneMapTokenManager:
+    """Thread-safe in-memory manager for OneMap Service Account access tokens.
+
+    Supports:
+    - Double-checked locking with threading.RLock for multi-threaded concurrency safety.
+    - Dynamic acquisition via OneMap Auth API (/api/auth/post/getToken).
+    - Proactive refresh within 300 seconds of token expiration.
+    - Resilient parsing of Unix epoch timestamps with fallback to 72 hours.
+    - Fallback to static ONEMAP_API_TOKEN if service account credentials are not configured.
+    - Explicit token invalidation for reactive 401 handling.
+    """
+
+    DEFAULT_EXPIRY_HOURS: float = 72.0
+    REFRESH_BUFFER_SECS: float = 300.0
+
+    def __init__(self) -> None:
+        self._token: str | None = None
+        self._expiry_timestamp: float | None = None
+        self._lock = threading.RLock()
+
+    @property
+    def token(self) -> str | None:
+        """Return currently cached access token string or None."""
+        return self._token
+
+    @property
+    def expiry_timestamp(self) -> float | None:
+        """Return currently cached expiration timestamp (Unix epoch float) or None."""
+        return self._expiry_timestamp
+
+    def _is_token_valid(self, now: float) -> bool:
+        """Check if cached token is present and not within the 300-second proactive expiration buffer."""
+        if self._token is None or self._expiry_timestamp is None:
+            return False
+        return now < (self._expiry_timestamp - self.REFRESH_BUFFER_SECS)
+
+    @staticmethod
+    def _parse_expiry_timestamp(raw_expiry: Any, now: float) -> float:
+        """Parse raw expiry timestamp (int, float, numeric string) with 72h default fallback."""
+        default_expiry = now + OneMapTokenManager.DEFAULT_EXPIRY_HOURS * 3600.0
+        if raw_expiry is None:
+            return default_expiry
+
+        try:
+            if isinstance(raw_expiry, (int, float)):
+                parsed = float(raw_expiry)
+            elif isinstance(raw_expiry, str):
+                parsed = float(raw_expiry.strip())
+            else:
+                return default_expiry
+        except (ValueError, TypeError):
+            return default_expiry
+
+        if math.isnan(parsed) or math.isinf(parsed) or parsed <= now:
+            return default_expiry
+
+        return parsed
+
+    def probe_token_health(
+        self, client: httpx.Client | None = None
+    ) -> tuple[bool, str | None]:
+        """Perform diagnostic health check of OneMap authentication.
+
+        - If credentials are not configured, returns (True, None).
+        - If cached token is valid, returns (True, None).
+        - When credentials configured: attempts token acquisition without swallowing diagnostic errors.
+          If HTTP response status code is not 200 or network error occurs, captures the actual status
+          code or error details and returns (False, err_msg).
+        - When token acquired successfully, stores in cache and returns (True, None).
+        """
+        if not settings.ONEMAP_EMAIL or not settings.ONEMAP_PASSWORD:
+            return True, None
+
+        now = time.time()
+        if self._is_token_valid(now):
+            return True, None
+
+        with self._lock:
+            now = time.time()
+            if self._is_token_valid(now):
+                return True, None
+
+            email = settings.ONEMAP_EMAIL
+            password = settings.ONEMAP_PASSWORD
+            if not email or not password:
+                return True, None
+
+            payload = {"email": email, "password": password}
+            try:
+                if client is not None:
+                    response = client.post(
+                        settings.ONEMAP_AUTH_URL,
+                        json=payload,
+                        headers={"Content-Type": "application/json"},
+                        timeout=5.0,
+                    )
+                else:
+                    with httpx.Client(timeout=5.0) as http_client:
+                        response = http_client.post(
+                            settings.ONEMAP_AUTH_URL,
+                            json=payload,
+                            headers={"Content-Type": "application/json"},
+                        )
+
+                if response.status_code != 200:
+                    text_snippet = (
+                        response.text[:200]
+                        if hasattr(response, "text") and response.text
+                        else ""
+                    )
+                    detail = (
+                        f"HTTP {response.status_code} - {text_snippet}"
+                        if text_snippet
+                        else f"HTTP {response.status_code}"
+                    )
+                    return False, f"OneMap authentication failed: {detail}"
+
+                data = response.json()
+                if not isinstance(data, dict):
+                    return (
+                        False,
+                        f"OneMap authentication failed: Unexpected response payload type {type(data)}",
+                    )
+
+                token = data.get("access_token") or data.get("accessToken")
+                if not token or not isinstance(token, str):
+                    return (
+                        False,
+                        f"OneMap authentication failed: Missing valid access_token in response: {data}",
+                    )
+
+                raw_expiry = data.get("expiry_timestamp") or data.get("expiryTimestamp")
+                self._token = token
+                self._expiry_timestamp = self._parse_expiry_timestamp(raw_expiry, now)
+                return True, None
+
+            except httpx.HTTPStatusError as exc:
+                status_code = (
+                    exc.response.status_code
+                    if exc.response is not None
+                    else "unknown"
+                )
+                text_snippet = (
+                    exc.response.text[:200]
+                    if exc.response is not None
+                    and hasattr(exc.response, "text")
+                    and exc.response.text
+                    else ""
+                )
+                detail = (
+                    f"HTTP {status_code} - {text_snippet}"
+                    if text_snippet
+                    else f"HTTP {status_code}"
+                )
+                return False, f"OneMap authentication failed: {detail}"
+            except (
+                httpx.HTTPError,
+                httpx.TimeoutException,
+                ValueError,
+                KeyError,
+                OSError,
+                TypeError,
+                AttributeError,
+            ) as exc:
+                return False, f"OneMap authentication failed: {exc}"
+
+    def get_valid_token(self, client: httpx.Client | None = None) -> str | None:
+        """Return a valid OneMap access token, fetching or refreshing if necessary.
+
+        Thread-safe via double-checked locking with re-entrant lock (RLock).
+        """
+        now = time.time()
+        # Fast path outside lock
+        if self._is_token_valid(now):
+            return self._token
+
+        if not settings.ONEMAP_EMAIL or not settings.ONEMAP_PASSWORD:
+            return settings.ONEMAP_API_TOKEN
+
+        ok, err = self.probe_token_health(client=client)
+        if ok and self._token:
+            return self._token
+
+        if err:
+            logger.warning(
+                "OneMap token acquisition failed from %s: %s",
+                settings.ONEMAP_AUTH_URL,
+                err,
+            )
+        return settings.ONEMAP_API_TOKEN
+
+    def invalidate_token(self) -> None:
+        """Clear cached access token and expiration timestamp under lock."""
+        with self._lock:
+            self._token = None
+            self._expiry_timestamp = None
+
+    def get_auth_headers(self, client: httpx.Client | None = None) -> dict[str, str]:
+        """Return Authorization Bearer header dictionary if a valid token is available, else empty dict."""
+        token = self.get_valid_token(client=client)
+        if token:
+            return {"Authorization": f"Bearer {token}"}
+        return {}
+
+
+onemap_token_manager = OneMapTokenManager()
 
 
 def haversine_distance_km(
@@ -40,6 +251,21 @@ def estimate_transit_duration_mins(distance_km: float) -> float:
         return 0.0
     duration_mins = (distance_km / AVERAGE_TRANSIT_SPEED_KMH) * 60.0
     return max(1.0, round(duration_mins, 1))
+
+
+def _fetch_onemap(
+    url: str,
+    params: dict[str, str | int],
+    client: httpx.Client,
+) -> httpx.Response:
+    """Execute OneMap API call with dynamic auth headers and reactive 401 retry."""
+    headers = onemap_token_manager.get_auth_headers(client=client)
+    response = client.get(url, params=params, headers=headers, timeout=5.0)
+    if response.status_code == 401:
+        onemap_token_manager.invalidate_token()
+        retry_headers = onemap_token_manager.get_auth_headers(client=client)
+        response = client.get(url, params=params, headers=retry_headers, timeout=5.0)
+    return response
 
 
 def resolve_postal_coordinates(
@@ -73,18 +299,17 @@ def resolve_postal_coordinates(
 
     try:
         if client is not None:
-            response = client.get(
-                settings.ONEMAP_API_URL, params=params, timeout=5.0
+            response = _fetch_onemap(
+                settings.ONEMAP_API_URL, params=params, client=client
             )
-            response.raise_for_status()
-            data = response.json()
         else:
             with httpx.Client(timeout=5.0) as http_client:
-                response = http_client.get(
-                    settings.ONEMAP_API_URL, params=params
+                response = _fetch_onemap(
+                    settings.ONEMAP_API_URL, params=params, client=http_client
                 )
-                response.raise_for_status()
-                data = response.json()
+
+        response.raise_for_status()
+        data = response.json()
 
         if data.get("found", 0) > 0 and data.get("results"):
             first = data["results"][0]
@@ -190,29 +415,20 @@ def get_route_duration_and_distance(
         "maxWalkDistance": 1000,
         "numItineraries": 1,
     }
-    headers: dict[str, str] = {}
-    if settings.ONEMAP_API_TOKEN:
-        headers["Authorization"] = f"Bearer {settings.ONEMAP_API_TOKEN}"
 
     try:
         if client is not None:
-            response = client.get(
-                settings.ONEMAP_ROUTING_API_URL,
-                params=params,
-                headers=headers,
-                timeout=5.0,
+            response = _fetch_onemap(
+                settings.ONEMAP_ROUTING_API_URL, params=params, client=client
             )
-            response.raise_for_status()
-            data = response.json()
         else:
             with httpx.Client(timeout=5.0) as http_client:
-                response = http_client.get(
-                    settings.ONEMAP_ROUTING_API_URL,
-                    params=params,
-                    headers=headers,
+                response = _fetch_onemap(
+                    settings.ONEMAP_ROUTING_API_URL, params=params, client=http_client
                 )
-                response.raise_for_status()
-                data = response.json()
+
+        response.raise_for_status()
+        data = response.json()
 
         # Parse Public Transport itinerary response
         plan = data.get("plan")

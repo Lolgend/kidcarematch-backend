@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 
 from kidcarematch_backend.auth.security import get_current_admin
 from kidcarematch_backend.core.config import settings
+from kidcarematch_backend.core.onemap import onemap_token_manager
 from kidcarematch_backend.cron.sync_centres import (
     ECDA_DATASTORE_SOURCE_ID,
     ECDA_DATASTORE_SOURCE_NAME,
@@ -65,15 +66,35 @@ def probe_ecda_datastore(client: httpx.Client) -> tuple[bool, str | None]:
 
 
 def probe_onemap_api(client: httpx.Client) -> tuple[bool, str | None]:
-    """Perform a lightweight HTTP probe against OneMap API public search endpoint."""
+    """Perform an HTTP probe against OneMap API verifying authentication and endpoint health."""
+    if settings.ONEMAP_EMAIL and settings.ONEMAP_PASSWORD:
+        auth_ok, auth_err = onemap_token_manager.probe_token_health(client=client)
+        if not auth_ok:
+            logger.warning(auth_err)
+            return False, auth_err
+
+    headers = onemap_token_manager.get_auth_headers(client=client)
     try:
         response = client.get(
             settings.ONEMAP_API_URL,
-            params={"searchVal": "singapore", "returnGeom": "N", "getAddrDetails": "N", "pageNum": 1},
+            params={
+                "searchVal": "singapore",
+                "returnGeom": "N",
+                "getAddrDetails": "N",
+                "pageNum": 1,
+            },
+            headers=headers,
         )
+        if response.status_code == 401:
+            onemap_token_manager.invalidate_token()
+            return False, "OneMap search probe returned 401 Unauthorized"
+
         response.raise_for_status()
         return True, None
     except (httpx.HTTPError, httpx.TimeoutException, OSError) as exc:
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
+            onemap_token_manager.invalidate_token()
+            return False, "OneMap search probe returned 401 Unauthorized"
         logger.warning("OneMap API probe failed: %s", exc)
         return False, str(exc)[:1000]
 

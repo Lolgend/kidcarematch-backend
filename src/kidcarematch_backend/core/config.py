@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     DATA_GOV_SG_SERVICES_RESOURCE_ID: str = "d_44cfe12f2858ae503a093dfc075a28be"
     ONEMAP_API_URL: str = "https://www.onemap.gov.sg/api/common/elastic/search"
     ONEMAP_ROUTING_API_URL: str = "https://www.onemap.gov.sg/api/public/routingsvc/route"
+    ONEMAP_AUTH_URL: str = "https://www.onemap.gov.sg/api/auth/post/getToken"
+    ONEMAP_EMAIL: str | None = None
+    ONEMAP_PASSWORD: str | None = None
     ONEMAP_API_TOKEN: str | None = None
     GEMINI_API_KEY: str | None = None
     GEMINI_MODEL: str = "gemini-2.5-flash"
