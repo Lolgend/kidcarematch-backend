@@ -702,6 +702,7 @@ def test_status_refresh_onemap_authenticated_token_failure_401(
     assert status_map["ONEMAP_API"]["sync_state"] == "FAILED"
     assert status_map["ONEMAP_API"]["error_message"] is not None
     assert "OneMap authentication failed" in status_map["ONEMAP_API"]["error_message"]
+    assert "HTTP 401 - Unauthorized: Invalid credentials" in status_map["ONEMAP_API"]["error_message"]
 
     # Verify GET /api/v1/admin/status reports FAILED and diagnostic message
     get_resp = client.get(
@@ -712,6 +713,7 @@ def test_status_refresh_onemap_authenticated_token_failure_401(
     get_map = {item["source_id"]: item for item in get_resp.json()}
     assert get_map["ONEMAP_API"]["sync_state"] == "FAILED"
     assert "OneMap authentication failed" in get_map["ONEMAP_API"]["error_message"]
+    assert "HTTP 401 - Unauthorized: Invalid credentials" in get_map["ONEMAP_API"]["error_message"]
 
 
 def test_status_refresh_onemap_authenticated_token_network_error(
@@ -759,6 +761,7 @@ def test_status_refresh_onemap_authenticated_token_network_error(
 
     assert status_map["ONEMAP_API"]["sync_state"] == "FAILED"
     assert "OneMap authentication failed" in status_map["ONEMAP_API"]["error_message"]
+    assert "Connection refused by auth endpoint" in status_map["ONEMAP_API"]["error_message"]
 
 
 def test_status_refresh_onemap_unauthenticated_without_credentials(
@@ -841,28 +844,32 @@ def test_probe_onemap_api_unit_behavior(monkeypatch):
         assert ok is True
         assert err is None
 
-    # 2. Configured credentials + token manager raises exception -> (False, "OneMap authentication failed: ...")
-    def mock_get_valid_token_raising(*args, **kwargs):
-        raise httpx.RequestError("Upstream timeout")
-
-    monkeypatch.setattr(onemap_token_manager, "get_valid_token", mock_get_valid_token_raising)
-
+    # 2. Configured credentials + probe_token_health returns network failure -> (False, err)
+    monkeypatch.setattr(
+        onemap_token_manager,
+        "probe_token_health",
+        lambda *args, **kwargs: (False, "OneMap authentication failed: Upstream timeout"),
+    )
     with httpx.Client() as client:
         ok, err = probe_onemap_api(client)
         assert ok is False
-        assert err is not None
-        assert err.startswith("OneMap authentication failed: Upstream timeout")
+        assert err == "OneMap authentication failed: Upstream timeout"
 
-    # 3. Configured credentials + token manager returns None -> (False, "OneMap authentication failed: ...")
-    monkeypatch.setattr(onemap_token_manager, "get_valid_token", lambda *args, **kwargs: None)
+    # 3. Configured credentials + probe_token_health returns HTTP status error details -> (False, err)
+    monkeypatch.setattr(
+        onemap_token_manager,
+        "probe_token_health",
+        lambda *args, **kwargs: (
+            False,
+            "OneMap authentication failed: HTTP 401 - Unauthorized: Invalid credentials",
+        ),
+    )
     with httpx.Client() as client:
         ok, err = probe_onemap_api(client)
         assert ok is False
-        assert err is not None
-        assert "OneMap authentication failed" in err
-        assert "Invalid credentials or token acquisition failed" in err
+        assert err == "OneMap authentication failed: HTTP 401 - Unauthorized: Invalid credentials"
 
-    # 4. Search endpoint returns 401 -> invalidates token and returns (False, err)
+    # 4. Search endpoint returns 401 -> invalidates token and returns (False, "OneMap search probe returned 401 Unauthorized")
     onemap_token_manager.invalidate_token()
     monkeypatch.undo()  # restore real methods
     monkeypatch.setattr(settings, "ONEMAP_EMAIL", "svc@example.com")
@@ -884,6 +891,6 @@ def test_probe_onemap_api_unit_behavior(monkeypatch):
     with httpx.Client() as client:
         ok, err = probe_onemap_api(client)
         assert ok is False
-        assert "401" in str(err)
+        assert err == "OneMap search probe returned 401 Unauthorized"
         assert onemap_token_manager.token is None
 

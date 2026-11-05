@@ -315,3 +315,109 @@ def test_network_error_resilience(monkeypatch):
 def test_global_singleton_instance_available():
     """Verify module-level singleton instance onemap_token_manager is available."""
     assert isinstance(onemap_token_manager, OneMapTokenManager)
+
+def test_token_manager_lock_is_reentrant_rlock():
+    """Verify OneMapTokenManager uses a re-entrant RLock to prevent self-deadlock."""
+    manager = OneMapTokenManager()
+    assert isinstance(manager._lock, type(threading.RLock()))
+    # Verify re-entrancy
+    with manager._lock, manager._lock:
+        assert True
+
+
+def test_probe_token_health_credentials_not_configured(monkeypatch):
+    """Verify probe_token_health returns (True, None) when credentials are not configured."""
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", None)
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", None)
+    manager = OneMapTokenManager()
+    ok, err = manager.probe_token_health()
+    assert ok is True
+    assert err is None
+
+
+def test_probe_token_health_cached_valid_token_fast_path(monkeypatch):
+    """Verify probe_token_health immediately returns (True, None) if token is cached and valid."""
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", "svc@example.com")
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", "secret")
+
+    manager = OneMapTokenManager()
+    manager._token = "pre-cached-token"
+    manager._expiry_timestamp = time.time() + 3600.0
+
+    def fail_handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail("Network call should not occur when token is cached and valid")
+
+    client = httpx.Client(transport=httpx.MockTransport(fail_handler))
+    ok, err = manager.probe_token_health(client=client)
+    assert ok is True
+    assert err is None
+
+
+def test_probe_token_health_successful_acquisition(monkeypatch):
+    """Verify probe_token_health dynamically acquires token and stores it in cache."""
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", "svc_probe@example.com")
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", "probe_secret")
+
+    now = time.time()
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"access_token": "probe-jwt-token-ok", "expiry_timestamp": now + 7200.0},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_handler))
+    manager = OneMapTokenManager()
+    ok, err = manager.probe_token_health(client=client)
+    assert ok is True
+    assert err is None
+    assert manager.token == "probe-jwt-token-ok"
+
+
+def test_probe_token_health_http_error_diagnostics(monkeypatch):
+    """Verify probe_token_health preserves HTTP status code and response text snippet on failure."""
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", "svc_probe@example.com")
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", "probe_secret")
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text="Invalid developer email or password provided")
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_handler))
+    manager = OneMapTokenManager()
+    ok, err = manager.probe_token_health(client=client)
+    assert ok is False
+    assert err == "OneMap authentication failed: HTTP 401 - Invalid developer email or password provided"
+    assert manager.token is None
+
+
+def test_probe_token_health_network_error_diagnostics(monkeypatch):
+    """Verify probe_token_health captures upstream connection exception details."""
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", "svc_probe@example.com")
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", "probe_secret")
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("Connection refused by auth gateway")
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_handler))
+    manager = OneMapTokenManager()
+    ok, err = manager.probe_token_health(client=client)
+    assert ok is False
+    assert err == "OneMap authentication failed: Connection refused by auth gateway"
+    assert manager.token is None
+
+
+def test_probe_token_health_invalid_payload_diagnostics(monkeypatch):
+    """Verify probe_token_health returns descriptive error when response payload is malformed."""
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", "svc_probe@example.com")
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", "probe_secret")
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"some_other_field": "val"})
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_handler))
+    manager = OneMapTokenManager()
+    ok, err = manager.probe_token_health(client=client)
+    assert ok is False
+    assert "Missing valid access_token" in str(err)
+    assert manager.token is None
+

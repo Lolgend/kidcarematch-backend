@@ -67,42 +67,34 @@ def probe_ecda_datastore(client: httpx.Client) -> tuple[bool, str | None]:
 
 def probe_onemap_api(client: httpx.Client) -> tuple[bool, str | None]:
     """Perform an HTTP probe against OneMap API verifying authentication and endpoint health."""
-    headers: dict[str, str] = {}
     if settings.ONEMAP_EMAIL and settings.ONEMAP_PASSWORD:
-        exc: Exception | None = None
-        token: str | None = None
-        try:
-            token = onemap_token_manager.get_valid_token(client=client)
-        except (
-            httpx.HTTPError,
-            httpx.TimeoutException,
-            OSError,
-            ValueError,
-            KeyError,
-            AttributeError,
-        ) as e:
-            exc = e
+        auth_ok, auth_err = onemap_token_manager.probe_token_health(client=client)
+        if not auth_ok:
+            logger.warning(auth_err)
+            return False, auth_err
 
-        if exc is not None or not token or (onemap_token_manager.token is None and token == settings.ONEMAP_API_TOKEN):
-            detail = exc or "Invalid credentials or token acquisition failed"
-            err_msg = f"OneMap authentication failed: {detail}"
-            logger.warning(err_msg)
-            return False, err_msg
-
-        headers = onemap_token_manager.get_auth_headers(client=client)
-    else:
-        headers = onemap_token_manager.get_auth_headers(client=client)
+    headers = onemap_token_manager.get_auth_headers(client=client)
     try:
         response = client.get(
             settings.ONEMAP_API_URL,
-            params={"searchVal": "singapore", "returnGeom": "N", "getAddrDetails": "N", "pageNum": 1},
+            params={
+                "searchVal": "singapore",
+                "returnGeom": "N",
+                "getAddrDetails": "N",
+                "pageNum": 1,
+            },
             headers=headers,
         )
+        if response.status_code == 401:
+            onemap_token_manager.invalidate_token()
+            return False, "OneMap search probe returned 401 Unauthorized"
+
         response.raise_for_status()
         return True, None
     except (httpx.HTTPError, httpx.TimeoutException, OSError) as exc:
         if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
             onemap_token_manager.invalidate_token()
+            return False, "OneMap search probe returned 401 Unauthorized"
         logger.warning("OneMap API probe failed: %s", exc)
         return False, str(exc)[:1000]
 
