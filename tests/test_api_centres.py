@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, create_engine
@@ -1917,3 +1919,172 @@ def test_centres_invalid_and_malformed_postal_resolves_to_null(
     for code in ("INV_SHORT", "INV_ALPHA", "INV_FIVE", "INV_LONG"):
         assert items[code]["district"] is None
         assert items[code]["district_name"] is None
+
+
+def test_get_centre_location_not_found(client: TestClient):
+    """GET /api/v1/centres/{centre_id}/location returns 404 if centre does not exist."""
+    response = client.get("/api/v1/centres/999999/location")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Preschool centre not found"
+
+
+def test_get_centre_location_missing_or_invalid_postal(
+    client: TestClient, test_engine
+):
+    """GET /api/v1/centres/{centre_id}/location returns status unavailable and coordinate null if postal is missing or invalid."""
+    with Session(test_engine) as session:
+        c_none = PreschoolCentre(
+            centre_code="LOC_NONE",
+            centre_name="No Postal Centre",
+            postal=None,
+        )
+        c_short = PreschoolCentre(
+            centre_code="LOC_SHORT",
+            centre_name="Short Postal Centre",
+            postal="123",
+        )
+        c_alpha = PreschoolCentre(
+            centre_code="LOC_ALPHA",
+            centre_name="Alpha Postal Centre",
+            postal="56012A",
+        )
+        session.add_all([c_none, c_short, c_alpha])
+        session.commit()
+        session.refresh(c_none)
+        session.refresh(c_short)
+        session.refresh(c_alpha)
+        id_none, id_short, id_alpha = c_none.centre_id, c_short.centre_id, c_alpha.centre_id
+
+    for centre_id in (id_none, id_short, id_alpha):
+        res = client.get(f"/api/v1/centres/{centre_id}/location")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["centre_id"] == centre_id
+        assert data["coordinate"] is None
+        assert data["status"] == "unavailable"
+
+
+def test_get_centre_location_onemap_success(
+    client: TestClient, test_engine, monkeypatch
+):
+    """GET /api/v1/centres/{centre_id}/location returns status available and coordinate if exact postal matches."""
+    with Session(test_engine) as session:
+        c = PreschoolCentre(
+            centre_code="LOC_VALID",
+            centre_name="Valid Postal Centre",
+            postal="560123",
+        )
+        session.add(c)
+        session.commit()
+        session.refresh(c)
+        centre_id = c.centre_id
+
+    original_get = httpx.Client.get
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        if "elastic/search" in url_str:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": "VALID CENTRE",
+                        "POSTAL": "560123",
+                        "LATITUDE": "1.369145",
+                        "LONGITUDE": "103.851234",
+                    }
+                ],
+            }
+            return mock_resp
+        return original_get(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.get(f"/api/v1/centres/{centre_id}/location")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["centre_id"] == centre_id
+    assert data["status"] == "available"
+    assert data["coordinate"] == {"lat": 1.369145, "lng": 103.851234}
+
+
+def test_get_centre_location_onemap_mismatched_postal(
+    client: TestClient, test_engine, monkeypatch
+):
+    """GET /api/v1/centres/{centre_id}/location returns status unavailable if OneMap result has different postal."""
+    with Session(test_engine) as session:
+        c = PreschoolCentre(
+            centre_code="LOC_MISMATCH",
+            centre_name="Mismatched Postal Centre",
+            postal="560123",
+        )
+        session.add(c)
+        session.commit()
+        session.refresh(c)
+        centre_id = c.centre_id
+
+    original_get = httpx.Client.get
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        if "elastic/search" in url_str:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": "SOME OTHER PLACE",
+                        "POSTAL": "560999",  # Fuzzy match with wrong postal
+                        "LATITUDE": "1.369145",
+                        "LONGITUDE": "103.851234",
+                    }
+                ],
+            }
+            return mock_resp
+        return original_get(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.get(f"/api/v1/centres/{centre_id}/location")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["centre_id"] == centre_id
+    assert data["coordinate"] is None
+    assert data["status"] == "unavailable"
+
+
+def test_get_centre_location_onemap_failure(
+    client: TestClient, test_engine, monkeypatch
+):
+    """GET /api/v1/centres/{centre_id}/location returns status unavailable if OneMap request fails or times out."""
+    with Session(test_engine) as session:
+        c = PreschoolCentre(
+            centre_code="LOC_FAIL",
+            centre_name="Failing Postal Centre",
+            postal="560123",
+        )
+        session.add(c)
+        session.commit()
+        session.refresh(c)
+        centre_id = c.centre_id
+
+    original_get = httpx.Client.get
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        if "elastic/search" in url_str:
+            raise httpx.ConnectTimeout("Connection timed out")
+        return original_get(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.get(f"/api/v1/centres/{centre_id}/location")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["centre_id"] == centre_id
+    assert data["coordinate"] is None
+    assert data["status"] == "unavailable"
+

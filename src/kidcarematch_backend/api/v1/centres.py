@@ -3,6 +3,7 @@
 from datetime import datetime
 from typing import Annotated
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import Field
 from sqlalchemy import false, func, or_
@@ -13,6 +14,7 @@ from kidcarematch_backend.auth.security import (
     get_current_user,
     get_optional_current_user,
 )
+from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.core.matching import (
     calculate_cost_fit,
     evaluate_government_subsidy,
@@ -40,9 +42,11 @@ from kidcarematch_backend.db.db import (
     get_session,
 )
 from kidcarematch_backend.schemas.centre import (
+    CentreLocationResponse,
     CentreReviewItem,
     CentreReviewListResponse,
     CentreSummaryResponse,
+    Coordinate,
     PostalDistrictItem,
     PreschoolCentreDetailResponse,
     PreschoolCentreItem,
@@ -591,6 +595,72 @@ def get_centre_watchlist_status(
         centre_id=centre_id,
         is_watched=is_watched,
         watched_entries=watched_entries,
+    )
+
+
+@router.get(
+    "/{centre_id}/location",
+    response_model=CentreLocationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Preschool Centre Geospatial Location",
+)
+def get_centre_location(
+    centre_id: int,
+    session: Annotated[Session, Depends(get_session)],
+) -> CentreLocationResponse:
+    """Retrieve verified OneMap geospatial coordinates for a preschool centre.
+
+    Public endpoint (no auth required).
+    Resolves postal code via OneMap search verifying exact returned postal match.
+    Returns status='available' with coordinates if exact match, otherwise status='unavailable'.
+    """
+    centre = get_centre_or_404(centre_id, session)
+
+    if not centre.postal:
+        return CentreLocationResponse(
+            centre_id=centre.centre_id or centre_id,
+            coordinate=None,
+            status="unavailable",
+        )
+
+    clean_postal = centre.postal.strip()
+    if len(clean_postal) != 6 or not clean_postal.isdigit():
+        return CentreLocationResponse(
+            centre_id=centre.centre_id or centre_id,
+            coordinate=None,
+            status="unavailable",
+        )
+
+    params: dict[str, str | int] = {
+        "searchVal": clean_postal,
+        "returnGeom": "Y",
+        "getAddrDetails": "Y",
+        "pageNum": 1,
+    }
+
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            response = client.get(settings.ONEMAP_API_URL, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+        if data.get("found", 0) > 0 and data.get("results"):
+            first = data["results"][0]
+            if str(first.get("POSTAL", "")).strip() == clean_postal:
+                lat = float(first["LATITUDE"])
+                lon = float(first["LONGITUDE"])
+                return CentreLocationResponse(
+                    centre_id=centre.centre_id or centre_id,
+                    coordinate=Coordinate(lat=lat, lng=lon),
+                    status="available",
+                )
+    except (httpx.HTTPError, ValueError, KeyError, OSError):
+        pass
+
+    return CentreLocationResponse(
+        centre_id=centre.centre_id or centre_id,
+        coordinate=None,
+        status="unavailable",
     )
 
 

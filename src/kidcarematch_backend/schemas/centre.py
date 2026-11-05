@@ -140,4 +140,20 @@ class CentreReviewListResponse(BaseModel):
     offset: int
 
 
+class Coordinate(BaseModel):
+    """Geographic coordinate representation."""
+
+    lat: float
+    lng: float
+
+
+class CentreLocationResponse(BaseModel):
+    """Preschool centre geospatial location and availability status."""
+
+    centre_id: int
+    coordinate: Coordinate | None = None
+    status: str
+
+
+
 
