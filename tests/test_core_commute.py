@@ -13,8 +13,11 @@ from kidcarematch_backend.core.commute import (
     clear_commute_postal_cache,
     decode_polyline,
     get_commute_leg,
+    get_next_representative_saturday,
     get_next_representative_wednesday,
+    get_representative_sample_pair,
     resolve_commute_postal,
+    validate_sample_pair,
 )
 from kidcarematch_backend.schemas.commute import Coordinate
 
@@ -210,6 +213,76 @@ def test_get_next_representative_wednesday_boundaries():
     sun = datetime(2026, 11, 15, 12, 0, tzinfo=SGT)
     wed6 = get_next_representative_wednesday(sun)
     assert wed6 == datetime(2026, 11, 18, 8, 0, tzinfo=SGT)
+
+
+def test_get_next_representative_saturday_boundaries():
+    # 1. Monday before Saturday -> upcoming Saturday 08:00 SGT
+    mon = datetime(2026, 11, 9, 10, 30, tzinfo=SGT)
+    sat1 = get_next_representative_saturday(mon)
+    assert sat1 == datetime(2026, 11, 14, 8, 0, tzinfo=SGT)
+
+    # 2. Saturday before 08:00 SGT -> today Saturday 08:00 SGT
+    sat_early = datetime(2026, 11, 14, 7, 59, 59, tzinfo=SGT)
+    sat2 = get_next_representative_saturday(sat_early)
+    assert sat2 == datetime(2026, 11, 14, 8, 0, tzinfo=SGT)
+
+    # 3. Saturday at 08:00:00 SGT -> next week Saturday 08:00 SGT
+    sat_at_8 = datetime(2026, 11, 14, 8, 0, 0, tzinfo=SGT)
+    sat3 = get_next_representative_saturday(sat_at_8)
+    assert sat3 == datetime(2026, 11, 21, 8, 0, tzinfo=SGT)
+
+    # 4. Sunday -> upcoming Saturday 08:00 SGT
+    sun = datetime(2026, 11, 15, 12, 0, tzinfo=SGT)
+    sat4 = get_next_representative_saturday(sun)
+    assert sat4 == datetime(2026, 11, 21, 8, 0, tzinfo=SGT)
+
+
+def test_get_representative_sample_pair():
+    mon = datetime(2026, 11, 9, 10, 0, tzinfo=SGT)
+    wed, sat = get_representative_sample_pair(mon)
+    assert wed == datetime(2026, 11, 11, 8, 0, tzinfo=SGT)
+    assert sat == datetime(2026, 11, 14, 8, 0, tzinfo=SGT)
+
+
+def test_validate_sample_pair_valid():
+    mon = datetime(2026, 11, 9, 10, 0, tzinfo=SGT)
+    pair = [
+        "2026-11-11T08:00:00+08:00",
+        "2026-11-14T08:00:00+08:00",
+    ]
+    w, s = validate_sample_pair(pair, now=mon)
+    assert w == datetime(2026, 11, 11, 8, 0, tzinfo=SGT)
+    assert s == datetime(2026, 11, 14, 8, 0, tzinfo=SGT)
+
+
+def test_validate_sample_pair_expired_or_invalid():
+    now = datetime(2026, 11, 12, 10, 0, tzinfo=SGT)
+
+    # 1. Past timestamp
+    with pytest.raises(Exception) as exc_info:
+        validate_sample_pair(
+            ["2026-11-11T08:00:00+08:00", "2026-11-14T08:00:00+08:00"], now=now
+        )
+    assert "sample_expired" in str(exc_info.value)
+
+    # 2. Too far in the future (> 7 days)
+    with pytest.raises(Exception) as exc_info:
+        validate_sample_pair(
+            ["2026-11-25T08:00:00+08:00", "2026-11-28T08:00:00+08:00"], now=now
+        )
+    assert "sample_expired" in str(exc_info.value)
+
+    # 3. Not 2 items
+    with pytest.raises(Exception) as exc_info:
+        validate_sample_pair(["2026-11-18T08:00:00+08:00"], now=now)
+    assert "sample_expired" in str(exc_info.value)
+
+    # 4. Wrong weekday or time
+    with pytest.raises(Exception) as exc_info:
+        validate_sample_pair(
+            ["2026-11-17T08:00:00+08:00", "2026-11-14T08:00:00+08:00"], now=now
+        )
+    assert "sample_expired" in str(exc_info.value)
 
 
 def test_get_commute_leg_pt_success():

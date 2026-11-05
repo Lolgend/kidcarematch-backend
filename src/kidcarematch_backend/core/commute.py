@@ -5,6 +5,7 @@ from datetime import datetime, time, timedelta, timezone, tzinfo
 from zoneinfo import ZoneInfo
 
 import httpx
+from fastapi import HTTPException, status
 
 from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.schemas.commute import Coordinate, RouteLeg, TransitLeg
@@ -25,13 +26,10 @@ except ImportError:
 _COMMUTE_POSTAL_CACHE: dict[str, Coordinate] = {}
 
 
-def get_next_representative_wednesday(now: datetime | None = None) -> datetime:
-    """Calculate the next upcoming Wednesday at 08:00 Asia/Singapore.
-
-    - If today is Wednesday before 08:00 SGT, use today 08:00 SGT.
-    - If today is Wednesday at or after 08:00 SGT, use next week Wednesday 08:00 SGT.
-    - If today is any other day, use the next upcoming Wednesday at 08:00 SGT.
-    """
+def get_representative_day(
+    target_weekday: int, now: datetime | None = None
+) -> datetime:
+    """Calculate the next upcoming target weekday at 08:00 Asia/Singapore."""
     if now is None:
         now_sgt = datetime.now(SGT)
     elif now.tzinfo is None:
@@ -39,11 +37,15 @@ def get_next_representative_wednesday(now: datetime | None = None) -> datetime:
     else:
         now_sgt = now.astimezone(SGT)
 
-    target_weekday = 2  # Wednesday (Monday=0, Tuesday=1, Wednesday=2, ...)
     current_weekday = now_sgt.weekday()
 
     if current_weekday == target_weekday:
-        if (now_sgt.hour, now_sgt.minute, now_sgt.second, now_sgt.microsecond) < (8, 0, 0, 0):
+        if (now_sgt.hour, now_sgt.minute, now_sgt.second, now_sgt.microsecond) < (
+            8,
+            0,
+            0,
+            0,
+        ):
             days_ahead = 0
         else:
             days_ahead = 7
@@ -52,6 +54,117 @@ def get_next_representative_wednesday(now: datetime | None = None) -> datetime:
 
     target_date = (now_sgt + timedelta(days=days_ahead)).date()
     return datetime.combine(target_date, time(8, 0, 0), tzinfo=SGT)
+
+
+def get_next_representative_wednesday(now: datetime | None = None) -> datetime:
+    """Calculate the next upcoming Wednesday at 08:00 Asia/Singapore."""
+    return get_representative_day(2, now)
+
+
+def get_next_representative_saturday(now: datetime | None = None) -> datetime:
+    """Calculate the next upcoming Saturday at 08:00 Asia/Singapore."""
+    return get_representative_day(5, now)
+
+
+def get_representative_sample_pair(
+    now: datetime | None = None,
+) -> tuple[datetime, datetime]:
+    """Calculate representative sample pair: next upcoming Wednesday at 08:00 SGT and Saturday at 08:00 SGT."""
+    return (
+        get_next_representative_wednesday(now),
+        get_next_representative_saturday(now),
+    )
+
+
+def validate_sample_pair(
+    sample_pair: list[str] | None,
+    now: datetime | None = None,
+) -> tuple[datetime, datetime]:
+    """Validate client-provided sample_pair or return fresh representative pair.
+
+    If sample_pair is provided:
+    - Must be a 2-element list of ISO timestamp strings.
+    - Timestamps must correspond to Wednesday and Saturday at 08:00 SGT.
+    - Neither timestamp can be in the past relative to now_sgt.
+    - Both timestamps must be within the upcoming 7-day window.
+    Raises HTTPException 409 if expired, stale, or malformed.
+    """
+    if now is None:
+        now_sgt = datetime.now(SGT)
+    elif now.tzinfo is None:
+        now_sgt = now.replace(tzinfo=SGT)
+    else:
+        now_sgt = now.astimezone(SGT)
+
+    if not sample_pair:
+        return get_representative_sample_pair(now_sgt)
+
+    if not isinstance(sample_pair, (list, tuple)) or len(sample_pair) != 2:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "sample_expired",
+                "message": "Representative sample pair expired",
+            },
+        )
+
+    try:
+        dt1 = datetime.fromisoformat(sample_pair[0])
+        dt2 = datetime.fromisoformat(sample_pair[1])
+        dt1_sgt = (
+            dt1.replace(tzinfo=SGT) if dt1.tzinfo is None else dt1.astimezone(SGT)
+        )
+        dt2_sgt = (
+            dt2.replace(tzinfo=SGT) if dt2.tzinfo is None else dt2.astimezone(SGT)
+        )
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "sample_expired",
+                "message": "Representative sample pair expired",
+            },
+        )
+
+    # Check expired (in past)
+    if dt1_sgt < now_sgt or dt2_sgt < now_sgt:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "sample_expired",
+                "message": "Representative sample pair expired",
+            },
+        )
+
+    # Check stale (beyond 7 days window)
+    max_window = now_sgt + timedelta(days=7, hours=1)
+    if dt1_sgt > max_window or dt2_sgt > max_window:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "sample_expired",
+                "message": "Representative sample pair expired",
+            },
+        )
+
+    # Check Wednesday (weekday 2) and Saturday (weekday 5) at 08:00
+    if (
+        dt1_sgt.weekday() != 2
+        or dt1_sgt.hour != 8
+        or dt1_sgt.minute != 0
+        or dt2_sgt.weekday() != 5
+        or dt2_sgt.hour != 8
+        or dt2_sgt.minute != 0
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "sample_expired",
+                "message": "Representative sample pair expired",
+            },
+        )
+
+    return dt1_sgt, dt2_sgt
 
 
 def clear_commute_postal_cache() -> None:

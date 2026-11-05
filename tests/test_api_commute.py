@@ -747,26 +747,42 @@ def test_commute_home_only_pt_success(
     assert res.status_code == 200
     data = res.json()
     assert data["mode"] == "pt"
-    assert len(data["samples"]) == 1
-    sample = data["samples"][0]
-    assert sample["kind"] == "weekday"
-    assert sample["sampled_at"] is not None
-    assert "08:00:00" in sample["sampled_at"]
-    assert len(sample["legs"]) == 1
-    leg1 = sample["legs"][0]
-    assert leg1["from_anchor"] == "home"
-    assert leg1["to_anchor"] == "centre"
-    assert leg1["status"] == "available"
-    assert leg1["source"] == "onemap"
-    assert leg1["duration_seconds"] == 1500.0
-    assert leg1["distance_meters"] == 5000.0
-    assert len(leg1["geometry"]) == 6
-    assert len(leg1["transit_legs"]) == 3
-    assert leg1["transit_legs"][0]["mode"] == "WALK"
-    assert leg1["transit_legs"][1]["mode"] == "BUS"
-    assert leg1["transit_legs"][1]["route"] == "159"
-    assert sample["totals"]["duration_seconds"] == 1500.0
-    assert sample["totals"]["distance_meters"] == 5000.0
+    assert len(data["samples"]) == 2
+    assert len(data["sample_pair"]) == 2
+
+    # Weekday sample
+    sample_wd = data["samples"][0]
+    assert sample_wd["kind"] == "weekday"
+    assert sample_wd["sampled_at"] is not None
+    assert "08:00:00" in sample_wd["sampled_at"]
+    assert len(sample_wd["legs"]) == 1
+    leg1_wd = sample_wd["legs"][0]
+    assert leg1_wd["from_anchor"] == "home"
+    assert leg1_wd["to_anchor"] == "centre"
+    assert leg1_wd["status"] == "available"
+    assert leg1_wd["source"] == "onemap"
+    assert leg1_wd["duration_seconds"] == 1500.0
+    assert leg1_wd["distance_meters"] == 5000.0
+    assert len(leg1_wd["geometry"]) == 6
+    assert len(leg1_wd["transit_legs"]) == 3
+    assert leg1_wd["transit_legs"][0]["mode"] == "WALK"
+    assert leg1_wd["transit_legs"][1]["mode"] == "BUS"
+    assert leg1_wd["transit_legs"][1]["route"] == "159"
+    assert sample_wd["totals"]["duration_seconds"] == 1500.0
+    assert sample_wd["totals"]["distance_meters"] == 5000.0
+
+    # Weekend sample
+    sample_we = data["samples"][1]
+    assert sample_we["kind"] == "weekend"
+    assert sample_we["sampled_at"] is not None
+    assert "08:00:00" in sample_we["sampled_at"]
+    assert len(sample_we["legs"]) == 1
+    leg1_we = sample_we["legs"][0]
+    assert leg1_we["from_anchor"] == "home"
+    assert leg1_we["to_anchor"] == "centre"
+    assert leg1_we["status"] == "available"
+    assert leg1_we["duration_seconds"] == 1500.0
+    assert sample_we["totals"]["duration_seconds"] == 1500.0
 
 
 def test_commute_two_legs_pt_sequential_onward_timing(
@@ -875,19 +891,31 @@ def test_commute_two_legs_pt_sequential_onward_timing(
     )
     assert res.status_code == 200
     data = res.json()
-    assert len(pt_calls) == 2
-    # Leg 1 departure is 08:00:00
+    assert len(pt_calls) == 4
+    # Weekday Leg 1 departure is 08:00:00
     assert pt_calls[0]["time"] == "08:00:00"
-    # Leg 2 onward departure is exactly 08:25:00 (first leg arrival + 0 drop-off duration)
+    # Weekday Leg 2 onward departure is exactly 08:25:00 (first leg arrival + 0 drop-off duration)
     assert pt_calls[1]["time"] == "08:25:00"
+    # Weekend Leg 1 departure is 08:00:00
+    assert pt_calls[2]["time"] == "08:00:00"
+    # Weekend Leg 2 onward departure is exactly 08:25:00
+    assert pt_calls[3]["time"] == "08:25:00"
 
-    sample = data["samples"][0]
-    assert sample["kind"] == "weekday"
-    assert len(sample["legs"]) == 2
-    assert sample["legs"][0]["duration_seconds"] == 1500.0
-    assert sample["legs"][1]["duration_seconds"] == 1200.0
-    assert sample["totals"]["duration_seconds"] == 2700.0
-    assert sample["totals"]["distance_meters"] == 9200.0
+    assert len(data["samples"]) == 2
+    sample_wd = data["samples"][0]
+    assert sample_wd["kind"] == "weekday"
+    assert len(sample_wd["legs"]) == 2
+    assert sample_wd["legs"][0]["duration_seconds"] == 1500.0
+    assert sample_wd["legs"][1]["duration_seconds"] == 1200.0
+    assert sample_wd["totals"]["duration_seconds"] == 2700.0
+    assert sample_wd["totals"]["distance_meters"] == 9200.0
+
+    sample_we = data["samples"][1]
+    assert sample_we["kind"] == "weekend"
+    assert len(sample_we["legs"]) == 2
+    assert sample_we["legs"][0]["duration_seconds"] == 1500.0
+    assert sample_we["legs"][1]["duration_seconds"] == 1200.0
+    assert sample_we["totals"]["duration_seconds"] == 2700.0
 
 
 def test_commute_pt_first_leg_failure_marks_onward_unavailable(
@@ -943,13 +971,13 @@ def test_commute_pt_first_leg_failure_marks_onward_unavailable(
     )
     assert res.status_code == 200
     data = res.json()
-    # Leg 2 must not be requested because Leg 1 arrival cannot be determined!
-    assert len(pt_calls) == 1
-    sample = data["samples"][0]
-    assert sample["legs"][0]["status"] == "unavailable"
-    assert sample["legs"][1]["status"] == "unavailable"
-    assert "onward" in sample["legs"][1]["message"].lower()
-    assert sample["totals"] is None
+    # Leg 2 must not be requested because Leg 1 arrival cannot be determined! (1 for weekday, 1 for weekend)
+    assert len(pt_calls) == 2
+    for sample in data["samples"]:
+        assert sample["legs"][0]["status"] == "unavailable"
+        assert sample["legs"][1]["status"] == "unavailable"
+        assert "onward" in sample["legs"][1]["message"].lower()
+        assert sample["totals"] is None
 
 
 def test_commute_pt_expired_sample_pair_returns_409(
@@ -969,5 +997,179 @@ def test_commute_pt_expired_sample_pair_returns_409(
         },
     )
     assert res.status_code == 409
-    assert "sample_expired" in res.json()["detail"]
+    detail = res.json()["detail"]
+    assert detail["code"] == "sample_expired"
+    assert detail["message"] == "Representative sample pair expired"
+
+
+def test_commute_pt_saturday_routing_and_sample_pair_reuse(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal=None,
+    )
+
+    from kidcarematch_backend.core.commute import get_representative_sample_pair
+    wed, sat = get_representative_sample_pair()
+    sample_pair = [wed.isoformat(), sat.isoformat()]
+
+    pt_calls = []
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
+                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            params = kwargs.get("params", {})
+            pt_calls.append(params)
+            mock_resp.json.return_value = {
+                "plan": {
+                    "itineraries": [
+                        {
+                            "duration": 1800 if params.get("date") == sat.strftime("%m-%d-%Y") else 1500,
+                            "legs": [
+                                {
+                                    "mode": "WALK",
+                                    "duration": 300,
+                                    "distance": 250,
+                                    "legGeometry": {"points": "sagGwhtxRsDkC"},
+                                },
+                                {
+                                    "mode": "BUS",
+                                    "route": "159",
+                                    "duration": 1500 if params.get("date") == sat.strftime("%m-%d-%Y") else 1200,
+                                    "distance": 4750,
+                                    "legGeometry": {"points": "sagGwhtxRsDkC"},
+                                },
+                            ],
+                        }
+                    ]
+                }
+            }
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={
+            "profile_id": profile.profile_id,
+            "mode": "pt",
+            "sample_pair": sample_pair,
+        },
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["sample_pair"] == sample_pair
+    assert len(pt_calls) == 2
+    assert pt_calls[0]["date"] == wed.strftime("%m-%d-%Y")
+    assert pt_calls[1]["date"] == sat.strftime("%m-%d-%Y")
+
+    assert len(data["samples"]) == 2
+    assert data["samples"][0]["kind"] == "weekday"
+    assert data["samples"][0]["totals"]["duration_seconds"] == 1500.0
+    assert data["samples"][1]["kind"] == "weekend"
+    assert data["samples"][1]["totals"]["duration_seconds"] == 1800.0
+
+
+def test_commute_single_estimate_modes_return_single_sample_with_sample_pair(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal=None,
+    )
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
+                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            mock_resp.json.return_value = {
+                "route_geometry": "sagGwhtxRsDkC",
+                "route_summary": {
+                    "total_time": 600,
+                    "total_distance": 5000,
+                },
+            }
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    for mode in ("drive", "walk", "cycle"):
+        res = client.post(
+            f"/api/v1/centres/{centre.centre_id}/commute",
+            json={"profile_id": profile.profile_id, "mode": mode},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["mode"] == mode
+        assert len(data["samples"]) == 1
+        sample = data["samples"][0]
+        assert sample["kind"] == "single"
+        assert sample["sampled_at"] is None
+        assert sample["totals"]["duration_seconds"] == 600.0
+        # Sample pair is present for session reuse
+        assert len(data["sample_pair"]) == 2
+
+    # Expired sample pair in drive mode raises 409
+    res_expired = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={
+            "profile_id": profile.profile_id,
+            "mode": "drive",
+            "sample_pair": ["2020-01-01T08:00:00+08:00"],
+        },
+    )
+    assert res_expired.status_code == 409
+    assert res_expired.json()["detail"]["code"] == "sample_expired"
 

@@ -16,10 +16,9 @@ from kidcarematch_backend.auth.security import (
     get_optional_current_user,
 )
 from kidcarematch_backend.core.commute import (
-    SGT,
     get_commute_leg,
-    get_next_representative_wednesday,
     resolve_commute_postal,
+    validate_sample_pair,
 )
 from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.core.matching import (
@@ -682,6 +681,142 @@ def get_centre_location(
     )
 
 
+def _build_commute_sample(
+    kind: str,
+    sampled_at: datetime | None,
+    mode: str,
+    home_coord: CommuteCoordinate | None,
+    centre_coord: CommuteCoordinate | None,
+    workplace_coord: CommuteCoordinate | None,
+    has_workplace: bool,
+) -> CommuteSample:
+    """Build a single CommuteSample with independent routing, failure handling, and totals."""
+    legs: list[RouteLeg] = []
+    leg1_departure = sampled_at if mode == "pt" else None
+
+    # Leg 1: home -> centre
+    if not home_coord:
+        leg1 = RouteLeg(
+            from_anchor="home",
+            to_anchor="centre",
+            status="unavailable",
+            source=None,
+            duration_seconds=None,
+            distance_meters=None,
+            geometry=None,
+            message="Home postal code could not be resolved",
+        )
+    elif not centre_coord:
+        leg1 = RouteLeg(
+            from_anchor="home",
+            to_anchor="centre",
+            status="unavailable",
+            source=None,
+            duration_seconds=None,
+            distance_meters=None,
+            geometry=None,
+            message="Centre postal code could not be resolved",
+        )
+    else:
+        leg1 = get_commute_leg(
+            from_anchor="home",
+            to_anchor="centre",
+            start=home_coord,
+            end=centre_coord,
+            mode=mode,
+            departure=leg1_departure,
+        )
+    legs.append(leg1)
+
+    # Leg 2: centre -> workplace (if workplace postal provided)
+    if has_workplace:
+        if not centre_coord:
+            leg2 = RouteLeg(
+                from_anchor="centre",
+                to_anchor="workplace",
+                status="unavailable",
+                source=None,
+                duration_seconds=None,
+                distance_meters=None,
+                geometry=None,
+                message="Centre postal code could not be resolved",
+            )
+        elif not workplace_coord:
+            leg2 = RouteLeg(
+                from_anchor="centre",
+                to_anchor="workplace",
+                status="unavailable",
+                source=None,
+                duration_seconds=None,
+                distance_meters=None,
+                geometry=None,
+                message="Workplace postal code could not be resolved",
+            )
+        elif mode == "pt" and (
+            leg1.status != "available" or leg1.duration_seconds is None
+        ):
+            leg2 = RouteLeg(
+                from_anchor="centre",
+                to_anchor="workplace",
+                status="unavailable",
+                source=None,
+                duration_seconds=None,
+                distance_meters=None,
+                geometry=None,
+                message="Onward leg departure cannot be determined because first leg arrival is unavailable",
+            )
+        else:
+            leg2_departure = None
+            if (
+                mode == "pt"
+                and leg1_departure is not None
+                and leg1.duration_seconds is not None
+            ):
+                leg2_departure = leg1_departure + timedelta(
+                    seconds=leg1.duration_seconds
+                )
+
+            leg2 = get_commute_leg(
+                from_anchor="centre",
+                to_anchor="workplace",
+                start=centre_coord,
+                end=workplace_coord,
+                mode=mode,
+                departure=leg2_departure,
+            )
+        legs.append(leg2)
+
+    all_available = all(
+        leg.status == "available"
+        and leg.duration_seconds is not None
+        and leg.distance_meters is not None
+        for leg in legs
+    )
+    totals = (
+        RouteTotals(
+            duration_seconds=sum(
+                leg.duration_seconds
+                for leg in legs
+                if leg.duration_seconds is not None
+            ),
+            distance_meters=sum(
+                leg.distance_meters
+                for leg in legs
+                if leg.distance_meters is not None
+            ),
+        )
+        if all_available
+        else None
+    )
+
+    return CommuteSample(
+        kind=kind,
+        sampled_at=sampled_at,
+        legs=legs,
+        totals=totals,
+    )
+
+
 @router.post(
     "/{centre_id}/commute",
     response_model=CommuteResponse,
@@ -739,162 +874,42 @@ def get_centre_commute(
     if clean_workplace_postal is not None:
         anchors["workplace"] = workplace_coord
 
-    sample_kind = "single"
-    sampled_at: datetime | None = None
-    response_sample_pair = payload.sample_pair
-    leg1_departure: datetime | None = None
+    wednesday_dt, saturday_dt = validate_sample_pair(payload.sample_pair)
+    response_sample_pair = [wednesday_dt.isoformat(), saturday_dt.isoformat()]
+
+    has_workplace = clean_workplace_postal is not None
 
     if payload.mode == "pt":
-        sample_kind = "weekday"
-        if payload.sample_pair and len(payload.sample_pair) > 0:
-            try:
-                candidate_dt = datetime.fromisoformat(payload.sample_pair[0])
-                if candidate_dt.tzinfo is None:
-                    candidate_dt = candidate_dt.replace(tzinfo=SGT)
-                else:
-                    candidate_dt = candidate_dt.astimezone(SGT)
-            except (ValueError, TypeError):
-                candidate_dt = None
-
-            if candidate_dt is not None:
-                now_sgt = datetime.now(SGT)
-                if candidate_dt < now_sgt:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail="sample_expired",
-                    )
-                sampled_at = candidate_dt
-            else:
-                sampled_at = get_next_representative_wednesday()
-        else:
-            sampled_at = get_next_representative_wednesday()
-
-        leg1_departure = sampled_at
-        response_sample_pair = payload.sample_pair or [sampled_at.isoformat()]
-
-    legs: list[RouteLeg] = []
-
-    # Leg 1: home -> centre
-    if not home_coord:
-        leg1 = RouteLeg(
-            from_anchor="home",
-            to_anchor="centre",
-            status="unavailable",
-            source=None,
-            duration_seconds=None,
-            distance_meters=None,
-            geometry=None,
-            message="Home postal code could not be resolved",
+        sample_weekday = _build_commute_sample(
+            kind="weekday",
+            sampled_at=wednesday_dt,
+            mode="pt",
+            home_coord=home_coord,
+            centre_coord=centre_coord,
+            workplace_coord=workplace_coord,
+            has_workplace=has_workplace,
         )
-    elif not centre_coord:
-        leg1 = RouteLeg(
-            from_anchor="home",
-            to_anchor="centre",
-            status="unavailable",
-            source=None,
-            duration_seconds=None,
-            distance_meters=None,
-            geometry=None,
-            message="Centre postal code could not be resolved",
+        sample_weekend = _build_commute_sample(
+            kind="weekend",
+            sampled_at=saturday_dt,
+            mode="pt",
+            home_coord=home_coord,
+            centre_coord=centre_coord,
+            workplace_coord=workplace_coord,
+            has_workplace=has_workplace,
         )
+        samples = [sample_weekday, sample_weekend]
     else:
-        leg1 = get_commute_leg(
-            from_anchor="home",
-            to_anchor="centre",
-            start=home_coord,
-            end=centre_coord,
+        sample_single = _build_commute_sample(
+            kind="single",
+            sampled_at=None,
             mode=payload.mode,
-            departure=leg1_departure,
+            home_coord=home_coord,
+            centre_coord=centre_coord,
+            workplace_coord=workplace_coord,
+            has_workplace=has_workplace,
         )
-    legs.append(leg1)
-
-    # Leg 2: centre -> workplace (if workplace postal provided)
-    if clean_workplace_postal is not None:
-        if not centre_coord:
-            leg2 = RouteLeg(
-                from_anchor="centre",
-                to_anchor="workplace",
-                status="unavailable",
-                source=None,
-                duration_seconds=None,
-                distance_meters=None,
-                geometry=None,
-                message="Centre postal code could not be resolved",
-            )
-        elif not workplace_coord:
-            leg2 = RouteLeg(
-                from_anchor="centre",
-                to_anchor="workplace",
-                status="unavailable",
-                source=None,
-                duration_seconds=None,
-                distance_meters=None,
-                geometry=None,
-                message="Workplace postal code could not be resolved",
-            )
-        elif payload.mode == "pt" and (
-            leg1.status != "available" or leg1.duration_seconds is None
-        ):
-            leg2 = RouteLeg(
-                from_anchor="centre",
-                to_anchor="workplace",
-                status="unavailable",
-                source=None,
-                duration_seconds=None,
-                distance_meters=None,
-                geometry=None,
-                message="Onward leg departure cannot be determined because first leg arrival is unavailable",
-            )
-        else:
-            leg2_departure = None
-            if (
-                payload.mode == "pt"
-                and leg1_departure is not None
-                and leg1.duration_seconds is not None
-            ):
-                leg2_departure = leg1_departure + timedelta(
-                    seconds=leg1.duration_seconds
-                )
-
-            leg2 = get_commute_leg(
-                from_anchor="centre",
-                to_anchor="workplace",
-                start=centre_coord,
-                end=workplace_coord,
-                mode=payload.mode,
-                departure=leg2_departure,
-            )
-        legs.append(leg2)
-
-    all_available = all(
-        leg.status == "available"
-        and leg.duration_seconds is not None
-        and leg.distance_meters is not None
-        for leg in legs
-    )
-    totals = (
-        RouteTotals(
-            duration_seconds=sum(
-                leg.duration_seconds
-                for leg in legs
-                if leg.duration_seconds is not None
-            ),
-            distance_meters=sum(
-                leg.distance_meters
-                for leg in legs
-                if leg.distance_meters is not None
-            ),
-        )
-        if all_available
-        else None
-    )
-
-    sample = CommuteSample(
-        kind=sample_kind,
-        sampled_at=sampled_at,
-        legs=legs,
-        totals=totals,
-    )
+        samples = [sample_single]
 
     return CommuteResponse(
         centre_id=centre.centre_id or centre_id,
@@ -902,7 +917,7 @@ def get_centre_commute(
         mode=payload.mode,
         sample_pair=response_sample_pair,
         anchors=anchors,
-        samples=[sample],
+        samples=samples,
     )
 
 
