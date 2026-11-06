@@ -21,6 +21,7 @@ class Settings(BaseSettings):
         "http://localhost:3000",
         "https://kidscare-match-sg.web.app",
         "https://kidscare-match-sg.firebaseapp.com",
+        "https://kidcarematch-frontend.vercel.app"
     ]
 
     model_config = SettingsConfigDict(
