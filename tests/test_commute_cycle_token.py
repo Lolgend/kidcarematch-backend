@@ -908,3 +908,34 @@ def test_api_commute_sampling_with_direct_baseline_combined(
     assert sample["comparison"]["certification"] is not None
 
 
+def test_build_evaluation_metadata():
+    from kidcarematch_backend.core.commute import (
+        CommuteAnchors,
+        build_evaluation_metadata,
+        compute_anchor_revision,
+        compute_profile_revision,
+    )
+    from kidcarematch_backend.schemas.commute import Coordinate
+
+    home = Coordinate(lat=1.35, lng=103.82)
+    centre = Coordinate(lat=1.36, lng=103.83)
+    workplace = Coordinate(lat=1.30, lng=103.85)
+    anchors = CommuteAnchors(
+        home=home, centre=centre, workplace=workplace, has_workplace=True
+    )
+
+    explicit_time = datetime(2026, 11, 7, 10, 0, 0, tzinfo=timezone.utc)
+    meta = build_evaluation_metadata("120120", "560123", anchors, now=explicit_time)
+
+    assert meta.evaluation_id.startswith("eval_")
+    assert len(meta.evaluation_id) == 29  # "eval_" (5) + 24 hex chars
+    assert meta.evaluated_at == explicit_time
+    assert meta.profile_revision == compute_profile_revision("120120", "560123")
+    assert meta.anchor_revision == compute_anchor_revision(home, centre, workplace)
+
+    # Defaults to now if now is None
+    meta_default = build_evaluation_metadata("120120", None, anchors)
+    assert meta_default.evaluation_id.startswith("eval_")
+    assert meta_default.evaluated_at.tzinfo == timezone.utc
+
+

@@ -36,6 +36,7 @@ from kidcarematch_backend.schemas.commute import (
     Coordinate,
     DirectRoute,
     DurationBasis,
+    EvaluationMetadata,
     FailureClass,
     LegTiming,
     NegotiatedCommuteSample,
@@ -729,231 +730,31 @@ def get_commute_leg(
     - Normalizes route geometry, duration in seconds, distance in meters.
     - If routing fails or geometry is missing, returns status='unavailable' with null metrics.
     - NEVER returns straight-line fallback.
+    - Delegates to get_negotiated_commute_leg and projects base RouteLeg fields.
     """
-    effective_departure: datetime | None = departure
-    if mode == "pt":
-        dep = departure or get_next_representative_wednesday()
-        dep_sgt = (
-            dep.replace(tzinfo=SGT)
-            if dep.tzinfo is None
-            else dep.astimezone(SGT)
-        )
-        effective_departure = dep_sgt
-        params: dict[str, Any] = {
-            "start": f"{start.lat},{start.lng}",
-            "end": f"{end.lat},{end.lng}",
-            "routeType": "pt",
-            "date": dep_sgt.strftime("%m-%d-%Y"),
-            "time": dep_sgt.strftime("%H:%M:%S"),
-            "mode": "TRANSIT",
-            "maxWalkDistance": 1000,
-            "numItineraries": 1,
-        }
-    else:
-        params = {
-            "start": f"{start.lat},{start.lng}",
-            "end": f"{end.lat},{end.lng}",
-            "routeType": mode,
-        }
-
-    call_timeout = (
-        timeout
-        if timeout is not None
-        else getattr(
-            settings,
-            "COMMUTE_CALL_TIMEOUT_SECONDS",
-            COMMUTE_CALL_TIMEOUT_SECONDS,
-        )
+    negotiated = get_negotiated_commute_leg(
+        from_anchor=from_anchor,
+        to_anchor=to_anchor,
+        start=start,
+        end=end,
+        mode=mode,
+        departure=departure,
+        client=client,
+        timeout=timeout,
+        deadline=deadline,
     )
-    if deadline is not None:
-        rem = max(0.0, deadline - time_module.monotonic())
-        if rem <= 0.0:
-            return _unavailable_leg(
-                from_anchor,
-                to_anchor,
-                "Evaluation budget exhausted",
-            )
-        effective_timeout = min(call_timeout, rem)
-    else:
-        effective_timeout = call_timeout
-
-    try:
-        response = _fetch_onemap(
-            settings.ONEMAP_ROUTING_API_URL,
-            params=params,
-            client=client,
-            timeout=effective_timeout,
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        if not isinstance(data, dict):
-            raise TypeError("Malformed OneMap routing response")
-
-        if mode == "pt" and "plan" not in data:
-            return _unavailable_leg(
-                from_anchor, to_anchor, "Public transport plan unavailable"
-            )
-
-        if "plan" in data:
-            plan = data.get("plan")
-            if not isinstance(plan, dict):
-                raise TypeError("Malformed public transport plan")
-            itineraries = plan.get("itineraries")
-            if not isinstance(itineraries, list):
-                raise ValueError("Malformed public transport itineraries")
-            if not itineraries:
-                return _unavailable_leg(
-                    from_anchor, to_anchor, "No public transport itinerary found"
-                )
-            itinerary = itineraries[0]
-            if not isinstance(itinerary, dict):
-                raise TypeError("Malformed public transport itinerary")
-            raw_legs = itinerary.get("legs")
-            if not isinstance(raw_legs, list) or not raw_legs:
-                raise ValueError("Public transport itinerary legs unavailable")
-
-            transit_legs: list[TransitLeg] = []
-            all_coords: list[Coordinate] = []
-
-            for raw_leg in raw_legs:
-                if not isinstance(raw_leg, dict):
-                    raise TypeError("Malformed public transport sub-leg")
-                sub_mode = str(raw_leg.get("mode", "TRANSIT")).upper()
-                sub_duration = _required_metric(raw_leg, "duration")
-                sub_distance = _required_metric(raw_leg, "distance")
-                sub_route = (
-                    raw_leg.get("route")
-                    or raw_leg.get("routeShortName")
-                    or raw_leg.get("routeLongName")
-                )
-                if sub_route:
-                    sub_route = str(sub_route)
-
-                geom_val = raw_leg.get("legGeometry")
-                if isinstance(geom_val, dict):
-                    geom_poly = geom_val.get("points") or ""
-                elif isinstance(geom_val, str):
-                    geom_poly = geom_val
-                else:
-                    geom_poly = ""
-
-                sub_coords = decode_polyline(geom_poly) if geom_poly else []
-                if not sub_coords:
-                    return _unavailable_leg(
-                        from_anchor,
-                        to_anchor,
-                        "Route geometry unavailable for transit sub-leg",
-                    )
-                all_coords.extend(sub_coords)
-
-                instruction = raw_leg.get("instruction")
-                if not instruction:
-                    if sub_mode == "WALK":
-                        dist_fmt = (
-                            f"{int(sub_distance)} m"
-                            if sub_distance < 1000
-                            else f"{sub_distance / 1000:.1f} km"
-                        )
-                        instruction = f"Walk ({dist_fmt})"
-                    elif sub_route:
-                        instruction = f"Take {sub_mode.title()} {sub_route}"
-                    else:
-                        instruction = f"Take {sub_mode.title()}"
-
-                transit_legs.append(
-                    TransitLeg(
-                        mode=sub_mode,
-                        duration_seconds=sub_duration,
-                        distance_meters=sub_distance,
-                        route=sub_route,
-                        instruction=instruction,
-                        geometry=sub_coords if sub_coords else None,
-                    )
-                )
-
-            if not all_coords:
-                return _unavailable_leg(
-                    from_anchor, to_anchor, "Route geometry unavailable"
-                )
-
-            duration_secs = _required_metric(itinerary, "duration")
-            total_dist = sum(t.distance_meters or 0 for t in transit_legs)
-            arrival_at, elapsed, is_provider_end_time = _itinerary_arrival(
-                itinerary, effective_departure, duration_secs
-            )
-            if is_provider_end_time and elapsed is not None:
-                duration_secs = elapsed
-
-            return RouteLeg(
-                from_anchor=from_anchor,
-                to_anchor=to_anchor,
-                status="available",
-                source="onemap",
-                duration_seconds=duration_secs,
-                arrival_at=arrival_at,
-                distance_meters=total_dist,
-                geometry=all_coords,
-                message=None,
-                transit_legs=transit_legs if transit_legs else None,
-            )
-
-        route_geometry = data.get("route_geometry")
-        if not route_geometry or not isinstance(route_geometry, str):
-            return _unavailable_leg(
-                from_anchor, to_anchor, "Route geometry unavailable"
-            )
-
-        coords = decode_polyline(route_geometry)
-        if not coords:
-            return _unavailable_leg(
-                from_anchor, to_anchor, "Decoded route geometry is empty"
-            )
-
-        summary = data.get("route_summary")
-        if not summary or not isinstance(summary, dict):
-            return _unavailable_leg(from_anchor, to_anchor, "Route summary unavailable")
-
-        duration_secs = _required_metric(summary, "total_time")
-        dist_meters = _required_metric(summary, "total_distance")
-
-        return RouteLeg(
-            from_anchor=from_anchor,
-            to_anchor=to_anchor,
-            status="available",
-            source="onemap",
-            duration_seconds=duration_secs,
-            distance_meters=dist_meters,
-            geometry=coords,
-            message=None,
-        )
-    except httpx.TimeoutException as exc:
-        logger.warning(
-            "OneMap routing timeout (%s -> %s): %s", from_anchor, to_anchor, exc
-        )
-        if deadline is not None and time_module.monotonic() >= deadline:
-            return _unavailable_leg(
-                from_anchor,
-                to_anchor,
-                "Evaluation budget exhausted",
-            )
-        return _unavailable_leg(
-            from_anchor,
-            to_anchor,
-            "Route request timed out",
-        )
-    except (
-        httpx.HTTPError,
-        ValueError,
-        KeyError,
-        TypeError,
-        AttributeError,
-        OSError,
-    ) as exc:
-        logger.warning(
-            "OneMap routing failed (%s -> %s): %s", from_anchor, to_anchor, exc
-        )
-        return _unavailable_leg(from_anchor, to_anchor, "Route unavailable")
+    return RouteLeg(
+        from_anchor=negotiated.from_anchor,
+        to_anchor=negotiated.to_anchor,
+        status=negotiated.status,
+        source=negotiated.source,
+        duration_seconds=negotiated.duration_seconds,
+        arrival_at=negotiated.arrival_at,
+        distance_meters=negotiated.distance_meters,
+        geometry=negotiated.geometry,
+        message=negotiated.message,
+        transit_legs=negotiated.transit_legs,
+    )
 
 
 @dataclass
@@ -979,6 +780,26 @@ class CommuteAnchors:
         if self.has_workplace or include_workplace_key:
             res["workplace"] = self.workplace
         return res
+
+
+def build_evaluation_metadata(
+    home_postal: str,
+    workplace_postal: str | None,
+    anchors: CommuteAnchors,
+    now: datetime | None = None,
+) -> EvaluationMetadata:
+    """Construct evaluation metadata with consistent ID format and state revisions."""
+    evaluated_at = now if now is not None else datetime.now(timezone.utc)
+    profile_rev = compute_profile_revision(home_postal, workplace_postal)
+    anchor_rev = compute_anchor_revision(
+        anchors.home, anchors.centre, anchors.workplace
+    )
+    return EvaluationMetadata(
+        evaluation_id=f"eval_{secrets.token_hex(12)}",
+        evaluated_at=evaluated_at,
+        profile_revision=profile_rev,
+        anchor_revision=anchor_rev,
+    )
 
 
 def build_commute_sample(
@@ -2530,6 +2351,7 @@ __all__ = [
     "build_commute_sample",
     "build_commute_samples",
     "build_cycle_conditions_id",
+    "build_evaluation_metadata",
     "build_negotiated_commute_sample",
     "build_negotiated_commute_samples",
     "clear_commute_postal_cache",

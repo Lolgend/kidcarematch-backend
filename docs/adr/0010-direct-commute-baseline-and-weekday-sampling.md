@@ -20,7 +20,7 @@ To support interactive commute comparisons without compromising operational late
    - Bounded fallback samples (`sample_index: 1` for following Thursday 08:00 SGT, `sample_index: 2` for following Friday 08:00 SGT) reuse the signed cycle token; expired tokens return `409 Conflict` (`sample_expired`), and invalid or tampered tokens return `422 Unprocessable Entity`.
 
 3. **Elapsed Timing Certification & Component Failure Survival**:
-   - Compares total elapsed time from requested departure (08:00 SGT) including initial waiting, transfers, and transit legs.
+   - Compares elapsed duration from requested departure (08:00 SGT) including initial waiting, transfers, and transit legs.
    - For public transport, requires verified OneMap `endTime` satisfying `duration <= elapsed <= 86400` seconds (`duration_basis: "elapsed_from_requested_departure"`, `arrival_source: "provider_end_time"`, `initial_wait_included: true`). If `endTime` is missing or synthetic, comparison fails closed with `timing_unverified` while preserving usable route geometries and totals.
    - For provider-default modes (`drive`, `walk`, `cycle`), certifies compatible static estimates (`duration_basis: "provider_default"`).
    - Independent component survival: failure of direct baseline does not invalidate via-centre routes; conversely, failure of a via leg preserves complete direct baseline routes.

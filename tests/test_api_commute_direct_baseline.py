@@ -1,6 +1,5 @@
 """Tests for opt-in direct commute baseline route and failure survival (Ticket #90)."""
 
-import re
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -260,7 +259,7 @@ def test_commute_opt_in_direct_baseline_returns_negotiated_response_and_metadata
 
     # Check evaluation metadata
     eval1 = data1["evaluation"]
-    assert re.match(r"^[0-9a-f-]{36}$", eval1["evaluation_id"])
+    assert eval1["evaluation_id"].startswith("eval_")
     assert "evaluated_at" in eval1
     assert len(eval1["profile_revision"]) == 64
     assert len(eval1["anchor_revision"]) == 64
