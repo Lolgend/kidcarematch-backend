@@ -1,6 +1,7 @@
 """Strict OneMap geospatial adapter for commute route display (separate from matching)."""
 
 import logging
+import math
 from datetime import datetime, time, timedelta, timezone, tzinfo
 from zoneinfo import ZoneInfo
 
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 SGT: tzinfo
 try:
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
     try:
         SGT = ZoneInfo("Asia/Singapore")
     except (ZoneInfoNotFoundError, OSError, KeyError, ValueError):
@@ -23,6 +25,7 @@ except ImportError:
     SGT = timezone(timedelta(hours=8))
 
 # Bounded in-memory cache for verified exact-postcode resolutions
+_COMMUTE_POSTAL_CACHE_MAX = 512
 _COMMUTE_POSTAL_CACHE: dict[str, Coordinate] = {}
 
 
@@ -111,12 +114,8 @@ def validate_sample_pair(
     try:
         dt1 = datetime.fromisoformat(sample_pair[0])
         dt2 = datetime.fromisoformat(sample_pair[1])
-        dt1_sgt = (
-            dt1.replace(tzinfo=SGT) if dt1.tzinfo is None else dt1.astimezone(SGT)
-        )
-        dt2_sgt = (
-            dt2.replace(tzinfo=SGT) if dt2.tzinfo is None else dt2.astimezone(SGT)
-        )
+        dt1_sgt = dt1.replace(tzinfo=SGT) if dt1.tzinfo is None else dt1.astimezone(SGT)
+        dt2_sgt = dt2.replace(tzinfo=SGT) if dt2.tzinfo is None else dt2.astimezone(SGT)
     except (ValueError, TypeError):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -152,9 +151,13 @@ def validate_sample_pair(
         dt1_sgt.weekday() != 2
         or dt1_sgt.hour != 8
         or dt1_sgt.minute != 0
+        or dt1_sgt.second != 0
+        or dt1_sgt.microsecond != 0
         or dt2_sgt.weekday() != 5
         or dt2_sgt.hour != 8
         or dt2_sgt.minute != 0
+        or dt2_sgt.second != 0
+        or dt2_sgt.microsecond != 0
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -186,33 +189,25 @@ def decode_polyline(polyline_str: str) -> list[Coordinate]:
     lng = 0
     length = len(polyline_str)
 
+    def read_value() -> int:
+        nonlocal index
+        shift = 0
+        result = 0
+        while index < length:
+            byte = ord(polyline_str[index]) - 63
+            index += 1
+            if byte < 0 or byte > 0x3F:
+                raise ValueError("Invalid encoded polyline character")
+            result |= (byte & 0x1F) << shift
+            shift += 5
+            if byte < 0x20:
+                return ~(result >> 1) if result & 1 else result >> 1
+        raise ValueError("Truncated encoded polyline")
+
     try:
         while index < length:
-            # Decode latitude difference
-            shift = 0
-            result = 0
-            while index < length:
-                byte = ord(polyline_str[index]) - 63
-                index += 1
-                result |= (byte & 0x1F) << shift
-                shift += 5
-                if byte < 0x20:
-                    break
-            dlat = ~(result >> 1) if (result & 1) else (result >> 1)
-            lat += dlat
-
-            # Decode longitude difference
-            shift = 0
-            result = 0
-            while index < length:
-                byte = ord(polyline_str[index]) - 63
-                index += 1
-                result |= (byte & 0x1F) << shift
-                shift += 5
-                if byte < 0x20:
-                    break
-            dlng = ~(result >> 1) if (result & 1) else (result >> 1)
-            lng += dlng
+            lat += read_value()
+            lng += read_value()
 
             lat_deg = round(lat / 1e5, 6)
             lng_deg = round(lng / 1e5, 6)
@@ -262,17 +257,19 @@ def resolve_commute_postal(
         "pageNum": 1,
     }
 
+    token = settings.ONEMAP_API_TOKEN or settings.ONEMAP_API_KEY
+    headers = {"Authorization": token.removeprefix("Bearer ")} if token else {}
     try:
         if client is not None:
             response = client.get(
-                settings.ONEMAP_API_URL, params=params, timeout=5.0
+                settings.ONEMAP_API_URL, params=params, headers=headers, timeout=5.0
             )
             response.raise_for_status()
             data = response.json()
         else:
             with httpx.Client(timeout=5.0) as http_client:
                 response = http_client.get(
-                    settings.ONEMAP_API_URL, params=params
+                    settings.ONEMAP_API_URL, params=params, headers=headers
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -282,14 +279,24 @@ def resolve_commute_postal(
                 if str(result.get("POSTAL", "")).strip() == clean_postal:
                     lat = float(result["LATITUDE"])
                     lng = float(result["LONGITUDE"])
+                    if not (
+                        math.isfinite(lat)
+                        and math.isfinite(lng)
+                        and -90 <= lat <= 90
+                        and -180 <= lng <= 180
+                    ):
+                        raise ValueError("OneMap returned invalid WGS84 coordinates")
                     coord = Coordinate(lat=lat, lng=lng)
                     _COMMUTE_POSTAL_CACHE[clean_postal] = coord
+                    if len(_COMMUTE_POSTAL_CACHE) > _COMMUTE_POSTAL_CACHE_MAX:
+                        _COMMUTE_POSTAL_CACHE.pop(next(iter(_COMMUTE_POSTAL_CACHE)))
                     return coord
     except (
         httpx.HTTPError,
         ValueError,
         KeyError,
         TypeError,
+        AttributeError,
         OSError,
     ) as exc:
         logger.warning(
@@ -317,8 +324,10 @@ def get_commute_leg(
     - If routing fails or geometry is missing, returns status='unavailable' with null metrics.
     - NEVER returns straight-line fallback.
     """
+    effective_departure: datetime | None = departure
     if mode == "pt":
         dep = departure or get_next_representative_wednesday()
+        effective_departure = dep
         params: dict[str, str | int] = {
             "start": f"{start.lat},{start.lng}",
             "end": f"{end.lat},{end.lng}",
@@ -337,11 +346,7 @@ def get_commute_leg(
         }
 
     token = settings.ONEMAP_API_TOKEN or settings.ONEMAP_API_KEY
-    headers: dict[str, str] = {}
-    if token:
-        headers["Authorization"] = (
-            token if token.startswith("Bearer ") else f"Bearer {token}"
-        )
+    headers = {"Authorization": token.removeprefix("Bearer ")} if token else {}
 
     try:
         if client is not None:
@@ -363,10 +368,21 @@ def get_commute_leg(
                 response.raise_for_status()
                 data = response.json()
 
+        if not isinstance(data, dict):
+            raise TypeError("Malformed OneMap routing response")
+        if mode == "pt" and "plan" not in data:
+            return _unavailable_leg(
+                from_anchor, to_anchor, "Public transport plan unavailable"
+            )
+
         # Handle Public Transport plan / itinerary structure
         if "plan" in data:
             plan = data.get("plan")
-            itineraries = plan.get("itineraries") if plan else None
+            if not isinstance(plan, dict):
+                raise TypeError("Malformed public transport plan")
+            itineraries = plan.get("itineraries")
+            if not isinstance(itineraries, list):
+                raise ValueError("Malformed public transport itineraries")
             if not itineraries:
                 return RouteLeg(
                     from_anchor=from_anchor,
@@ -379,14 +395,20 @@ def get_commute_leg(
                     message="No public transport itinerary found",
                 )
             itinerary = itineraries[0]
-            raw_legs = itinerary.get("legs") or []
+            if not isinstance(itinerary, dict):
+                raise TypeError("Malformed public transport itinerary")
+            raw_legs = itinerary.get("legs")
+            if not isinstance(raw_legs, list) or not raw_legs:
+                raise ValueError("Public transport itinerary legs unavailable")
             transit_legs: list[TransitLeg] = []
             all_coords: list[Coordinate] = []
 
             for raw_leg in raw_legs:
+                if not isinstance(raw_leg, dict):
+                    raise TypeError("Malformed public transport sub-leg")
                 sub_mode = str(raw_leg.get("mode", "TRANSIT")).upper()
-                sub_duration = float(raw_leg.get("duration", 0))
-                sub_distance = float(raw_leg.get("distance", 0))
+                sub_duration = _required_metric(raw_leg, "duration")
+                sub_distance = _required_metric(raw_leg, "distance")
                 sub_route = (
                     raw_leg.get("route")
                     or raw_leg.get("routeShortName")
@@ -404,8 +426,13 @@ def get_commute_leg(
                     geom_poly = ""
 
                 sub_coords = decode_polyline(geom_poly) if geom_poly else []
-                if sub_coords:
-                    all_coords.extend(sub_coords)
+                if not sub_coords:
+                    return _unavailable_leg(
+                        from_anchor,
+                        to_anchor,
+                        "Route geometry unavailable for transit sub-leg",
+                    )
+                all_coords.extend(sub_coords)
 
                 instruction = raw_leg.get("instruction")
                 if not instruction:
@@ -433,33 +460,17 @@ def get_commute_leg(
                 )
 
             if not all_coords:
-                top_poly = itinerary.get("route_geometry") or data.get(
-                    "route_geometry"
-                )
-                if top_poly and isinstance(top_poly, str):
-                    all_coords = decode_polyline(top_poly)
-
-            if not all_coords:
-                return RouteLeg(
-                    from_anchor=from_anchor,
-                    to_anchor=to_anchor,
-                    status="unavailable",
-                    source=None,
-                    duration_seconds=None,
-                    distance_meters=None,
-                    geometry=None,
-                    message="Route geometry unavailable",
+                return _unavailable_leg(
+                    from_anchor, to_anchor, "Route geometry unavailable"
                 )
 
-            duration_secs = float(
-                itinerary.get(
-                    "duration",
-                    sum(t.duration_seconds or 0 for t in transit_legs),
-                )
-            )
+            duration_secs = _required_metric(itinerary, "duration")
             total_dist = sum(t.distance_meters or 0 for t in transit_legs)
-            if total_dist == 0 and "walkDistance" in itinerary:
-                total_dist = float(itinerary.get("walkDistance", 0))
+            arrival_at, elapsed = _itinerary_arrival(
+                itinerary, effective_departure, duration_secs
+            )
+            if elapsed is not None:
+                duration_secs = elapsed
 
             return RouteLeg(
                 from_anchor=from_anchor,
@@ -467,6 +478,7 @@ def get_commute_leg(
                 status="available",
                 source="onemap",
                 duration_seconds=duration_secs,
+                arrival_at=arrival_at,
                 distance_meters=total_dist,
                 geometry=all_coords,
                 message=None,
@@ -512,8 +524,8 @@ def get_commute_leg(
                 message="Route summary unavailable",
             )
 
-        duration_secs = float(summary.get("total_time", 0))
-        dist_meters = float(summary.get("total_distance", 0))
+        duration_secs = _required_metric(summary, "total_time")
+        dist_meters = _required_metric(summary, "total_distance")
 
         return RouteLeg(
             from_anchor=from_anchor,
@@ -525,7 +537,6 @@ def get_commute_leg(
             geometry=coords,
             message=None,
         )
-
     except httpx.TimeoutException as exc:
         logger.warning(
             "OneMap routing timeout (%s -> %s): %s", from_anchor, to_anchor, exc
@@ -545,6 +556,7 @@ def get_commute_leg(
         ValueError,
         KeyError,
         TypeError,
+        AttributeError,
         OSError,
     ) as exc:
         logger.warning(
@@ -560,3 +572,52 @@ def get_commute_leg(
             geometry=None,
             message="Route unavailable",
         )
+
+
+def _required_metric(data: dict, key: str) -> float:
+    value = data.get(key)
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"Missing route metric: {key}")
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f"Invalid route metric: {key}")
+    return number
+
+
+def _itinerary_arrival(
+    itinerary: dict, departure: datetime | None, duration_seconds: float
+) -> tuple[datetime | None, float | None]:
+    raw_end = itinerary.get("endTime")
+    if raw_end is None or isinstance(raw_end, bool):
+        return None, None
+    try:
+        end_ms = float(raw_end)
+        if not math.isfinite(end_ms) or end_ms <= 0:
+            return None, None
+        arrival = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).astimezone(SGT)
+    except (OverflowError, OSError, TypeError, ValueError):
+        return None, None
+    if departure is None:
+        return arrival, None
+    depart = (
+        departure.replace(tzinfo=SGT)
+        if departure.tzinfo is None
+        else departure.astimezone(SGT)
+    )
+    elapsed = (arrival - depart).total_seconds()
+    if elapsed < duration_seconds or elapsed > 24 * 60 * 60:
+        return None, None
+    return arrival, elapsed
+
+
+def _unavailable_leg(from_anchor: str, to_anchor: str, message: str) -> RouteLeg:
+    return RouteLeg(
+        from_anchor=from_anchor,
+        to_anchor=to_anchor,
+        status="unavailable",
+        source=None,
+        duration_seconds=None,
+        distance_meters=None,
+        geometry=None,
+        message=message,
+    )

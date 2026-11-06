@@ -1,6 +1,6 @@
 """Tests for authenticated centre commute endpoint (Task 3)."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import httpx
@@ -14,7 +14,10 @@ from kidcarematch_backend.auth.security import (
     get_optional_token_claims,
     get_token_claims,
 )
-from kidcarematch_backend.core.commute import clear_commute_postal_cache
+from kidcarematch_backend.core.commute import (
+    clear_commute_postal_cache,
+    get_representative_sample_pair,
+)
 from kidcarematch_backend.db.db import (
     AccountStatus,
     CitizenshipType,
@@ -28,6 +31,7 @@ from kidcarematch_backend.db.db import (
     init_db,
 )
 from kidcarematch_backend.main import app
+from kidcarematch_backend.schemas.commute import Coordinate, RouteLeg
 
 
 @pytest.fixture
@@ -133,7 +137,9 @@ def set_auth(user: User):
     app.dependency_overrides[get_optional_token_claims] = lambda: claims
 
 
-def create_centre(test_engine, centre_id: int = 1, postal: str = "560123") -> PreschoolCentre:
+def create_centre(
+    test_engine, centre_id: int = 1, postal: str = "560123"
+) -> PreschoolCentre:
     with Session(test_engine) as session:
         c = PreschoolCentre(
             centre_id=centre_id,
@@ -165,7 +171,9 @@ def create_profile(
             service_required="Full Day",
             home_postal_code=home_postal,
             workplace_postal_code=workplace_postal,
-            location_preference=LocationPreference.HOME if not workplace_postal else LocationPreference.EITHER,
+            location_preference=LocationPreference.HOME
+            if not workplace_postal
+            else LocationPreference.EITHER,
             household_income=5000.0,
             household_member_count=3,
             budget_max=1500.0,
@@ -189,7 +197,9 @@ def test_commute_unauthenticated_returns_401(client: TestClient, test_engine):
     assert res.status_code == 401
 
 
-def test_commute_suspended_parent_returns_403(client: TestClient, test_engine, suspended_parent):
+def test_commute_suspended_parent_returns_403(
+    client: TestClient, test_engine, suspended_parent
+):
     set_auth(suspended_parent)
     centre = create_centre(test_engine)
     res = client.post(
@@ -209,7 +219,9 @@ def test_commute_admin_user_returns_403(client: TestClient, test_engine, admin_u
     assert res.status_code == 403
 
 
-def test_commute_centre_not_found_returns_404(client: TestClient, test_engine, parent_user):
+def test_commute_centre_not_found_returns_404(
+    client: TestClient, test_engine, parent_user
+):
     set_auth(parent_user)
     profile = create_profile(test_engine, parent_user.user_id)
     res = client.post(
@@ -225,7 +237,9 @@ def test_commute_other_parent_profile_returns_404_without_disclosure(
 ):
     set_auth(parent_user)
     centre = create_centre(test_engine)
-    other_profile = create_profile(test_engine, other_parent_user.user_id, profile_id="other-prof")
+    other_profile = create_profile(
+        test_engine, other_parent_user.user_id, profile_id="other-prof"
+    )
 
     res = client.post(
         f"/api/v1/centres/{centre.centre_id}/commute",
@@ -247,10 +261,14 @@ def test_commute_invalid_mode_returns_422(client: TestClient, test_engine, paren
     assert res.status_code in (422, 400)
 
 
-def test_commute_home_only_driving_success(client: TestClient, test_engine, parent_user, monkeypatch):
+def test_commute_home_only_driving_success(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
     set_auth(parent_user)
     centre = create_centre(test_engine, centre_id=1, postal="560123")
-    profile = create_profile(test_engine, parent_user.user_id, home_postal="120120", workplace_postal=None)
+    profile = create_profile(
+        test_engine, parent_user.user_id, home_postal="120120", workplace_postal=None
+    )
 
     def mock_get(self, url, *args, **kwargs):
         url_str = str(url)
@@ -317,11 +335,16 @@ def test_commute_home_only_driving_success(client: TestClient, test_engine, pare
     assert sample["totals"]["distance_meters"] == 5000.0
 
 
-def test_commute_two_legs_driving_workplace_success(client: TestClient, test_engine, parent_user, monkeypatch):
+def test_commute_two_legs_driving_workplace_success(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
     set_auth(parent_user)
     centre = create_centre(test_engine, centre_id=1, postal="560123")
     profile = create_profile(
-        test_engine, parent_user.user_id, home_postal="120120", workplace_postal="048581"
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal="048581",
     )
 
     def mock_get(self, url, *args, **kwargs):
@@ -339,7 +362,9 @@ def test_commute_two_legs_driving_workplace_success(client: TestClient, test_eng
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else ("1.3500" if postal == "560123" else "1.2800"),
+                        "LATITUDE": "1.3000"
+                        if postal == "120120"
+                        else ("1.3500" if postal == "560123" else "1.2800"),
                         "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
                     }
                 ],
@@ -386,11 +411,16 @@ def test_commute_two_legs_driving_workplace_success(client: TestClient, test_eng
     assert sample["totals"]["distance_meters"] == 12000.0  # 5000 + 7000
 
 
-def test_commute_partial_leg_failure_withholds_totals(client: TestClient, test_engine, parent_user, monkeypatch):
+def test_commute_partial_leg_failure_withholds_totals(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
     set_auth(parent_user)
     centre = create_centre(test_engine, centre_id=1, postal="560123")
     profile = create_profile(
-        test_engine, parent_user.user_id, home_postal="120120", workplace_postal="048581"
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal="048581",
     )
 
     def mock_get(self, url, *args, **kwargs):
@@ -408,7 +438,9 @@ def test_commute_partial_leg_failure_withholds_totals(client: TestClient, test_e
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else ("1.3500" if postal == "560123" else "1.2800"),
+                        "LATITUDE": "1.3000"
+                        if postal == "120120"
+                        else ("1.3500" if postal == "560123" else "1.2800"),
                         "LONGITUDE": "103.8000",
                     }
                 ],
@@ -468,8 +500,16 @@ def test_commute_walking_home_and_workplace_success(
         if "elastic/search" in url_str:
             params = kwargs.get("params", {})
             postal = str(params.get("searchVal", ""))
-            lat = "1.3000" if postal == "120120" else ("1.3500" if postal == "560123" else "1.2800")
-            lng = "103.8000" if postal == "120120" else ("103.8500" if postal == "560123" else "103.8600")
+            lat = (
+                "1.3000"
+                if postal == "120120"
+                else ("1.3500" if postal == "560123" else "1.2800")
+            )
+            lng = (
+                "103.8000"
+                if postal == "120120"
+                else ("103.8500" if postal == "560123" else "103.8600")
+            )
             mock_resp.json.return_value = {
                 "found": 1,
                 "results": [
@@ -548,8 +588,16 @@ def test_commute_cycling_home_and_workplace_success(
         if "elastic/search" in url_str:
             params = kwargs.get("params", {})
             postal = str(params.get("searchVal", ""))
-            lat = "1.3000" if postal == "120120" else ("1.3500" if postal == "560123" else "1.2800")
-            lng = "103.8000" if postal == "120120" else ("103.8500" if postal == "560123" else "103.8600")
+            lat = (
+                "1.3000"
+                if postal == "120120"
+                else ("1.3500" if postal == "560123" else "1.2800")
+            )
+            lng = (
+                "103.8000"
+                if postal == "120120"
+                else ("103.8500" if postal == "560123" else "103.8600")
+            )
             mock_resp.json.return_value = {
                 "found": 1,
                 "results": [
@@ -798,6 +846,7 @@ def test_commute_two_legs_pt_sequential_onward_timing(
     )
 
     pt_calls = []
+    include_end_time = True
 
     def mock_get(self, url, *args, **kwargs):
         url_str = str(url)
@@ -814,7 +863,9 @@ def test_commute_two_legs_pt_sequential_onward_timing(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else ("1.3500" if postal == "560123" else "1.2800"),
+                        "LATITUDE": "1.3000"
+                        if postal == "120120"
+                        else ("1.3500" if postal == "560123" else "1.2800"),
                         "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
                     }
                 ],
@@ -829,11 +880,27 @@ def test_commute_two_legs_pt_sequential_onward_timing(
 
             if "1.3000" in start or start.startswith("1.3,"):
                 # Leg 1: 1500s (25 mins = 08:00 to 08:25)
+                departure = datetime.strptime(
+                    f"{params['date']} {params['time']}", "%m-%d-%Y %H:%M:%S"
+                ).replace(tzinfo=timezone(timedelta(hours=8)))
                 mock_resp.json.return_value = {
                     "plan": {
                         "itineraries": [
                             {
                                 "duration": 1500,
+                                **(
+                                    {
+                                        "startTime": int(departure.timestamp() * 1000),
+                                        "endTime": int(
+                                            (
+                                                departure + timedelta(seconds=1500)
+                                            ).timestamp()
+                                            * 1000
+                                        ),
+                                    }
+                                    if include_end_time
+                                    else {}
+                                ),
                                 "legs": [
                                     {
                                         "mode": "WALK",
@@ -917,6 +984,21 @@ def test_commute_two_legs_pt_sequential_onward_timing(
     assert sample_we["legs"][1]["duration_seconds"] == 1200.0
     assert sample_we["totals"]["duration_seconds"] == 2700.0
 
+    # A successful PT itinerary without provider endTime remains visible, but cannot invent an onward departure.
+    include_end_time = False
+    pt_calls.clear()
+    missing_arrival = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "pt"},
+    )
+    assert missing_arrival.status_code == 200
+    missing_arrival_sample = missing_arrival.json()["samples"][0]
+    assert len(pt_calls) == 2
+    assert missing_arrival_sample["legs"][0]["status"] == "available"
+    assert missing_arrival_sample["legs"][0]["arrival_at"] is None
+    assert missing_arrival_sample["legs"][1]["status"] == "unavailable"
+    assert missing_arrival_sample["totals"] is None
+
 
 def test_commute_pt_first_leg_failure_marks_onward_unavailable(
     client: TestClient, test_engine, parent_user, monkeypatch
@@ -947,7 +1029,9 @@ def test_commute_pt_first_leg_failure_marks_onward_unavailable(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else ("1.3500" if postal == "560123" else "1.2800"),
+                        "LATITUDE": "1.3000"
+                        if postal == "120120"
+                        else ("1.3500" if postal == "560123" else "1.2800"),
                         "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
                     }
                 ],
@@ -1002,6 +1086,46 @@ def test_commute_pt_expired_sample_pair_returns_409(
     assert detail["message"] == "Representative sample pair expired"
 
 
+def test_commute_pt_rejects_sample_pair_with_seconds_or_microseconds(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    from kidcarematch_backend.api.v1 import centres as centres_api
+
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(test_engine, parent_user.user_id)
+    monkeypatch.setattr(
+        centres_api,
+        "resolve_commute_postal",
+        lambda _postal: Coordinate(lat=1.3, lng=103.8),
+    )
+    monkeypatch.setattr(
+        centres_api,
+        "get_commute_leg",
+        lambda **kwargs: RouteLeg(
+            from_anchor=kwargs["from_anchor"],
+            to_anchor=kwargs["to_anchor"],
+            status="unavailable",
+            message="test route unavailable",
+        ),
+    )
+    wednesday, saturday = get_representative_sample_pair()
+    for sample_pair in (
+        [wednesday.replace(second=59).isoformat(), saturday.isoformat()],
+        [wednesday.replace(microsecond=1).isoformat(), saturday.isoformat()],
+    ):
+        response = client.post(
+            f"/api/v1/centres/{centre.centre_id}/commute",
+            json={
+                "profile_id": profile.profile_id,
+                "mode": "pt",
+                "sample_pair": sample_pair,
+            },
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "sample_expired"
+
+
 def test_commute_pt_saturday_routing_and_sample_pair_reuse(
     client: TestClient, test_engine, parent_user, monkeypatch
 ):
@@ -1015,6 +1139,7 @@ def test_commute_pt_saturday_routing_and_sample_pair_reuse(
     )
 
     from kidcarematch_backend.core.commute import get_representative_sample_pair
+
     wed, sat = get_representative_sample_pair()
     sample_pair = [wed.isoformat(), sat.isoformat()]
 
@@ -1049,7 +1174,9 @@ def test_commute_pt_saturday_routing_and_sample_pair_reuse(
                 "plan": {
                     "itineraries": [
                         {
-                            "duration": 1800 if params.get("date") == sat.strftime("%m-%d-%Y") else 1500,
+                            "duration": 1800
+                            if params.get("date") == sat.strftime("%m-%d-%Y")
+                            else 1500,
                             "legs": [
                                 {
                                     "mode": "WALK",
@@ -1060,7 +1187,9 @@ def test_commute_pt_saturday_routing_and_sample_pair_reuse(
                                 {
                                     "mode": "BUS",
                                     "route": "159",
-                                    "duration": 1500 if params.get("date") == sat.strftime("%m-%d-%Y") else 1200,
+                                    "duration": 1500
+                                    if params.get("date") == sat.strftime("%m-%d-%Y")
+                                    else 1200,
                                     "distance": 4750,
                                     "legGeometry": {"points": "sagGwhtxRsDkC"},
                                 },
@@ -1172,4 +1301,3 @@ def test_commute_single_estimate_modes_return_single_sample_with_sample_pair(
     )
     assert res_expired.status_code == 409
     assert res_expired.json()["detail"]["code"] == "sample_expired"
-

@@ -36,6 +36,7 @@ class RouteLeg(BaseModel):
     status: str
     source: str | None = None
     duration_seconds: float | None = None
+    arrival_at: datetime | None = None
     distance_meters: float | None = None
     geometry: list[Coordinate] | None = None
     message: str | None = None

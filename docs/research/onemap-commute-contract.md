@@ -8,11 +8,12 @@ It documents request shapes, authentication, response schemas, geometry encoding
 ## 1. Authentication
 
 - **Provider**: Singapore Land Authority (SLA) OneMap REST API
-- **Mechanism**: Bearer token authentication in HTTP request header:
+- **Mechanism**: Send the OneMap access token as the value of the `Authorization` HTTP header, without a `Bearer ` prefix:
   ```http
-  Authorization: Bearer <ONEMAP_API_TOKEN>
+  Authorization: <ONEMAP_API_TOKEN>
   ```
-- **Token Validity**: OneMap access tokens are issued via `https://www.onemap.gov.sg/api/auth/post/getToken` using registered developer credentials and are valid for 72 hours.
+- **Token Validity**: OneMap access tokens are issued via `https://www.onemap.gov.sg/api/auth/post/getToken` using registered developer credentials and are valid for 3 days (72 hours).
+- **REST evidence**: The official [Search API docs](https://www.onemap.gov.sg/apidocs/search) state that Search now requires token authentication and mark `Authorization` required. Their sample sends `Authorization: ${authToken}`. The official [Routing API docs](https://www.onemap.gov.sg/apidocs/routing) likewise mark `Authorization` required and use the raw token value. The implementation strips a legacy `Bearer ` prefix from configured credentials before calling these display endpoints.
 - **Display Adapter Boundary**: Tokens are stored and managed securely server-side in backend configuration (`settings.ONEMAP_API_TOKEN` / `settings.ONEMAP_API_KEY`). The client never interacts directly with OneMap credentials.
 
 ## 2. Geocoding / Search API Contract
@@ -33,6 +34,7 @@ It documents request shapes, authentication, response schemas, geometry encoding
   ```
   If no result matches the requested 6-digit postal code exactly, the location is marked `unresolvable` (`None`).
   No legacy relevance matches or approximate coordinates may be used for personal commute anchors.
+- **Coordinate validation and cache**: Accept only finite WGS84 latitude/longitude values within `[-90, 90]` and `[-180, 180]`. Exact-postcode coordinates are cached in a bounded process-local cache (512 entries); only validated exact matches are cached.
 
 ## 3. Driving Routing Contract (`routeType=drive`)
 
@@ -120,13 +122,15 @@ It documents request shapes, authentication, response schemas, geometry encoding
 - **Units & Normalization**:
   - `itinerary.duration`: Total journey duration in seconds (`duration_seconds`).
   - `sub_leg.distance`: Sub-leg distance in meters. Summed across legs for journey `distance_meters`.
+  - `itinerary.startTime` and `itinerary.endTime`, when present, are Unix epoch milliseconds. The official example has `plan.date=1762744740000`, first itinerary `startTime=1762744991000`, `duration=2238`, and `endTime=1762747229000`. Since `startTime` is later than the requested departure, itinerary duration alone omits initial schedule waiting. When `endTime` is a valid timestamp at or after requested departure and within 24 hours, normalized travel duration includes that wait (`endTime - requested departure`), and `arrival_at` exposes the provider itinerary end time. Invalid or missing `endTime` leaves the first leg available with its itinerary duration but cannot schedule an onward leg.
   - `itinerary.legs`: Parsed into `TransitLeg` objects capturing mode (`WALK`, `BUS`, `SUBWAY`), route designation, duration, distance, and per-leg geometry.
 - **Geometry**:
-  - Per-leg encoded polylines extracted from `legGeometry.points` and combined into complete leg geometry.
-  - If geometry is missing or decoded geometry is empty, status is `unavailable`.
+  - Per-leg encoded polylines are extracted from every `legGeometry.points` and combined into complete leg geometry.
+  - Every PT sub-leg must have a decodable, nonempty polyline. Missing, malformed or truncated geometry on any sub-leg makes the complete PT leg `unavailable`; a top-level itinerary geometry cannot conceal gaps.
+- **Required metrics**: The itinerary and every sub-leg must provide finite, nonnegative duration and distance metrics. Missing or malformed provider structures and metrics return `unavailable`; they are never replaced with zero or estimated values.
 - **Representative Weekday Sampling & Sequential Onward Timing**:
   - Evaluated at 08:00 Asia/Singapore on the next upcoming Wednesday (`kind="weekday"`).
-  - When workplace is present, Leg 2 (centre -> workplace) departs at Leg 1 estimated arrival time (`first_leg_arrival = departure + duration_seconds`) with 0 added drop-off duration.
+  - When workplace is present, Leg 2 (centre -> workplace) departs at Leg 1 provider `endTime` with 0 added drop-off duration.
   - If Leg 1 arrival cannot be determined, Leg 2 is marked `unavailable` without making an invented onward request.
   - Totals are withheld when any requested leg fails.
   - NEVER fall back to straight-line approximations.

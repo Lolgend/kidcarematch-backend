@@ -1,0 +1,22 @@
+{
+  "plan": {
+    "date": 1762744740000,
+    "itineraries": [
+      {
+        "startTime": 1762744991000,
+        "endTime": 1762747229000,
+        "duration": 2238,
+        "legs": [
+          {
+            "mode": "WALK",
+            "duration": 2238,
+            "distance": 800,
+            "legGeometry": {
+              "points": "sagGwhtxRsDkC"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

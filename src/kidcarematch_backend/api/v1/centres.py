@@ -1,6 +1,6 @@
 """Preschool centre API endpoints."""
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Annotated
 
 import httpx
@@ -752,9 +752,7 @@ def _build_commute_sample(
                 geometry=None,
                 message="Workplace postal code could not be resolved",
             )
-        elif mode == "pt" and (
-            leg1.status != "available" or leg1.duration_seconds is None
-        ):
+        elif mode == "pt" and (leg1.status != "available" or leg1.arrival_at is None):
             leg2 = RouteLeg(
                 from_anchor="centre",
                 to_anchor="workplace",
@@ -767,14 +765,8 @@ def _build_commute_sample(
             )
         else:
             leg2_departure = None
-            if (
-                mode == "pt"
-                and leg1_departure is not None
-                and leg1.duration_seconds is not None
-            ):
-                leg2_departure = leg1_departure + timedelta(
-                    seconds=leg1.duration_seconds
-                )
+            if mode == "pt" and leg1.arrival_at is not None:
+                leg2_departure = leg1.arrival_at
 
             leg2 = get_commute_leg(
                 from_anchor="centre",
@@ -795,14 +787,10 @@ def _build_commute_sample(
     totals = (
         RouteTotals(
             duration_seconds=sum(
-                leg.duration_seconds
-                for leg in legs
-                if leg.duration_seconds is not None
+                leg.duration_seconds for leg in legs if leg.duration_seconds is not None
             ),
             distance_meters=sum(
-                leg.distance_meters
-                for leg in legs
-                if leg.distance_meters is not None
+                leg.distance_meters for leg in legs if leg.distance_meters is not None
             ),
         )
         if all_available
@@ -857,9 +845,7 @@ def get_centre_commute(
     home_coord = resolve_commute_postal(clean_home_postal)
 
     clean_workplace_postal = (
-        profile.workplace_postal_code.strip()
-        if profile.workplace_postal_code
-        else None
+        profile.workplace_postal_code.strip() if profile.workplace_postal_code else None
     )
     workplace_coord = (
         resolve_commute_postal(clean_workplace_postal)

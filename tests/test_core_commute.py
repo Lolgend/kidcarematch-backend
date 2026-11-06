@@ -1,13 +1,14 @@
 """Tests for strict OneMap commute display adapter (Task 2)."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
+from kidcarematch_backend.core import commute
 from kidcarematch_backend.core.commute import (
     SGT,
     clear_commute_postal_cache,
@@ -19,6 +20,7 @@ from kidcarematch_backend.core.commute import (
     resolve_commute_postal,
     validate_sample_pair,
 )
+from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.schemas.commute import Coordinate
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "onemap"
@@ -45,10 +47,13 @@ def test_decode_polyline_valid():
 def test_decode_polyline_empty_and_invalid():
     assert decode_polyline("") == []
     assert decode_polyline("???invalid???") == []
+    assert decode_polyline("sagGwhtxRsDk") == []  # truncated longitude
 
 
 def test_resolve_commute_postal_exact_match(monkeypatch):
-    data = json.loads((FIXTURES_DIR / "search_560123_exact.json").read_text(encoding="utf-8"))
+    data = json.loads(
+        (FIXTURES_DIR / "search_560123_exact.json").read_text(encoding="utf-8")
+    )
 
     mock_client = MagicMock(spec=httpx.Client)
     mock_resp = MagicMock()
@@ -57,15 +62,177 @@ def test_resolve_commute_postal_exact_match(monkeypatch):
     mock_resp.raise_for_status = MagicMock()
     mock_client.get.return_value = mock_resp
 
+    monkeypatch.setattr(settings, "ONEMAP_API_TOKEN", "test-token")
     coord = resolve_commute_postal("560123", client=mock_client)
     assert coord is not None
     assert coord.lat == 1.369145
     assert coord.lng == 103.851234
+    assert mock_client.get.call_args.kwargs["headers"]["Authorization"] == "test-token"
+
+
+def test_commute_search_cache_is_bounded(monkeypatch):
+    """Verified postal resolutions must not grow process memory without a bound."""
+    monkeypatch.setattr(commute, "_COMMUTE_POSTAL_CACHE_MAX", 2)
+    client = MagicMock(spec=httpx.Client)
+
+    def get_response(*args, **kwargs):
+        postal = kwargs["params"]["searchVal"]
+        response = MagicMock()
+        response.json.return_value = {
+            "found": 1,
+            "results": [{"POSTAL": postal, "LATITUDE": "1.3", "LONGITUDE": "103.8"}],
+        }
+        response.raise_for_status = MagicMock()
+        return response
+
+    client.get.side_effect = get_response
+    for postal in ("560123", "560124", "560125"):
+        assert resolve_commute_postal(postal, client=client) is not None
+    assert len(commute._COMMUTE_POSTAL_CACHE) == 2
+
+
+def test_pt_requires_geometry_and_valid_metrics_for_every_sub_leg():
+    response = MagicMock()
+    response.json.return_value = {
+        "plan": {
+            "itineraries": [
+                {
+                    "duration": 300,
+                    "legs": [
+                        {
+                            "mode": "WALK",
+                            "duration": 100,
+                            "distance": 20,
+                            "legGeometry": {"points": "sagGwhtxRsDkC"},
+                        },
+                        {
+                            "mode": "BUS",
+                            "duration": 200,
+                            "distance": 100,
+                            "legGeometry": {"points": ""},
+                        },
+                    ],
+                }
+            ]
+        }
+    }
+    response.raise_for_status = MagicMock()
+    client = MagicMock(spec=httpx.Client)
+    client.get.return_value = response
+    leg = get_commute_leg(
+        "home",
+        "centre",
+        Coordinate(lat=1.3, lng=103.8),
+        Coordinate(lat=1.4, lng=103.9),
+        mode="pt",
+        client=client,
+    )
+    assert leg.status == "unavailable"
+    assert leg.geometry is None
+
+
+@pytest.mark.parametrize("bad_value", [None, -1, float("nan"), float("inf")])
+def test_pt_rejects_missing_negative_or_nonfinite_required_metrics(bad_value):
+    response = MagicMock()
+    response.json.return_value = {
+        "plan": {
+            "itineraries": [
+                {
+                    "duration": 300,
+                    "legs": [
+                        {
+                            "mode": "WALK",
+                            "duration": 100,
+                            "distance": bad_value,
+                            "legGeometry": {"points": "sagGwhtxRsDkC"},
+                        },
+                    ],
+                }
+            ]
+        }
+    }
+    response.raise_for_status = MagicMock()
+    client = MagicMock(spec=httpx.Client)
+    client.get.return_value = response
+    leg = get_commute_leg(
+        "home",
+        "centre",
+        Coordinate(lat=1.3, lng=103.8),
+        Coordinate(lat=1.4, lng=103.9),
+        mode="pt",
+        client=client,
+    )
+    assert leg.status == "unavailable"
+    assert leg.duration_seconds is None
+    assert leg.distance_meters is None
+
+
+def test_pt_exposes_provider_end_time_for_sequential_timing():
+    data = json.loads(
+        (FIXTURES_DIR / "pt_route_with_initial_wait.json").read_text(encoding="utf-8")
+    )
+    response = MagicMock()
+    response.json.return_value = data
+    response.raise_for_status = MagicMock()
+    client = MagicMock(spec=httpx.Client)
+    client.get.return_value = response
+    departure = datetime.fromtimestamp(1762744740, tz=timezone.utc).astimezone(SGT)
+    leg = get_commute_leg(
+        "home",
+        "centre",
+        Coordinate(lat=1.3, lng=103.8),
+        Coordinate(lat=1.4, lng=103.9),
+        mode="pt",
+        departure=departure,
+        client=client,
+    )
+    assert leg.arrival_at is not None
+    assert leg.arrival_at.timestamp() == pytest.approx(1762747229)
+    assert leg.duration_seconds == pytest.approx(
+        leg.arrival_at.timestamp() - departure.timestamp()
+    )
+    assert leg.duration_seconds == pytest.approx(
+        2489
+    )  # 251s schedule wait + 2238s itinerary
+
+
+@pytest.mark.parametrize(
+    "provider_data",
+    [
+        [],
+        {"plan": "not-an-object"},
+        {
+            "route_geometry": "sagGwhtxRsDkC",
+            "route_summary": {"total_time": 60, "total_distance": 500},
+        },
+    ],
+)
+def test_pt_rejects_malformed_or_non_pt_response(provider_data):
+    response = MagicMock()
+    response.json.return_value = provider_data
+    response.raise_for_status = MagicMock()
+    client = MagicMock(spec=httpx.Client)
+    client.get.return_value = response
+    leg = get_commute_leg(
+        "home",
+        "centre",
+        Coordinate(lat=1.3, lng=103.8),
+        Coordinate(lat=1.4, lng=103.9),
+        mode="pt",
+        client=client,
+    )
+    assert leg.status == "unavailable"
+    assert leg.duration_seconds is None
+    assert leg.geometry is None
 
 
 def test_resolve_commute_postal_fuzzy_diff_first_matches_exact_second(monkeypatch):
     """When OneMap relevance ranking places a non-exact match first, find exact match in results."""
-    data = json.loads((FIXTURES_DIR / "search_560123_fuzzy_diff_first.json").read_text(encoding="utf-8"))
+    data = json.loads(
+        (FIXTURES_DIR / "search_560123_fuzzy_diff_first.json").read_text(
+            encoding="utf-8"
+        )
+    )
 
     mock_client = MagicMock(spec=httpx.Client)
     mock_resp = MagicMock()
@@ -80,7 +247,9 @@ def test_resolve_commute_postal_fuzzy_diff_first_matches_exact_second(monkeypatc
 
 
 def test_resolve_commute_postal_no_exact_match_returns_none(monkeypatch):
-    data = json.loads((FIXTURES_DIR / "search_560123_no_exact_match.json").read_text(encoding="utf-8"))
+    data = json.loads(
+        (FIXTURES_DIR / "search_560123_no_exact_match.json").read_text(encoding="utf-8")
+    )
 
     mock_client = MagicMock(spec=httpx.Client)
     mock_resp = MagicMock()
@@ -99,14 +268,17 @@ def test_resolve_commute_postal_invalid_format():
     assert resolve_commute_postal(None) is None
 
 
-def test_get_commute_leg_drive_success():
-    data = json.loads((FIXTURES_DIR / "driving_route_success.json").read_text(encoding="utf-8"))
+def test_get_commute_leg_drive_success(monkeypatch):
+    data = json.loads(
+        (FIXTURES_DIR / "driving_route_success.json").read_text(encoding="utf-8")
+    )
 
     mock_client = MagicMock(spec=httpx.Client)
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = data
     mock_client.get.return_value = mock_resp
+    monkeypatch.setattr(settings, "ONEMAP_API_TOKEN", "test-routing-token")
 
     start = Coordinate(lat=1.3691, lng=103.8512)
     end = Coordinate(lat=1.3521, lng=103.8198)
@@ -128,10 +300,18 @@ def test_get_commute_leg_drive_success():
     assert leg.distance_meters == 6800.0
     assert leg.geometry is not None
     assert len(leg.geometry) == 2
+    assert (
+        mock_client.get.call_args.kwargs["headers"]["Authorization"]
+        == "test-routing-token"
+    )
 
 
 def test_get_commute_leg_missing_geometry_fails_without_fallback():
-    data = json.loads((FIXTURES_DIR / "driving_route_missing_geometry.json").read_text(encoding="utf-8"))
+    data = json.loads(
+        (FIXTURES_DIR / "driving_route_missing_geometry.json").read_text(
+            encoding="utf-8"
+        )
+    )
 
     mock_client = MagicMock(spec=httpx.Client)
     mock_resp = MagicMock()
@@ -180,7 +360,10 @@ def test_get_commute_leg_timeout_fails_without_fallback():
     assert leg.duration_seconds is None
     assert leg.distance_meters is None
     assert leg.geometry is None
-    assert any(term in (leg.message or "").lower() for term in ("timed out", "timeout", "unavailable"))
+    assert any(
+        term in (leg.message or "").lower()
+        for term in ("timed out", "timeout", "unavailable")
+    )
 
 
 def test_get_next_representative_wednesday_boundaries():
@@ -286,7 +469,9 @@ def test_validate_sample_pair_expired_or_invalid():
 
 
 def test_get_commute_leg_pt_success():
-    data = json.loads((FIXTURES_DIR / "pt_route_success.json").read_text(encoding="utf-8"))
+    data = json.loads(
+        (FIXTURES_DIR / "pt_route_success.json").read_text(encoding="utf-8")
+    )
 
     mock_client = MagicMock(spec=httpx.Client)
     mock_resp = MagicMock()
@@ -336,7 +521,9 @@ def test_get_commute_leg_pt_success():
 
 
 def test_get_commute_leg_pt_missing_geometry_fails_without_fallback():
-    data = json.loads((FIXTURES_DIR / "pt_route_missing_geometry.json").read_text(encoding="utf-8"))
+    data = json.loads(
+        (FIXTURES_DIR / "pt_route_missing_geometry.json").read_text(encoding="utf-8")
+    )
 
     mock_client = MagicMock(spec=httpx.Client)
     mock_resp = MagicMock()
@@ -365,7 +552,9 @@ def test_get_commute_leg_pt_missing_geometry_fails_without_fallback():
 
 
 def test_get_commute_leg_pt_no_itinerary_fails_without_fallback():
-    data = json.loads((FIXTURES_DIR / "pt_route_no_itinerary.json").read_text(encoding="utf-8"))
+    data = json.loads(
+        (FIXTURES_DIR / "pt_route_no_itinerary.json").read_text(encoding="utf-8")
+    )
 
     mock_client = MagicMock(spec=httpx.Client)
     mock_resp = MagicMock()
