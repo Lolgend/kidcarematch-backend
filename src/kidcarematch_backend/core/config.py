@@ -23,6 +23,9 @@ class Settings(BaseSettings):
         "https://kidscare-match-sg.firebaseapp.com",
         "https://kidcarematch-frontend.vercel.app"
     ]
+    COMMUTE_ENABLE_DIRECT_BASELINE: bool = False
+    COMMUTE_ENABLE_WEEKDAY_SAMPLING: bool = False
+    COMMUTE_CYCLE_SECRET_KEY: str = "kidcarematch-commute-cycle-secret-key-v1"
 
     model_config = SettingsConfigDict(
         env_file=".env",
