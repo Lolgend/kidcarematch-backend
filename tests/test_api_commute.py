@@ -2234,11 +2234,324 @@ def test_commute_pt_default_instruction_formats(
     assert tlegs[2]["instruction"] == "Take Bus"
 
 
+def test_commute_expired_sample_pair_returns_409_with_exact_detail(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(test_engine, parent_user.user_id)
+
+    def mock_get(self, url, *args, **kwargs):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "found": 1,
+            "results": [
+                {
+                    "SEARCHVAL": "Location",
+                    "POSTAL": "560123",
+                    "LATITUDE": "1.3500",
+                    "LONGITUDE": "103.8500",
+                }
+            ],
+        }
+        return mock_resp
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    from datetime import timedelta
+
+    from kidcarematch_backend.core.commute import SGT
+
+    past_wed = (datetime.now(SGT) - timedelta(days=7)).replace(
+        hour=8, minute=0, second=0, microsecond=0
+    )
+    past_sat = (datetime.now(SGT) - timedelta(days=4)).replace(
+        hour=8, minute=0, second=0, microsecond=0
+    )
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={
+            "profile_id": profile.profile_id,
+            "mode": "drive",
+            "sample_pair": [past_wed.isoformat(), past_sat.isoformat()],
+        },
+    )
+    assert res.status_code == 409
+    assert res.json()["detail"] == {
+        "code": "sample_expired",
+        "message": "Representative sample pair has expired",
+    }
 
 
+@pytest.mark.parametrize(
+    "invalid_pair",
+    [
+        [],
+        ["2026-11-11T08:00:00+08:00"],
+        [
+            "2026-11-11T08:00:00+08:00",
+            "2026-11-14T08:00:00+08:00",
+            "2026-11-18T08:00:00+08:00",
+        ],
+    ],
+)
+def test_commute_empty_or_wrong_length_sample_pair_returns_409(
+    client: TestClient, test_engine, parent_user, monkeypatch, invalid_pair
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(test_engine, parent_user.user_id)
+
+    def mock_get(self, url, *args, **kwargs):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "found": 1,
+            "results": [
+                {
+                    "SEARCHVAL": "Location",
+                    "POSTAL": "560123",
+                    "LATITUDE": "1.3500",
+                    "LONGITUDE": "103.8500",
+                }
+            ],
+        }
+        return mock_resp
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={
+            "profile_id": profile.profile_id,
+            "mode": "drive",
+            "sample_pair": invalid_pair,
+        },
+    )
+    assert res.status_code == 409
+    assert res.json()["detail"] == {
+        "code": "sample_expired",
+        "message": "Representative sample pair has expired",
+    }
 
 
+def test_commute_sample_pair_different_cycle_returns_409(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(test_engine, parent_user.user_id)
+
+    def mock_get(self, url, *args, **kwargs):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "found": 1,
+            "results": [
+                {
+                    "SEARCHVAL": "Location",
+                    "POSTAL": "560123",
+                    "LATITUDE": "1.3500",
+                    "LONGITUDE": "103.8500",
+                }
+            ],
+        }
+        return mock_resp
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    from datetime import timedelta
+
+    from kidcarematch_backend.core.commute import get_representative_sample_pair
+
+    wed, sat = get_representative_sample_pair()
+
+    # Next week's cycle (+7 days ahead)
+    future_cycle = [
+        (wed + timedelta(days=7)).isoformat(),
+        (sat + timedelta(days=7)).isoformat(),
+    ]
+    res_future = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={
+            "profile_id": profile.profile_id,
+            "mode": "drive",
+            "sample_pair": future_cycle,
+        },
+    )
+    assert res_future.status_code == 409
+    assert res_future.json()["detail"] == {
+        "code": "sample_expired",
+        "message": "Representative sample pair has expired",
+    }
+
+    # Swapped order [sat, wed]
+    swapped = [sat.isoformat(), wed.isoformat()]
+    res_swapped = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={
+            "profile_id": profile.profile_id,
+            "mode": "drive",
+            "sample_pair": swapped,
+        },
+    )
+    assert res_swapped.status_code == 409
+    assert res_swapped.json()["detail"] == {
+        "code": "sample_expired",
+        "message": "Representative sample pair has expired",
+    }
+
+    # Malformed strings
+    res_malformed = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={
+            "profile_id": profile.profile_id,
+            "mode": "drive",
+            "sample_pair": ["invalid-date-1", "invalid-date-2"],
+        },
+    )
+    assert res_malformed.status_code == 409
+    assert res_malformed.json()["detail"] == {
+        "code": "sample_expired",
+        "message": "Representative sample pair has expired",
+    }
+
+    # Non-zero seconds
+    res_seconds = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={
+            "profile_id": profile.profile_id,
+            "mode": "drive",
+            "sample_pair": [
+                wed.replace(second=15).isoformat(),
+                sat.isoformat(),
+            ],
+        },
+    )
+    assert res_seconds.status_code == 409
+    assert res_seconds.json()["detail"] == {
+        "code": "sample_expired",
+        "message": "Representative sample pair has expired",
+    }
 
 
+def test_commute_sample_pair_all_modes_and_reuse(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre1 = create_centre(test_engine, centre_id=1, postal="560123")
+    centre2 = create_centre(test_engine, centre_id=2, postal="560456")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal=None,
+    )
+
+    from kidcarematch_backend.core.commute import get_representative_sample_pair
+
+    wed, sat = get_representative_sample_pair()
+    valid_pair = [wed.isoformat(), sat.isoformat()]
+
+    pt_date_calls = []
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
+                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            params = kwargs.get("params", {})
+            route_type = params.get("routeType")
+            if route_type == "pt":
+                pt_date_calls.append(params.get("date"))
+                mock_resp.json.return_value = {
+                    "plan": {
+                        "itineraries": [
+                            {
+                                "duration": 1500,
+                                "legs": [
+                                    {
+                                        "mode": "BUS",
+                                        "route": "159",
+                                        "duration": 1500,
+                                        "distance": 4500,
+                                        "legGeometry": {"points": "sagGwhtxRsDkC"},
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            else:
+                mock_resp.json.return_value = {
+                    "status_message": "Found route between points",
+                    "route_geometry": "sagGwhtxRsDkC",
+                    "route_summary": {"total_time": 600, "total_distance": 5000},
+                }
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    # 1. Test all modes return sample_pair without explicit input
+    for mode in ("drive", "pt", "walk", "cycle"):
+        res = client.post(
+            f"/api/v1/centres/{centre1.centre_id}/commute",
+            json={"profile_id": profile.profile_id, "mode": mode},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert "sample_pair" in data
+        assert isinstance(data["sample_pair"], list)
+        assert len(data["sample_pair"]) == 2
+        assert data["sample_pair"] == valid_pair
+
+    # 2. Test all modes accept and reuse valid sample_pair across centres
+    for centre in (centre1, centre2):
+        for mode in ("drive", "pt", "walk", "cycle"):
+            res = client.post(
+                f"/api/v1/centres/{centre.centre_id}/commute",
+                json={
+                    "profile_id": profile.profile_id,
+                    "mode": mode,
+                    "sample_pair": valid_pair,
+                },
+            )
+            assert res.status_code == 200
+            data = res.json()
+            assert data["sample_pair"] == valid_pair
+
+    # 3. Verify PT OneMap routing calls used the exact dates from valid_pair
+    # Total PT calls: 1 call from step 1 (2 requests for wd and we) = 2,
+    # plus step 2 (2 centres * 2 requests for wd and we) = 4 -> total 6 calls
+    assert len(pt_date_calls) == 6
+    expected_wed_date = wed.strftime("%m-%d-%Y")
+    expected_sat_date = sat.strftime("%m-%d-%Y")
+    for i in range(0, 6, 2):
+        assert pt_date_calls[i] == expected_wed_date
+        assert pt_date_calls[i + 1] == expected_sat_date
 
 

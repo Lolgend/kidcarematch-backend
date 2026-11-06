@@ -316,16 +316,18 @@ def validate_sample_pair(
     else:
         now_sgt = now.astimezone(SGT)
 
-    if not sample_pair:
+    if sample_pair is None:
         return get_representative_sample_pair(now_sgt)
+
+    error_detail = {
+        "code": "sample_expired",
+        "message": "Representative sample pair has expired",
+    }
 
     if not isinstance(sample_pair, (list, tuple)) or len(sample_pair) != 2:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "sample_expired",
-                "message": "Representative sample pair expired",
-            },
+            detail=error_detail,
         )
 
     try:
@@ -336,52 +338,22 @@ def validate_sample_pair(
     except (ValueError, TypeError):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "sample_expired",
-                "message": "Representative sample pair expired",
-            },
+            detail=error_detail,
         )
 
     # Check expired (in past)
     if dt1_sgt < now_sgt or dt2_sgt < now_sgt:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "sample_expired",
-                "message": "Representative sample pair expired",
-            },
+            detail=error_detail,
         )
 
-    # Check stale (beyond 7 days window)
-    max_window = now_sgt + timedelta(days=7, hours=1)
-    if dt1_sgt > max_window or dt2_sgt > max_window:
+    # Must match the active upcoming Wednesday and Saturday 08:00 SGT sampling window
+    expected_wed, expected_sat = get_representative_sample_pair(now_sgt)
+    if dt1_sgt != expected_wed or dt2_sgt != expected_sat:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "sample_expired",
-                "message": "Representative sample pair expired",
-            },
-        )
-
-    # Check Wednesday (weekday 2) and Saturday (weekday 5) at 08:00:00.000000
-    if (
-        dt1_sgt.weekday() != 2
-        or dt1_sgt.hour != 8
-        or dt1_sgt.minute != 0
-        or dt1_sgt.second != 0
-        or dt1_sgt.microsecond != 0
-        or dt2_sgt.weekday() != 5
-        or dt2_sgt.hour != 8
-        or dt2_sgt.minute != 0
-        or dt2_sgt.second != 0
-        or dt2_sgt.microsecond != 0
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "sample_expired",
-                "message": "Representative sample pair expired",
-            },
+            detail=error_detail,
         )
 
     return dt1_sgt, dt2_sgt
