@@ -1,7 +1,13 @@
 """Strict OneMap geospatial adapter for commute route and centre location display (ADR-0008, ADR-0009)."""
 
+import base64
+import binascii
+import hashlib
+import hmac
+import json
 import logging
 import math
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone, tzinfo
 from typing import Any
@@ -15,14 +21,21 @@ from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.core.onemap import onemap_token_manager
 from kidcarematch_backend.db.db import PostalCoordinateCache
 from kidcarematch_backend.schemas.commute import (
+    AllowedSampleDefinition,
     AnchorName,
     CommuteMode,
+    CommuteReason,
     CommuteSample,
     Coordinate,
+    LegTiming,
+    NegotiatedCommuteSample,
+    NegotiatedRouteLeg,
     RouteLeg,
     RouteTotals,
+    SampleConditions,
     SampleKind,
     TransitLeg,
+    ViaStatus,
 )
 
 logger = logging.getLogger(__name__)
@@ -361,6 +374,202 @@ def validate_sample_pair(
     return dt1_sgt, dt2_sgt
 
 
+def get_primary_wednesday(now: datetime | None = None) -> datetime:
+    """Calculate the primary Wednesday at 08:00 Asia/Singapore for selected weekday sampling."""
+    return get_next_representative_wednesday(now)
+
+
+def build_cycle_conditions_id(departure_at: datetime) -> str:
+    """Generate deterministic conditions identifier for a scheduled PT sample condition."""
+    return f"pt_{departure_at.strftime('%Y%m%d_%H%M%S')}_onemap_v1"
+
+
+def build_allowed_samples(primary_wed: datetime) -> list[AllowedSampleDefinition]:
+    """Build the three allowed sample definitions for a sampling cycle (Wed=0, Thu=1, Fri=2)."""
+    allowed: list[AllowedSampleDefinition] = []
+    for idx in (0, 1, 2):
+        dep = primary_wed + timedelta(days=idx)
+        allowed.append(
+            AllowedSampleDefinition(
+                sample_index=idx,  # type: ignore[arg-type]
+                conditions_id=build_cycle_conditions_id(dep),
+                departure_at=dep,
+            )
+        )
+    return allowed
+
+
+def create_cycle_token(
+    primary_wed: datetime,
+    cycle_expires_at: datetime,
+    policy: str = "weekday_0800_wed_thu_fri_v1",
+    salt: str | None = None,
+) -> str:
+    """Encode and HMAC-sign a stateless URL-safe base64 cycle token."""
+    if salt is None:
+        salt = secrets.token_hex(8)
+    payload = {
+        "policy": policy,
+        "primary_wed_iso": primary_wed.isoformat(),
+        "cycle_expires_at_iso": cycle_expires_at.isoformat(),
+        "salt": salt,
+    }
+    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
+    sig = hmac.new(
+        settings.COMMUTE_CYCLE_SECRET_KEY.encode("utf-8"),
+        payload_json,
+        hashlib.sha256,
+    ).hexdigest()
+    envelope = {
+        "payload": payload,
+        "signature": sig,
+    }
+    envelope_json = json.dumps(envelope, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
+    return base64.urlsafe_b64encode(envelope_json).decode("ascii").rstrip("=")
+
+
+def decode_cycle_token(token: str) -> dict[str, Any]:
+    """Decode and verify HMAC signature on a stateless cycle token."""
+    if not token or not isinstance(token, str):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid or malformed cycle token",
+        )
+    try:
+        padded = token + "=" * ((4 - len(token) % 4) % 4)
+        raw_bytes = base64.urlsafe_b64decode(padded.encode("ascii"))
+        data = json.loads(raw_bytes.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise TypeError("Token body is not a JSON object")
+        if "payload" not in data or "signature" not in data:
+            raise ValueError("Missing payload or signature in token")
+        payload = data["payload"]
+        signature = data["signature"]
+        if not isinstance(payload, dict) or not isinstance(signature, str):
+            raise TypeError("Malformed payload or signature")
+
+        payload_json = json.dumps(
+            payload, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        expected_sig = hmac.new(
+            settings.COMMUTE_CYCLE_SECRET_KEY.encode("utf-8"),
+            payload_json,
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected_sig):
+            raise ValueError("HMAC signature mismatch")
+        return payload
+    except (
+        ValueError,
+        binascii.Error,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid or tampered cycle token",
+        ) from exc
+
+
+@dataclass
+class CycleValidationResult:
+    """Result of cycle token lifecycle resolution and sample validation."""
+
+    cycle_id: str
+    policy: str
+    primary_wed: datetime
+    cycle_expires_at: datetime
+    selected_index: int
+    selected_departure_at: datetime
+    allowed_samples: list[AllowedSampleDefinition]
+
+
+def validate_cycle_token(
+    cycle_id: str | None,
+    sample_index: int,
+    policy: str = "weekday_0800_wed_thu_fri_v1",
+    now: datetime | None = None,
+) -> CycleValidationResult:
+    """Validate client-supplied cycle parameters or issue a new cycle for primary index 0."""
+    if now is None:
+        now_sgt = datetime.now(SGT)
+    elif now.tzinfo is None:
+        now_sgt = now.replace(tzinfo=SGT)
+    else:
+        now_sgt = now.astimezone(SGT)
+
+    if policy != "weekday_0800_wed_thu_fri_v1":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unsupported sampling policy: {policy}",
+        )
+
+    if sample_index not in (0, 1, 2):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid sample_index: must be 0, 1, or 2",
+        )
+
+    if cycle_id is None:
+        if sample_index != 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="cycle_id is required for sample_index 1 or 2",
+            )
+        primary_wed = get_primary_wednesday(now_sgt)
+        cycle_expires_at = primary_wed
+        active_token = create_cycle_token(
+            primary_wed=primary_wed, cycle_expires_at=cycle_expires_at, policy=policy
+        )
+    else:
+        payload = decode_cycle_token(cycle_id)
+        if payload.get("policy") != policy:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Policy mismatch in cycle token",
+            )
+        try:
+            primary_wed = datetime.fromisoformat(payload["primary_wed_iso"]).astimezone(
+                SGT
+            )
+            cycle_expires_at = datetime.fromisoformat(
+                payload["cycle_expires_at_iso"]
+            ).astimezone(SGT)
+        except (KeyError, ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Malformed timestamps in cycle token",
+            ) from exc
+
+        if now_sgt >= cycle_expires_at:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "sample_expired",
+                    "message": "Commute sampling cycle has expired",
+                },
+            )
+        active_token = cycle_id
+
+    allowed_samples = build_allowed_samples(primary_wed)
+    selected_departure = primary_wed + timedelta(days=sample_index)
+
+    return CycleValidationResult(
+        cycle_id=active_token,
+        policy=policy,
+        primary_wed=primary_wed,
+        cycle_expires_at=cycle_expires_at,
+        selected_index=sample_index,
+        selected_departure_at=selected_departure,
+        allowed_samples=allowed_samples,
+    )
+
+
 def _required_metric(data: dict[str, Any], key: str) -> float:
     value = data.get(key)
     if value is None or isinstance(value, bool):
@@ -637,12 +846,14 @@ class CommuteAnchors:
         if self.workplace is not None and not self.has_workplace:
             self.has_workplace = True
 
-    def to_dict(self) -> dict[str, Coordinate | None]:
+    def to_dict(
+        self, include_workplace_key: bool = False
+    ) -> dict[str, Coordinate | None]:
         res: dict[str, Coordinate | None] = {
             "home": self.home,
             "centre": self.centre,
         }
-        if self.has_workplace:
+        if self.has_workplace or include_workplace_key:
             res["workplace"] = self.workplace
         return res
 
@@ -778,18 +989,198 @@ def build_commute_samples(
     return [sample_single]
 
 
+def _classify_leg_failure(message: str | None) -> CommuteReason:
+    """Map human-readable failure message to canonical structured CommuteReason."""
+    msg = (message or "").lower()
+    if "home postal" in msg:
+        return CommuteReason(
+            code="home_unresolved", failure_class="location", retryable=False
+        )
+    if "centre postal" in msg:
+        return CommuteReason(
+            code="centre_unresolved", failure_class="location", retryable=False
+        )
+    if "workplace postal" in msg:
+        return CommuteReason(
+            code="workplace_unresolved", failure_class="location", retryable=False
+        )
+    if "first leg arrival" in msg or "cannot be determined" in msg:
+        return CommuteReason(
+            code="via_centre_incomplete", failure_class="conditions", retryable=False
+        )
+    if "no public transport itinerary" in msg:
+        return CommuteReason(
+            code="no_itinerary", failure_class="sample_dependent", retryable=True
+        )
+    if "timed out" in msg or "timeout" in msg:
+        return CommuteReason(
+            code="provider_timeout", failure_class="service", retryable=True
+        )
+    if "geometry" in msg:
+        return CommuteReason(
+            code="geometry_unavailable", failure_class="service", retryable=False
+        )
+    return CommuteReason(
+        code="provider_unavailable", failure_class="service", retryable=True
+    )
+
+
+def _to_negotiated_leg(
+    leg: RouteLeg, departure: datetime | None, mode: CommuteMode
+) -> NegotiatedRouteLeg:
+    """Convert RouteLeg to NegotiatedRouteLeg with timing provenance and structured reasons."""
+    if leg.status == "unavailable":
+        reason = _classify_leg_failure(leg.message)
+        timing = LegTiming(
+            duration_basis="unknown",
+            arrival_source="unknown",
+            initial_wait_included=None,
+        )
+        return NegotiatedRouteLeg(
+            from_anchor=leg.from_anchor,
+            to_anchor=leg.to_anchor,
+            status="unavailable",
+            source=None,
+            duration_seconds=None,
+            arrival_at=None,
+            distance_meters=None,
+            geometry=None,
+            message=leg.message,
+            transit_legs=None,
+            departure_at=departure,
+            timing=timing,
+            reasons=[reason],
+        )
+
+    if mode == "pt":
+        timing = LegTiming(
+            duration_basis="elapsed_from_requested_departure",
+            arrival_source="provider_end_time",
+            initial_wait_included=True,
+        )
+    else:
+        timing = LegTiming(
+            duration_basis="provider_default",
+            arrival_source="not_applicable",
+            initial_wait_included=None,
+        )
+
+    return NegotiatedRouteLeg(
+        from_anchor=leg.from_anchor,
+        to_anchor=leg.to_anchor,
+        status=leg.status,
+        source=leg.source,
+        duration_seconds=leg.duration_seconds,
+        arrival_at=leg.arrival_at,
+        distance_meters=leg.distance_meters,
+        geometry=leg.geometry,
+        message=leg.message,
+        transit_legs=leg.transit_legs,
+        departure_at=departure,
+        timing=timing,
+        reasons=[],
+    )
+
+
+def build_negotiated_commute_sample(
+    kind: SampleKind,
+    sampled_at: datetime | None,
+    mode: CommuteMode,
+    anchors: CommuteAnchors,
+    conditions_id: str,
+    client: httpx.Client | None = None,
+) -> NegotiatedCommuteSample:
+    """Build a single NegotiatedCommuteSample with conditions, via_status, reasons, and timing provenance."""
+    raw_sample = build_commute_sample(
+        kind=kind,
+        sampled_at=sampled_at,
+        mode=mode,
+        anchors=anchors,
+        client=client,
+    )
+
+    negotiated_legs: list[NegotiatedRouteLeg] = []
+    leg1_departure = sampled_at if mode == "pt" else None
+    if raw_sample.legs:
+        negotiated_legs.append(
+            _to_negotiated_leg(raw_sample.legs[0], departure=leg1_departure, mode=mode)
+        )
+    if len(raw_sample.legs) > 1:
+        leg2_departure = (
+            raw_sample.legs[0].arrival_at
+            if mode == "pt" and raw_sample.legs[0].status == "available"
+            else None
+        )
+        negotiated_legs.append(
+            _to_negotiated_leg(raw_sample.legs[1], departure=leg2_departure, mode=mode)
+        )
+
+    all_available = bool(
+        negotiated_legs and all(leg.status == "available" for leg in negotiated_legs)
+    )
+    all_unavailable = bool(
+        negotiated_legs and all(leg.status == "unavailable" for leg in negotiated_legs)
+    )
+
+    if all_available:
+        via_status: ViaStatus = "available"
+        sample_reasons: list[CommuteReason] = []
+        totals: RouteTotals | None = raw_sample.totals
+    elif all_unavailable:
+        via_status = "unavailable"
+        sample_reasons = [r for leg in negotiated_legs for r in leg.reasons]
+        totals = None
+    else:
+        via_status = "partial"
+        sample_reasons = [
+            CommuteReason(
+                code="via_centre_incomplete",
+                failure_class="conditions",
+                retryable=False,
+            )
+        ]
+        totals = None
+
+    conditions = SampleConditions(
+        conditions_id=conditions_id,
+        timing_basis="scheduled_departure" if mode == "pt" else "provider_default",
+        initial_departure_at=sampled_at,
+        provider_options_id="onemap_pt_v1" if mode == "pt" else "onemap_default_v1",
+    )
+
+    return NegotiatedCommuteSample(
+        kind=kind,
+        sampled_at=sampled_at,
+        legs=negotiated_legs,
+        totals=totals,
+        conditions=conditions,
+        via_status=via_status,
+        reasons=sample_reasons,
+        direct_route=None,
+        comparison=None,
+    )
+
+
 __all__ = [
     "SGT",
     "CommuteAnchors",
+    "CycleValidationResult",
+    "build_allowed_samples",
     "build_commute_sample",
     "build_commute_samples",
+    "build_cycle_conditions_id",
+    "build_negotiated_commute_sample",
     "clear_commute_postal_cache",
+    "create_cycle_token",
+    "decode_cycle_token",
     "decode_polyline",
     "get_commute_leg",
     "get_next_representative_saturday",
     "get_next_representative_wednesday",
+    "get_primary_wednesday",
     "get_representative_day",
     "get_representative_sample_pair",
     "resolve_commute_postal",
+    "validate_cycle_token",
     "validate_sample_pair",
 ]

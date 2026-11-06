@@ -1,6 +1,8 @@
 """Preschool centre API endpoints."""
 
-from datetime import datetime
+import hashlib
+import secrets
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -17,7 +19,9 @@ from kidcarematch_backend.auth.security import (
 from kidcarematch_backend.core.commute import (
     CommuteAnchors,
     build_commute_samples,
+    build_negotiated_commute_sample,
     resolve_commute_postal,
+    validate_cycle_token,
     validate_sample_pair,
 )
 from kidcarematch_backend.core.matching import (
@@ -63,6 +67,9 @@ from kidcarematch_backend.schemas.centre import (
 from kidcarematch_backend.schemas.commute import (
     CommuteRequest,
     CommuteResponse,
+    CommuteSamplingResponse,
+    EvaluationMetadata,
+    NegotiatedCommuteResponse,
 )
 from kidcarematch_backend.schemas.commute import (
     Coordinate as CommuteCoordinate,
@@ -645,7 +652,7 @@ def get_centre_location(
 
 @router.post(
     "/{centre_id}/commute",
-    response_model=CommuteResponse,
+    response_model=NegotiatedCommuteResponse | CommuteResponse,
     status_code=status.HTTP_200_OK,
     summary="Get personalised commute comparison to preschool centre",
 )
@@ -654,7 +661,7 @@ def get_centre_commute(
     payload: CommuteRequest,
     session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_parent)],
-) -> CommuteResponse:
+) -> NegotiatedCommuteResponse | CommuteResponse:
     """Calculate personalised commute route(s) from home through centre (and optional workplace)."""
     centre = get_centre_or_404(centre_id, session)
 
@@ -691,6 +698,78 @@ def get_centre_commute(
         workplace=workplace_coord,
         has_workplace=has_workplace,
     )
+
+    if payload.sampling is not None:
+        if payload.mode != "pt":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="sampling is only permitted for public transport (mode='pt')",
+            )
+
+        cycle_res = validate_cycle_token(
+            cycle_id=payload.sampling.cycle_id,
+            sample_index=payload.sampling.sample_index,
+            policy=payload.sampling.policy,
+        )
+
+        selected_sample_def = cycle_res.allowed_samples[cycle_res.selected_index]
+        sample = build_negotiated_commute_sample(
+            kind="weekday",
+            sampled_at=selected_sample_def.departure_at,
+            mode="pt",
+            anchors=anchors,
+            conditions_id=selected_sample_def.conditions_id,
+        )
+
+        now_utc = datetime.now(timezone.utc)
+        profile_raw = f"profile:{profile.profile_id}:{profile.home_postal_code or ''}:{profile.workplace_postal_code or ''}"
+        profile_revision = hashlib.sha256(profile_raw.encode("utf-8")).hexdigest()
+
+        home_str = (
+            f"{home_coord.lat:.6f},{home_coord.lng:.6f}" if home_coord else "none"
+        )
+        centre_str = (
+            f"{centre_coord.lat:.6f},{centre_coord.lng:.6f}"
+            if centre_coord
+            else "none"
+        )
+        workplace_str = (
+            f"{workplace_coord.lat:.6f},{workplace_coord.lng:.6f}"
+            if workplace_coord
+            else "none"
+        )
+        anchor_raw = f"anchors:{home_str}:{centre_str}:{workplace_str}"
+        anchor_revision = hashlib.sha256(anchor_raw.encode("utf-8")).hexdigest()
+
+        evaluation = EvaluationMetadata(
+            evaluation_id=f"eval_{secrets.token_hex(12)}",
+            evaluated_at=now_utc,
+            profile_revision=profile_revision,
+            anchor_revision=anchor_revision,
+        )
+
+        sampling_response = CommuteSamplingResponse(
+            policy=cycle_res.policy,  # type: ignore[arg-type]
+            cycle_id=cycle_res.cycle_id,
+            cycle_expires_at=cycle_res.cycle_expires_at,
+            selected_index=cycle_res.selected_index,  # type: ignore[arg-type]
+            allowed_samples=cycle_res.allowed_samples,
+        )
+
+        return NegotiatedCommuteResponse(
+            centre_id=centre.centre_id or centre_id,
+            profile_id=payload.profile_id,
+            mode=payload.mode,
+            anchors=anchors.to_dict(include_workplace_key=True),
+            sample_pair=None,
+            samples=[sample],
+            comparison_contract="direct_baseline_v1"
+            if payload.include_direct_baseline
+            else None,
+            sampling_contract="weekday_0800_wed_thu_fri_v1",
+            evaluation=evaluation,
+            sampling=sampling_response,
+        )
 
     wednesday_dt, saturday_dt = validate_sample_pair(payload.sample_pair)
     response_sample_pair = [wednesday_dt.isoformat(), saturday_dt.isoformat()]
