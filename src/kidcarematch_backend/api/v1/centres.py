@@ -1,6 +1,7 @@
 """Preschool centre API endpoints."""
 
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -17,6 +18,9 @@ from kidcarematch_backend.auth.security import (
 from kidcarematch_backend.core.commute import (
     CommuteAnchors,
     build_commute_samples,
+    build_negotiated_commute_samples,
+    compute_anchor_revision,
+    compute_profile_revision,
     resolve_commute_postal,
     validate_sample_pair,
 )
@@ -63,6 +67,9 @@ from kidcarematch_backend.schemas.centre import (
 from kidcarematch_backend.schemas.commute import (
     CommuteRequest,
     CommuteResponse,
+    DirectBaselineContract,
+    EvaluationMetadata,
+    NegotiatedCommuteResponse,
 )
 from kidcarematch_backend.schemas.commute import (
     Coordinate as CommuteCoordinate,
@@ -645,7 +652,7 @@ def get_centre_location(
 
 @router.post(
     "/{centre_id}/commute",
-    response_model=CommuteResponse,
+    response_model=NegotiatedCommuteResponse | CommuteResponse,
     status_code=status.HTTP_200_OK,
     summary="Get personalised commute comparison to preschool centre",
 )
@@ -654,7 +661,7 @@ def get_centre_commute(
     payload: CommuteRequest,
     session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_parent)],
-) -> CommuteResponse:
+) -> NegotiatedCommuteResponse | CommuteResponse:
     """Calculate personalised commute route(s) from home through centre (and optional workplace)."""
     centre = get_centre_or_404(centre_id, session)
 
@@ -694,6 +701,45 @@ def get_centre_commute(
 
     wednesday_dt, saturday_dt = validate_sample_pair(payload.sample_pair)
     response_sample_pair = [wednesday_dt.isoformat(), saturday_dt.isoformat()]
+
+    is_negotiated = payload.include_direct_baseline or (
+        payload.sampling is not None
+    )
+
+    if is_negotiated:
+        comparison_contract: DirectBaselineContract | None = (
+            "direct_baseline_v1" if payload.include_direct_baseline else None
+        )
+        profile_rev = compute_profile_revision(
+            profile.home_postal_code, profile.workplace_postal_code
+        )
+        anchor_rev = compute_anchor_revision(
+            home_coord, centre_coord, workplace_coord
+        )
+        evaluation = EvaluationMetadata(
+            evaluation_id=str(uuid.uuid4()),
+            evaluated_at=datetime.now(timezone.utc),
+            profile_revision=profile_rev,
+            anchor_revision=anchor_rev,
+        )
+        negotiated_samples = build_negotiated_commute_samples(
+            mode=payload.mode,
+            anchors=anchors,
+            sample_pair=(wednesday_dt, saturday_dt),
+            include_direct_baseline=payload.include_direct_baseline,
+        )
+        return NegotiatedCommuteResponse(
+            centre_id=centre.centre_id or centre_id,
+            profile_id=payload.profile_id,
+            mode=payload.mode,
+            sample_pair=response_sample_pair,
+            anchors=anchors.to_dict(include_workplace_key=True),
+            samples=negotiated_samples,
+            comparison_contract=comparison_contract,
+            sampling_contract=None,
+            evaluation=evaluation,
+            sampling=None,
+        )
 
     samples = build_commute_samples(
         mode=payload.mode,
