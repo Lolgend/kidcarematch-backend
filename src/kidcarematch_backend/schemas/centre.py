@@ -7,6 +7,7 @@ from typing_extensions import Self
 
 from kidcarematch_backend.core.postal_districts import get_district_by_postal_code
 from kidcarematch_backend.db.db import CitizenshipType, PreschoolLevel
+from kidcarematch_backend.schemas.commute import Coordinate
 
 
 class CentreSummaryResponse(BaseModel):
@@ -138,6 +139,16 @@ class CentreReviewListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class CentreLocationResponse(BaseModel):
+    """Preschool centre geospatial location and availability status."""
+
+    centre_id: int
+    coordinate: Coordinate | None = None
+    status: str
+
+
 
 
 

@@ -13,6 +13,7 @@ from kidcarematch_backend.auth.security import (
     get_current_user,
     get_optional_current_user,
 )
+from kidcarematch_backend.core.commute import resolve_commute_postal
 from kidcarematch_backend.core.matching import (
     evaluate_centre_matches,
     resolve_match_criteria,
@@ -35,6 +36,7 @@ from kidcarematch_backend.db.db import (
     get_session,
 )
 from kidcarematch_backend.schemas.centre import (
+    CentreLocationResponse,
     CentreReviewItem,
     CentreReviewListResponse,
     CentreSummaryResponse,
@@ -580,6 +582,39 @@ def get_centre_watchlist_status(
         centre_id=centre_id,
         is_watched=is_watched,
         watched_entries=watched_entries,
+    )
+
+
+@router.get(
+    "/{centre_id}/location",
+    response_model=CentreLocationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Preschool Centre Geospatial Location",
+)
+def get_centre_location(
+    centre_id: int,
+    session: Annotated[Session, Depends(get_session)],
+) -> CentreLocationResponse:
+    """Retrieve verified OneMap geospatial coordinates for a preschool centre.
+
+    Public endpoint (no auth required).
+    Resolves postal code via OneMap search verifying exact returned postal match.
+    Returns status='available' with coordinates if exact match, otherwise status='unavailable'.
+    """
+    centre = get_centre_or_404(centre_id, session)
+
+    coord = resolve_commute_postal(centre.postal, session=session)
+    if coord is not None:
+        return CentreLocationResponse(
+            centre_id=centre.centre_id or centre_id,
+            coordinate=coord,
+            status="available",
+        )
+
+    return CentreLocationResponse(
+        centre_id=centre.centre_id or centre_id,
+        coordinate=None,
+        status="unavailable",
     )
 
 
