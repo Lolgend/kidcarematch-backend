@@ -900,3 +900,630 @@ def test_commute_routing_reactive_401_retry_success(
     sample = data["samples"][0]
     assert sample["legs"][0]["status"] == "available"
     assert sample["totals"]["duration_seconds"] == 600.0
+
+
+def test_commute_workplace_driving_two_legs_success(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal="048624",
+    )
+    # Explicitly set location_preference to HOME to test independence
+    with Session(test_engine) as session:
+        db_prof = session.get(FamilyPreferenceProfile, profile.profile_id)
+        assert db_prof is not None
+        db_prof.location_preference = LocationPreference.HOME
+        session.add(db_prof)
+        session.commit()
+
+    routing_calls = []
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            lat_map = {"120120": "1.3000", "560123": "1.3500", "048624": "1.2800"}
+            lng_map = {"120120": "103.8000", "560123": "103.8500", "048624": "103.8500"}
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": lat_map.get(postal, "1.3000"),
+                        "LONGITUDE": lng_map.get(postal, "103.8000"),
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            params = kwargs.get("params", {})
+            routing_calls.append(params)
+            start = params.get("start")
+            if start == "1.3,103.8":
+                # Leg 1: home -> centre
+                mock_resp.json.return_value = {
+                    "status_message": "Found route between points",
+                    "route_geometry": "sagGwhtxRsDkC",
+                    "route_summary": {"total_time": 600, "total_distance": 5000},
+                }
+            else:
+                # Leg 2: centre -> workplace
+                mock_resp.json.return_value = {
+                    "status_message": "Found route between points",
+                    "route_geometry": "sagGwhtxRsDkC",
+                    "route_summary": {"total_time": 800, "total_distance": 7000},
+                }
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "drive"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["mode"] == "drive"
+    assert "home" in data["anchors"]
+    assert "centre" in data["anchors"]
+    assert "workplace" in data["anchors"]
+    assert data["anchors"]["home"] == {"lat": 1.3, "lng": 103.8}
+    assert data["anchors"]["centre"] == {"lat": 1.35, "lng": 103.85}
+    assert data["anchors"]["workplace"] == {"lat": 1.28, "lng": 103.85}
+
+    sample = data["samples"][0]
+    assert len(sample["legs"]) == 2
+    leg1 = sample["legs"][0]
+    leg2 = sample["legs"][1]
+
+    assert leg1["from_anchor"] == "home"
+    assert leg1["to_anchor"] == "centre"
+    assert leg1["status"] == "available"
+    assert leg1["duration_seconds"] == 600.0
+    assert leg1["distance_meters"] == 5000.0
+
+    assert leg2["from_anchor"] == "centre"
+    assert leg2["to_anchor"] == "workplace"
+    assert leg2["status"] == "available"
+    assert leg2["duration_seconds"] == 800.0
+    assert leg2["distance_meters"] == 7000.0
+
+    assert sample["totals"]["duration_seconds"] == 1400.0
+    assert sample["totals"]["distance_meters"] == 12000.0
+
+
+def test_commute_workplace_walking_two_legs_success(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal="048624",
+    )
+
+    routing_calls = []
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            lat_map = {"120120": "1.3000", "560123": "1.3500", "048624": "1.2800"}
+            lng_map = {"120120": "103.8000", "560123": "103.8500", "048624": "103.8500"}
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": lat_map.get(postal, "1.3000"),
+                        "LONGITUDE": lng_map.get(postal, "103.8000"),
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            params = kwargs.get("params", {})
+            routing_calls.append(params)
+            assert params.get("routeType") == "walk"
+            start = params.get("start")
+            if start == "1.3,103.8":
+                mock_resp.json.return_value = {
+                    "status_message": "Found route between points",
+                    "route_geometry": "sagGwhtxRsDkC",
+                    "route_summary": {"total_time": 1800, "total_distance": 2500},
+                }
+            else:
+                mock_resp.json.return_value = {
+                    "status_message": "Found route between points",
+                    "route_geometry": "sagGwhtxRsDkC",
+                    "route_summary": {"total_time": 2400, "total_distance": 3200},
+                }
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "walk"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["mode"] == "walk"
+    assert len(routing_calls) == 2
+    assert all(c["routeType"] == "walk" for c in routing_calls)
+    sample = data["samples"][0]
+    assert len(sample["legs"]) == 2
+    assert sample["legs"][0]["status"] == "available"
+    assert sample["legs"][0]["duration_seconds"] == 1800.0
+    assert sample["legs"][1]["status"] == "available"
+    assert sample["legs"][1]["duration_seconds"] == 2400.0
+    assert sample["totals"]["duration_seconds"] == 4200.0
+    assert sample["totals"]["distance_meters"] == 5700.0
+
+
+def test_commute_workplace_cycling_two_legs_success(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal="048624",
+    )
+
+    routing_calls = []
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            lat_map = {"120120": "1.3000", "560123": "1.3500", "048624": "1.2800"}
+            lng_map = {"120120": "103.8000", "560123": "103.8500", "048624": "103.8500"}
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": lat_map.get(postal, "1.3000"),
+                        "LONGITUDE": lng_map.get(postal, "103.8000"),
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            params = kwargs.get("params", {})
+            routing_calls.append(params)
+            assert params.get("routeType") == "cycle"
+            start = params.get("start")
+            if start == "1.3,103.8":
+                mock_resp.json.return_value = {
+                    "status_message": "Found route between points",
+                    "route_geometry": "sagGwhtxRsDkC",
+                    "route_summary": {"total_time": 700, "total_distance": 4000},
+                }
+            else:
+                mock_resp.json.return_value = {
+                    "status_message": "Found route between points",
+                    "route_geometry": "sagGwhtxRsDkC",
+                    "route_summary": {"total_time": 900, "total_distance": 5000},
+                }
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "cycle"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["mode"] == "cycle"
+    assert len(routing_calls) == 2
+    assert all(c["routeType"] == "cycle" for c in routing_calls)
+    sample = data["samples"][0]
+    assert len(sample["legs"]) == 2
+    assert sample["legs"][0]["status"] == "available"
+    assert sample["legs"][0]["duration_seconds"] == 700.0
+    assert sample["legs"][1]["status"] == "available"
+    assert sample["legs"][1]["duration_seconds"] == 900.0
+    assert sample["totals"]["duration_seconds"] == 1600.0
+    assert sample["totals"]["distance_meters"] == 9000.0
+
+
+def test_commute_workplace_unresolvable_returns_unavailable_leg2_and_preserves_leg1(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal="999999",
+    )
+
+    routing_calls = []
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            if postal == "999999":
+                mock_resp.json.return_value = {"found": 0, "results": []}
+                return mock_resp
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
+                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            params = kwargs.get("params", {})
+            routing_calls.append(params)
+            mock_resp.json.return_value = {
+                "status_message": "Found route between points",
+                "route_geometry": "sagGwhtxRsDkC",
+                "route_summary": {"total_time": 600, "total_distance": 5000},
+            }
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "drive"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["anchors"]["home"] == {"lat": 1.3, "lng": 103.8}
+    assert data["anchors"]["centre"] == {"lat": 1.35, "lng": 103.85}
+    assert "workplace" in data["anchors"]
+    assert data["anchors"]["workplace"] is None
+
+    sample = data["samples"][0]
+    assert sample["totals"] is None
+    assert len(sample["legs"]) == 2
+
+    leg1 = sample["legs"][0]
+    assert leg1["from_anchor"] == "home"
+    assert leg1["to_anchor"] == "centre"
+    assert leg1["status"] == "available"
+    assert leg1["duration_seconds"] == 600.0
+
+    leg2 = sample["legs"][1]
+    assert leg2["from_anchor"] == "centre"
+    assert leg2["to_anchor"] == "workplace"
+    assert leg2["status"] == "unavailable"
+    assert leg2["message"] == "Workplace postal code could not be resolved"
+    assert leg2["duration_seconds"] is None
+    assert leg2["distance_meters"] is None
+    assert leg2["geometry"] is None
+
+
+def test_commute_centre_unresolvable_with_workplace_marks_both_legs_unavailable(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="999999")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal="048624",
+    )
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            if postal == "999999":
+                mock_resp.json.return_value = {"found": 0, "results": []}
+                return mock_resp
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": "1.3000" if postal == "120120" else "1.2800",
+                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                    }
+                ],
+            }
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "drive"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["anchors"]["home"] == {"lat": 1.3, "lng": 103.8}
+    assert data["anchors"]["centre"] is None
+    assert data["anchors"]["workplace"] == {"lat": 1.28, "lng": 103.85}
+
+    sample = data["samples"][0]
+    assert sample["totals"] is None
+    assert len(sample["legs"]) == 2
+
+    leg1 = sample["legs"][0]
+    assert leg1["from_anchor"] == "home"
+    assert leg1["to_anchor"] == "centre"
+    assert leg1["status"] == "unavailable"
+    assert leg1["message"] == "Centre postal code could not be resolved"
+
+    leg2 = sample["legs"][1]
+    assert leg2["from_anchor"] == "centre"
+    assert leg2["to_anchor"] == "workplace"
+    assert leg2["status"] == "unavailable"
+    assert leg2["message"] == "Centre postal code could not be resolved"
+
+
+def test_commute_workplace_leg2_routing_failure_preserves_leg1(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal="048624",
+    )
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            lat_map = {"120120": "1.3000", "560123": "1.3500", "048624": "1.2800"}
+            lng_map = {"120120": "103.8000", "560123": "103.8500", "048624": "103.8500"}
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": lat_map.get(postal, "1.3000"),
+                        "LONGITUDE": lng_map.get(postal, "103.8000"),
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            params = kwargs.get("params", {})
+            start = params.get("start")
+            if start == "1.3,103.8":
+                mock_resp.json.return_value = {
+                    "status_message": "Found route between points",
+                    "route_geometry": "sagGwhtxRsDkC",
+                    "route_summary": {"total_time": 600, "total_distance": 5000},
+                }
+                return mock_resp
+            # Leg 2 times out
+            raise httpx.ConnectTimeout("OneMap routing timed out for leg 2")
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "drive"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    sample = data["samples"][0]
+    assert sample["totals"] is None
+    assert len(sample["legs"]) == 2
+
+    leg1 = sample["legs"][0]
+    assert leg1["status"] == "available"
+    assert leg1["duration_seconds"] == 600.0
+
+    leg2 = sample["legs"][1]
+    assert leg2["status"] == "unavailable"
+    assert "timed out" in leg2["message"].lower() or "timeout" in leg2["message"].lower()
+
+
+def test_commute_workplace_leg1_routing_failure_preserves_leg2(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal="048624",
+    )
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            lat_map = {"120120": "1.3000", "560123": "1.3500", "048624": "1.2800"}
+            lng_map = {"120120": "103.8000", "560123": "103.8500", "048624": "103.8500"}
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": lat_map.get(postal, "1.3000"),
+                        "LONGITUDE": lng_map.get(postal, "103.8000"),
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            params = kwargs.get("params", {})
+            start = params.get("start")
+            if start == "1.3,103.8":
+                # Leg 1 times out
+                raise httpx.ConnectTimeout("OneMap routing timed out for leg 1")
+            # Leg 2 succeeds
+            mock_resp.json.return_value = {
+                "status_message": "Found route between points",
+                "route_geometry": "sagGwhtxRsDkC",
+                "route_summary": {"total_time": 800, "total_distance": 7000},
+            }
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "drive"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    sample = data["samples"][0]
+    assert sample["totals"] is None
+    assert len(sample["legs"]) == 2
+
+    leg1 = sample["legs"][0]
+    assert leg1["status"] == "unavailable"
+    assert "timed out" in leg1["message"].lower() or "timeout" in leg1["message"].lower()
+
+    leg2 = sample["legs"][1]
+    assert leg2["status"] == "available"
+    assert leg2["duration_seconds"] == 800.0
+
+
+def test_commute_workplace_whitespace_omits_workplace_anchor(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal="   ",
+    )
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
+                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            mock_resp.json.return_value = {
+                "status_message": "Found route between points",
+                "route_geometry": "sagGwhtxRsDkC",
+                "route_summary": {"total_time": 600, "total_distance": 5000},
+            }
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "drive"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert "workplace" not in data["anchors"]
+    sample = data["samples"][0]
+    assert len(sample["legs"]) == 1
+    assert sample["legs"][0]["from_anchor"] == "home"
+    assert sample["legs"][0]["to_anchor"] == "centre"
+    assert sample["totals"]["duration_seconds"] == 600.0
+
+
+
+
+
+

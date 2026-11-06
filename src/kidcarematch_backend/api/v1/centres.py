@@ -678,6 +678,13 @@ def get_centre_commute(
         "centre": centre_coord,
     }
 
+    clean_workplace_postal = (profile.workplace_postal_code or "").strip()
+    has_workplace = bool(clean_workplace_postal)
+    workplace_coord: CommuteCoordinate | None = None
+    if has_workplace:
+        workplace_coord = resolve_commute_postal(clean_workplace_postal, session=session)
+        anchors["workplace"] = workplace_coord
+
     wednesday_dt, saturday_dt = validate_sample_pair(payload.sample_pair)
     response_sample_pair = [wednesday_dt.isoformat(), saturday_dt.isoformat()]
 
@@ -713,21 +720,62 @@ def get_centre_commute(
             mode=payload.mode,
         )
 
+    legs: list[RouteLeg] = [leg1]
+
+    if has_workplace:
+        # Leg 2: centre -> workplace
+        if not centre_coord:
+            leg2 = RouteLeg(
+                from_anchor="centre",
+                to_anchor="workplace",
+                status="unavailable",
+                source=None,
+                duration_seconds=None,
+                distance_meters=None,
+                geometry=None,
+                message="Centre postal code could not be resolved",
+            )
+        elif not workplace_coord:
+            leg2 = RouteLeg(
+                from_anchor="centre",
+                to_anchor="workplace",
+                status="unavailable",
+                source=None,
+                duration_seconds=None,
+                distance_meters=None,
+                geometry=None,
+                message="Workplace postal code could not be resolved",
+            )
+        else:
+            leg2 = get_commute_leg(
+                from_anchor="centre",
+                to_anchor="workplace",
+                start=centre_coord,
+                end=workplace_coord,
+                mode=payload.mode,
+            )
+        legs.append(leg2)
+
     totals: RouteTotals | None = None
-    if (
-        leg1.status == "available"
-        and leg1.duration_seconds is not None
-        and leg1.distance_meters is not None
+    if all(
+        leg.status == "available"
+        and leg.duration_seconds is not None
+        and leg.distance_meters is not None
+        for leg in legs
     ):
         totals = RouteTotals(
-            duration_seconds=leg1.duration_seconds,
-            distance_meters=leg1.distance_meters,
+            duration_seconds=sum(
+                leg.duration_seconds for leg in legs if leg.duration_seconds is not None
+            ),
+            distance_meters=sum(
+                leg.distance_meters for leg in legs if leg.distance_meters is not None
+            ),
         )
 
     sample = CommuteSample(
         kind="single",
         sampled_at=None,
-        legs=[leg1],
+        legs=legs,
         totals=totals,
     )
 
