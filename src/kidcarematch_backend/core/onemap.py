@@ -159,9 +159,7 @@ class OneMapTokenManager:
 
             except httpx.HTTPStatusError as exc:
                 status_code = (
-                    exc.response.status_code
-                    if exc.response is not None
-                    else "unknown"
+                    exc.response.status_code if exc.response is not None else "unknown"
                 )
                 text_snippet = (
                     exc.response.text[:200]
@@ -222,16 +220,15 @@ class OneMapTokenManager:
         """Return Authorization Bearer header dictionary if a valid token is available, else empty dict."""
         token = self.get_valid_token(client=client)
         if token:
-            return {"Authorization": f"Bearer {token}"}
+            clean = token.removeprefix("Bearer ").strip()
+            return {"Authorization": f"Bearer {clean}"}
         return {}
 
 
 onemap_token_manager = OneMapTokenManager()
 
 
-def haversine_distance_km(
-    lat1: float, lon1: float, lat2: float, lon2: float
-) -> float:
+def haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate great-circle straight-line distance between two coordinates in kilometers."""
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     delta_phi = math.radians(lat2 - lat1)
@@ -362,9 +359,7 @@ def resolve_coordinates_batch(
 ) -> dict[str, tuple[float, float]]:
     """Batch resolve coordinates for a list of postal codes, utilizing persistent cache."""
     valid_postals = {
-        p.strip()
-        for p in postals
-        if p and len(p.strip()) == 6 and p.strip().isdigit()
+        p.strip() for p in postals if p and len(p.strip()) == 6 and p.strip().isdigit()
     }
     if not valid_postals:
         return {}
@@ -377,8 +372,7 @@ def resolve_coordinates_batch(
     ).all()
 
     result_map: dict[str, tuple[float, float]] = {
-        rec.postal_code: (rec.latitude, rec.longitude)
-        for rec in cached_records
+        rec.postal_code: (rec.latitude, rec.longitude) for rec in cached_records
     }
 
     # Fetch missing postals

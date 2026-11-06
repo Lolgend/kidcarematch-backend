@@ -1917,3 +1917,772 @@ def test_centres_invalid_and_malformed_postal_resolves_to_null(
     for code in ("INV_SHORT", "INV_ALPHA", "INV_FIVE", "INV_LONG"):
         assert items[code]["district"] is None
         assert items[code]["district_name"] is None
+
+
+# ============================================================================
+# Ticket #81: Public Preschool Centre Location Endpoint Tests
+# ============================================================================
+
+
+def test_get_centre_location_not_found_returns_404(client: TestClient):
+    """GET /api/v1/centres/{centre_id}/location returns 404 when centre does not exist."""
+    response = client.get("/api/v1/centres/999999/location")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Preschool centre not found"
+
+
+def test_get_centre_location_missing_or_invalid_postal_returns_unavailable(
+    client: TestClient, test_engine
+):
+    """GET /api/v1/centres/{centre_id}/location returns status 'unavailable' when postal is None or invalid."""
+    with Session(test_engine) as session:
+        centre_no_postal = PreschoolCentre(
+            centre_code="PC_NO_POSTAL",
+            centre_name="Centre Without Postal",
+            postal=None,
+        )
+        centre_invalid_postal = PreschoolCentre(
+            centre_code="PC_BAD_POSTAL",
+            centre_name="Centre With Invalid Postal",
+            postal="12345",  # only 5 digits
+        )
+        centre_alpha_postal = PreschoolCentre(
+            centre_code="PC_ALPHA_POSTAL",
+            centre_name="Centre With Alpha Postal",
+            postal="56012A",  # alphanumeric
+        )
+        session.add_all([centre_no_postal, centre_invalid_postal, centre_alpha_postal])
+        session.commit()
+        session.refresh(centre_no_postal)
+        session.refresh(centre_invalid_postal)
+        session.refresh(centre_alpha_postal)
+
+    # 1. Null postal
+    res_null = client.get(f"/api/v1/centres/{centre_no_postal.centre_id}/location")
+    assert res_null.status_code == 200
+    assert res_null.json() == {
+        "centre_id": centre_no_postal.centre_id,
+        "coordinate": None,
+        "status": "unavailable",
+    }
+
+    # 2. 5-digit postal
+    res_invalid = client.get(f"/api/v1/centres/{centre_invalid_postal.centre_id}/location")
+    assert res_invalid.status_code == 200
+    assert res_invalid.json() == {
+        "centre_id": centre_invalid_postal.centre_id,
+        "coordinate": None,
+        "status": "unavailable",
+    }
+
+    # 3. Alpha postal
+    res_alpha = client.get(f"/api/v1/centres/{centre_alpha_postal.centre_id}/location")
+    assert res_alpha.status_code == 200
+    assert res_alpha.json() == {
+        "centre_id": centre_alpha_postal.centre_id,
+        "coordinate": None,
+        "status": "unavailable",
+    }
+
+
+def test_get_centre_location_available_with_exact_onemap_match(
+    client: TestClient, test_engine, monkeypatch: pytest.MonkeyPatch
+):
+    """GET /api/v1/centres/{centre_id}/location returns status 'available' and coordinates on exact match."""
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC_VALID_LOC",
+            centre_name="Valid Location Preschool",
+            postal="560123",
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+
+    # Mock OneMap Search API call
+    class MockResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "found": 1,
+                "total": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": "123 ANG MO KIO AVENUE 3",
+                        "BLK_NO": "123",
+                        "ROAD_NAME": "ANG MO KIO AVENUE 3",
+                        "BUILDING": "NIL",
+                        "ADDRESS": "123 ANG MO KIO AVENUE 3 SINGAPORE 560123",
+                        "POSTAL": "560123",
+                        "X": "29876.5",
+                        "Y": "38765.2",
+                        "LATITUDE": "1.369876",
+                        "LONGITUDE": "103.851234",
+                    }
+                ],
+            }
+
+        def raise_for_status(self):
+            pass
+
+    import httpx
+
+    real_get = httpx.Client.get
+
+    def selective_mock_get(self, url, *args, **kwargs):
+        if "onemap" in str(url).lower():
+            return MockResponse()
+        return real_get(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "get", selective_mock_get)
+
+    res = client.get(f"/api/v1/centres/{centre.centre_id}/location")
+    assert res.status_code == 200
+    assert res.json() == {
+        "centre_id": centre.centre_id,
+        "coordinate": {"lat": 1.369876, "lng": 103.851234},
+        "status": "available",
+    }
+
+
+def test_get_centre_location_approximate_or_empty_onemap_result_returns_unavailable(
+    client: TestClient, test_engine, monkeypatch: pytest.MonkeyPatch
+):
+    """GET /api/v1/centres/{centre_id}/location rejects approximate OneMap search results."""
+    from kidcarematch_backend.core.commute import _COMMUTE_POSTAL_CACHE
+
+    _COMMUTE_POSTAL_CACHE.clear()
+
+    with Session(test_engine) as session:
+        centre_approx = PreschoolCentre(
+            centre_code="PC_APPROX_LOC",
+            centre_name="Approximate Location Preschool",
+            postal="560123",
+        )
+        centre_zero = PreschoolCentre(
+            centre_code="PC_ZERO_LOC",
+            centre_name="Zero Results Preschool",
+            postal="560456",
+        )
+        session.add_all([centre_approx, centre_zero])
+        session.commit()
+        session.refresh(centre_approx)
+        session.refresh(centre_zero)
+
+    class MockApproxResponse:
+        status_code = 200
+
+        def __init__(self, query_postal: str):
+            self.query_postal = query_postal
+
+        def json(self):
+            if self.query_postal == "560123":
+                # Returned POSTAL does not match searchVal 560123
+                return {
+                    "found": 1,
+                    "total": 1,
+                    "results": [
+                        {
+                            "SEARCHVAL": "999 ANG MO KIO AVENUE 3",
+                            "POSTAL": "560999",
+                            "LATITUDE": "1.370000",
+                            "LONGITUDE": "103.850000",
+                        }
+                    ],
+                }
+            return {"found": 0, "total": 0, "results": []}
+
+        def raise_for_status(self):
+            pass
+
+    import httpx
+
+    real_get = httpx.Client.get
+
+    def mock_onemap_get(self, url, *args, **kwargs):
+        if "onemap" in str(url).lower():
+            params = kwargs.get("params", {})
+            search_val = params.get("searchVal", "")
+            return MockApproxResponse(search_val)
+        return real_get(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "get", mock_onemap_get)
+
+    # 1. Approximate match rejected
+    res_approx = client.get(f"/api/v1/centres/{centre_approx.centre_id}/location")
+    assert res_approx.status_code == 200
+    assert res_approx.json() == {
+        "centre_id": centre_approx.centre_id,
+        "coordinate": None,
+        "status": "unavailable",
+    }
+
+    # 2. Zero results rejected
+    res_zero = client.get(f"/api/v1/centres/{centre_zero.centre_id}/location")
+    assert res_zero.status_code == 200
+    assert res_zero.json() == {
+        "centre_id": centre_zero.centre_id,
+        "coordinate": None,
+        "status": "unavailable",
+    }
+
+
+def test_get_centre_location_caches_in_memory_and_avoids_repeated_http_calls(
+    client: TestClient, test_engine, monkeypatch: pytest.MonkeyPatch
+):
+    """GET /api/v1/centres/{centre_id}/location caches in-memory and avoids repeated external HTTP calls."""
+    from kidcarematch_backend.core.commute import _COMMUTE_POSTAL_CACHE
+
+    _COMMUTE_POSTAL_CACHE.clear()
+
+    with Session(test_engine) as session:
+        c1 = PreschoolCentre(
+            centre_code="PC_CACHE_1",
+            centre_name="Cache Centre 1",
+            postal="560777",
+        )
+        c2 = PreschoolCentre(
+            centre_code="PC_CACHE_2",
+            centre_name="Cache Centre 2",
+            postal="560777",  # same postal
+        )
+        session.add_all([c1, c2])
+        session.commit()
+        session.refresh(c1)
+        session.refresh(c2)
+
+    call_count = 0
+
+    class MockCountResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "found": 1,
+                "total": 1,
+                "results": [
+                    {
+                        "POSTAL": "560777",
+                        "LATITUDE": "1.350000",
+                        "LONGITUDE": "103.840000",
+                    }
+                ],
+            }
+
+        def raise_for_status(self):
+            pass
+
+    import httpx
+
+    real_get = httpx.Client.get
+
+    def mock_counting_get(self, url, *args, **kwargs):
+        nonlocal call_count
+        if "onemap" in str(url).lower():
+            call_count += 1
+            return MockCountResponse()
+        return real_get(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "get", mock_counting_get)
+
+    # First call: hits OneMap
+    res1 = client.get(f"/api/v1/centres/{c1.centre_id}/location")
+    assert res1.status_code == 200
+    assert res1.json()["status"] == "available"
+    assert res1.json()["coordinate"] == {"lat": 1.350000, "lng": 103.840000}
+    assert call_count == 1
+    assert "560777" in _COMMUTE_POSTAL_CACHE
+
+    # Second call (same centre): hits in-memory cache, no HTTP call
+    res2 = client.get(f"/api/v1/centres/{c1.centre_id}/location")
+    assert res2.status_code == 200
+    assert res2.json()["status"] == "available"
+    assert call_count == 1
+
+    # Third call (different centre with same postal): hits in-memory cache, no HTTP call
+    res3 = client.get(f"/api/v1/centres/{c2.centre_id}/location")
+    assert res3.status_code == 200
+    assert res3.json()["status"] == "available"
+    assert call_count == 1
+
+
+def test_get_centre_location_upserts_postal_coordinate_cache_in_db(
+    client: TestClient, test_engine, monkeypatch: pytest.MonkeyPatch
+):
+    """GET /api/v1/centres/{centre_id}/location upserts verified coordinates into PostalCoordinateCache."""
+    from kidcarematch_backend.core.commute import _COMMUTE_POSTAL_CACHE
+    from kidcarematch_backend.db.db import PostalCoordinateCache
+
+    _COMMUTE_POSTAL_CACHE.clear()
+
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC_DB_UPSERT",
+            centre_name="DB Upsert Preschool",
+            postal="560333",
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+
+        # Confirm no cache row exists yet
+        assert session.get(PostalCoordinateCache, "560333") is None
+
+    class MockResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "found": 1,
+                "total": 1,
+                "results": [
+                    {
+                        "POSTAL": "560333",
+                        "LATITUDE": "1.375000",
+                        "LONGITUDE": "103.865000",
+                        "ADDRESS": "333 ANG MO KIO AVE 1",
+                        "X": "30123.4",
+                        "Y": "39123.4",
+                    }
+                ],
+            }
+
+        def raise_for_status(self):
+            pass
+
+    import httpx
+
+    real_get = httpx.Client.get
+
+    def mock_get(self, url, *args, **kwargs):
+        if "onemap" in str(url).lower():
+            return MockResp()
+        return real_get(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.get(f"/api/v1/centres/{centre.centre_id}/location")
+    assert res.status_code == 200
+    assert res.json()["status"] == "available"
+
+    # Verify database persistence in PostalCoordinateCache
+    with Session(test_engine) as session:
+        db_cache = session.get(PostalCoordinateCache, "560333")
+        assert db_cache is not None
+        assert db_cache.postal_code == "560333"
+        assert db_cache.latitude == 1.375000
+        assert db_cache.longitude == 103.865000
+        assert db_cache.address == "333 ANG MO KIO AVE 1"
+        assert db_cache.x_coord == 30123.4
+        assert db_cache.y_coord == 39123.4
+
+
+def test_get_centre_location_does_not_trust_legacy_unverified_db_cache_row(
+    client: TestClient, test_engine, monkeypatch: pytest.MonkeyPatch
+):
+    """GET /api/v1/centres/{centre_id}/location does not trust legacy unverified rows in PostalCoordinateCache."""
+    from kidcarematch_backend.core.commute import _COMMUTE_POSTAL_CACHE
+    from kidcarematch_backend.db.db import PostalCoordinateCache
+
+    _COMMUTE_POSTAL_CACHE.clear()
+
+    # Pre-populate PostalCoordinateCache with a legacy unverified row
+    with Session(test_engine) as session:
+        legacy_cache = PostalCoordinateCache(
+            postal_code="560888",
+            latitude=99.999999,  # bogus coordinate from legacy
+            longitude=99.999999,
+            address="Legacy Unverified Address",
+        )
+        centre = PreschoolCentre(
+            centre_code="PC_LEGACY_CACHE",
+            centre_name="Legacy Cache Preschool",
+            postal="560888",
+        )
+        session.add_all([legacy_cache, centre])
+        session.commit()
+        session.refresh(centre)
+
+    # Mock OneMap Search API returning verified coordinates that overwrite the legacy row
+    class MockVerifiedResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "found": 1,
+                "total": 1,
+                "results": [
+                    {
+                        "POSTAL": "560888",
+                        "LATITUDE": "1.388888",
+                        "LONGITUDE": "103.888888",
+                        "ADDRESS": "888 VERIFIED AVENUE",
+                    }
+                ],
+            }
+
+        def raise_for_status(self):
+            pass
+
+    import httpx
+
+    real_get = httpx.Client.get
+
+    def mock_get(self, url, *args, **kwargs):
+        if "onemap" in str(url).lower():
+            return MockVerifiedResp()
+        return real_get(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.get(f"/api/v1/centres/{centre.centre_id}/location")
+    assert res.status_code == 200
+    assert res.json()["status"] == "available"
+    # Must NOT return the legacy bogus (99.999999, 99.999999)! Must return verified (1.388888, 103.888888)
+    assert res.json()["coordinate"] == {"lat": 1.388888, "lng": 103.888888}
+
+    # Verify db row was updated with verified coordinates
+    with Session(test_engine) as session:
+        updated_db = session.get(PostalCoordinateCache, "560888")
+        assert updated_db is not None
+        assert updated_db.latitude == 1.388888
+        assert updated_db.longitude == 103.888888
+        assert updated_db.address == "888 VERIFIED AVENUE"
+
+
+def test_commute_postal_cache_bounded_eviction():
+    """_COMMUTE_POSTAL_CACHE evicts oldest entry when reaching maximum capacity."""
+    from kidcarematch_backend.core.commute import (
+        _COMMUTE_POSTAL_CACHE,
+        _COMMUTE_POSTAL_CACHE_MAX,
+        resolve_commute_postal,
+    )
+    from kidcarematch_backend.schemas.commute import Coordinate
+
+    _COMMUTE_POSTAL_CACHE.clear()
+
+    # Pre-fill cache with max items
+    for i in range(_COMMUTE_POSTAL_CACHE_MAX):
+        postal_str = f"{i:06d}"
+        _COMMUTE_POSTAL_CACHE[postal_str] = Coordinate(lat=1.3, lng=103.8)
+
+    assert len(_COMMUTE_POSTAL_CACHE) == _COMMUTE_POSTAL_CACHE_MAX
+    assert "000000" in _COMMUTE_POSTAL_CACHE
+
+    # Mock OneMap Search for a new postal
+    import httpx
+
+    class MockSingleResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "found": 1,
+                "total": 1,
+                "results": [
+                    {
+                        "POSTAL": "999999",
+                        "LATITUDE": "1.399999",
+                        "LONGITUDE": "103.899999",
+                    }
+                ],
+            }
+
+        def raise_for_status(self):
+            pass
+
+    client = httpx.Client()
+    client.get = lambda url, *args, **kwargs: MockSingleResp()  # type: ignore
+
+    resolved = resolve_commute_postal("999999", client=client)
+    assert resolved is not None
+    assert resolved.lat == 1.399999
+    assert len(_COMMUTE_POSTAL_CACHE) == _COMMUTE_POSTAL_CACHE_MAX
+    # Oldest item "000000" should have been evicted
+    assert "000000" not in _COMMUTE_POSTAL_CACHE
+    assert "999999" in _COMMUTE_POSTAL_CACHE
+
+
+def test_get_centre_location_reactive_401_token_retry(
+    client: TestClient, test_engine, monkeypatch: pytest.MonkeyPatch
+):
+    """GET /api/v1/centres/{centre_id}/location reactively invalidates token and retries once on HTTP 401."""
+    from kidcarematch_backend.core.commute import _COMMUTE_POSTAL_CACHE
+    from kidcarematch_backend.core.config import settings
+    from kidcarematch_backend.core.onemap import onemap_token_manager
+
+    _COMMUTE_POSTAL_CACHE.clear()
+
+    # Configure dynamic token state
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", "svc@example.com")
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", "secret")
+    monkeypatch.setattr(settings, "ONEMAP_API_TOKEN", None)
+
+    # Prime manager with an initial "stale" token
+    with onemap_token_manager._lock:
+        onemap_token_manager._token = "stale-token-123"
+        onemap_token_manager._expiry_timestamp = 9999999999.0
+
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC_401_RETRY",
+            centre_name="401 Retry Preschool",
+            postal="560111",
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+
+    attempts = 0
+
+    class Mock401ThenSuccessResponse:
+        def __init__(self, status_code: int, data: dict):
+            self.status_code = status_code
+            self._data = data
+
+        def json(self):
+            return self._data
+
+        def raise_for_status(self):
+            import httpx
+
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError(
+                    "401 Unauthorized",
+                    request=None,  # type: ignore
+                    response=None,  # type: ignore
+                )
+
+    import httpx
+
+    real_get = httpx.Client.get
+
+    def mock_dynamic_get(self, url, *args, **kwargs):
+        nonlocal attempts
+        if "onemap" in str(url).lower():
+            attempts += 1
+            headers = kwargs.get("headers", {})
+            auth_header = headers.get("Authorization", "")
+            if attempts == 1:
+                # Initial attempt with stale token returns 401
+                assert "stale-token-123" in auth_header
+                return Mock401ThenSuccessResponse(401, {"error": "Invalid token"})
+            # 2nd attempt after token refresh
+            return Mock401ThenSuccessResponse(
+                200,
+                {
+                    "found": 1,
+                    "total": 1,
+                    "results": [
+                        {
+                            "POSTAL": "560111",
+                            "LATITUDE": "1.311111",
+                            "LONGITUDE": "103.811111",
+                        }
+                    ],
+                },
+            )
+        return real_get(self, url, *args, **kwargs)
+
+    # Also mock token acquisition POST
+    def mock_auth_post(self, url, *args, **kwargs):
+        class MockAuthResp:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "access_token": "fresh-token-456",
+                    "expiry_timestamp": 9999999999.0,
+                }
+
+            def raise_for_status(self):
+                pass
+
+        return MockAuthResp()
+
+    monkeypatch.setattr(httpx.Client, "get", mock_dynamic_get)
+    monkeypatch.setattr(httpx.Client, "post", mock_auth_post)
+
+    res = client.get(f"/api/v1/centres/{centre.centre_id}/location")
+    assert res.status_code == 200
+    assert res.json() == {
+        "centre_id": centre.centre_id,
+        "coordinate": {"lat": 1.311111, "lng": 103.811111},
+        "status": "available",
+    }
+    assert attempts == 2
+    assert onemap_token_manager.token == "fresh-token-456"
+
+
+def test_get_centre_location_static_token_fallback(
+    client: TestClient, test_engine, monkeypatch: pytest.MonkeyPatch
+):
+    """GET /api/v1/centres/{centre_id}/location uses static token fallback when service account is not configured."""
+    from kidcarematch_backend.core.commute import _COMMUTE_POSTAL_CACHE
+    from kidcarematch_backend.core.config import settings
+    from kidcarematch_backend.core.onemap import onemap_token_manager
+
+    _COMMUTE_POSTAL_CACHE.clear()
+    onemap_token_manager.invalidate_token()
+
+    monkeypatch.setattr(settings, "ONEMAP_EMAIL", None)
+    monkeypatch.setattr(settings, "ONEMAP_PASSWORD", None)
+    monkeypatch.setattr(settings, "ONEMAP_API_TOKEN", "static-bearer-secret")
+
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC_STATIC_AUTH",
+            centre_name="Static Auth Preschool",
+            postal="560222",
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+
+    captured_auth: list[str] = []
+
+    class MockResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "found": 1,
+                "total": 1,
+                "results": [
+                    {
+                        "POSTAL": "560222",
+                        "LATITUDE": "1.322222",
+                        "LONGITUDE": "103.822222",
+                    }
+                ],
+            }
+
+        def raise_for_status(self):
+            pass
+
+    import httpx
+
+    real_get = httpx.Client.get
+
+    def mock_get(self, url, *args, **kwargs):
+        if "onemap" in str(url).lower():
+            headers = kwargs.get("headers", {})
+            captured_auth.append(headers.get("Authorization", ""))
+            return MockResp()
+        return real_get(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.get(f"/api/v1/centres/{centre.centre_id}/location")
+    assert res.status_code == 200
+    assert res.json()["status"] == "available"
+    assert captured_auth == ["Bearer static-bearer-secret"]
+
+
+def test_get_centre_location_timeout_or_error_returns_unavailable(
+    client: TestClient, test_engine, monkeypatch: pytest.MonkeyPatch
+):
+    """GET /api/v1/centres/{centre_id}/location returns status 'unavailable' without 500 when OneMap times out."""
+    from kidcarematch_backend.core.commute import _COMMUTE_POSTAL_CACHE
+
+    _COMMUTE_POSTAL_CACHE.clear()
+
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC_TIMEOUT",
+            centre_name="Timeout Preschool",
+            postal="560999",
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+
+    import httpx
+
+    real_get = httpx.Client.get
+
+    def mock_timeout_get(self, url, *args, **kwargs):
+        if "onemap" in str(url).lower():
+            raise httpx.TimeoutException("OneMap search timed out")
+        return real_get(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "get", mock_timeout_get)
+
+    res = client.get(f"/api/v1/centres/{centre.centre_id}/location")
+    assert res.status_code == 200
+    assert res.json() == {
+        "centre_id": centre.centre_id,
+        "coordinate": None,
+        "status": "unavailable",
+    }
+
+
+def test_get_centre_location_is_public_and_leaks_no_personal_data(
+    client: TestClient, test_engine, monkeypatch: pytest.MonkeyPatch
+):
+    """GET /api/v1/centres/{centre_id}/location requires no auth and strictly returns location envelope."""
+    from kidcarematch_backend.core.commute import _COMMUTE_POSTAL_CACHE
+
+    _COMMUTE_POSTAL_CACHE.clear()
+
+    with Session(test_engine) as session:
+        centre = PreschoolCentre(
+            centre_code="PC_PUBLIC_TEST",
+            centre_name="Public Test Preschool",
+            postal="560555",
+        )
+        session.add(centre)
+        session.commit()
+        session.refresh(centre)
+
+    class MockResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "found": 1,
+                "total": 1,
+                "results": [
+                    {
+                        "POSTAL": "560555",
+                        "LATITUDE": "1.355555",
+                        "LONGITUDE": "103.855555",
+                    }
+                ],
+            }
+
+        def raise_for_status(self):
+            pass
+
+    import httpx
+
+    real_get = httpx.Client.get
+
+    def mock_get(self, url, *args, **kwargs):
+        if "onemap" in str(url).lower():
+            return MockResp()
+        return real_get(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    # Call with explicitly NO Authorization header
+    res = client.get(f"/api/v1/centres/{centre.centre_id}/location")
+    assert res.status_code == 200
+    data = res.json()
+
+    # Envelope must only contain public centre location fields
+    assert set(data.keys()) == {"centre_id", "coordinate", "status"}
+    assert data["centre_id"] == centre.centre_id
+    assert data["status"] == "available"
+    assert data["coordinate"] == {"lat": 1.355555, "lng": 103.855555}
+    assert "user_id" not in data
+    assert "email" not in data
+    assert "profile" not in data
+
+
+
+
+
+
+

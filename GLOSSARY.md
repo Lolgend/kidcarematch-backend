@@ -120,3 +120,19 @@ _Avoid_: Out-of-pocket price, net school fee, subsidised rate
 **Fit Explanation**:
 The AI-generated explanatory rationale and comparative summary explaining the quantitative scoring breakdown and why a particular centre ranks as the top recommendation for a family profile.
 _Avoid_: AI justification, match summary, reasoning notes
+
+**Commute Route**:
+A personalised journey used in preschool centre details to compare travel from a family's home to a Preschool Centre, continuing to the workplace when configured on the Family Preference Profile, with route geometry, estimated travel time, and distance.
+_Avoid_: Navigation, trip plan
+
+**Journey Leg**:
+The portion of a Commute Route between two consecutive stops (`home` to `centre`, or `centre` to `workplace`).
+_Avoid_: Segment, hop, stage
+
+**Travel Time Estimate**:
+The estimated duration of travelling along a Commute Route or Journey Leg, excluding any time spent dropping a child off at the Preschool Centre.
+_Avoid_: Trip duration, total elapsed time
+
+**Representative Weekday/Weekend Estimate**:
+A Travel Time Estimate evaluated for selected sample conditions at 08:00 Singapore time on the next upcoming Wednesday (weekday) or Saturday (weekend) to compare Preschool Centres consistently across a browsing session, rather than an average across all days or departure times.
+_Avoid_: Average commute time, traffic forecast

@@ -10,8 +10,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from kidcarematch_backend.auth.security import (
+    get_current_parent,
     get_current_user,
     get_optional_current_user,
+)
+from kidcarematch_backend.core.commute import (
+    CommuteAnchors,
+    build_commute_samples,
+    resolve_commute_postal,
+    validate_sample_pair,
 )
 from kidcarematch_backend.core.matching import (
     calculate_cost_fit,
@@ -29,6 +36,7 @@ from kidcarematch_backend.core.postal_districts import (
 from kidcarematch_backend.db.db import (
     CitizenshipType,
     ExternalDataSourceStatus,
+    FamilyPreferenceProfile,
     ModerationStatus,
     PreschoolCentre,
     PreschoolLevel,
@@ -40,6 +48,7 @@ from kidcarematch_backend.db.db import (
     get_session,
 )
 from kidcarematch_backend.schemas.centre import (
+    CentreLocationResponse,
     CentreReviewItem,
     CentreReviewListResponse,
     CentreSummaryResponse,
@@ -50,6 +59,13 @@ from kidcarematch_backend.schemas.centre import (
     PreschoolServiceResponse,
     ReviewSummaryResponse,
     VacancyRecordResponse,
+)
+from kidcarematch_backend.schemas.commute import (
+    CommuteRequest,
+    CommuteResponse,
+)
+from kidcarematch_backend.schemas.commute import (
+    Coordinate as CommuteCoordinate,
 )
 from kidcarematch_backend.schemas.match import (
     CentreMatchRequest,
@@ -591,6 +607,107 @@ def get_centre_watchlist_status(
         centre_id=centre_id,
         is_watched=is_watched,
         watched_entries=watched_entries,
+    )
+
+
+@router.get(
+    "/{centre_id}/location",
+    response_model=CentreLocationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Preschool Centre Geospatial Location",
+)
+def get_centre_location(
+    centre_id: int,
+    session: Annotated[Session, Depends(get_session)],
+) -> CentreLocationResponse:
+    """Retrieve verified OneMap geospatial coordinates for a preschool centre.
+
+    Public endpoint (no auth required).
+    Resolves postal code via OneMap search verifying exact returned postal match.
+    Returns status='available' with coordinates if exact match, otherwise status='unavailable'.
+    """
+    centre = get_centre_or_404(centre_id, session)
+
+    coord = resolve_commute_postal(centre.postal, session=session)
+    if coord is not None:
+        return CentreLocationResponse(
+            centre_id=centre.centre_id or centre_id,
+            coordinate=coord,
+            status="available",
+        )
+
+    return CentreLocationResponse(
+        centre_id=centre.centre_id or centre_id,
+        coordinate=None,
+        status="unavailable",
+    )
+
+
+@router.post(
+    "/{centre_id}/commute",
+    response_model=CommuteResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get personalised commute comparison to preschool centre",
+)
+def get_centre_commute(
+    centre_id: int,
+    payload: CommuteRequest,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_parent)],
+) -> CommuteResponse:
+    """Calculate personalised commute route(s) from home through centre (and optional workplace)."""
+    centre = get_centre_or_404(centre_id, session)
+
+    profile = session.get(FamilyPreferenceProfile, str(payload.profile_id))
+    if not profile or profile.user_id != current_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Preference profile not found",
+        )
+
+    if not profile.home_postal_code or not profile.home_postal_code.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Profile is incomplete: home_postal_code is required",
+        )
+
+    clean_centre_postal = (centre.postal or "").strip()
+    centre_coord = resolve_commute_postal(clean_centre_postal, session=session)
+
+    clean_home_postal = profile.home_postal_code.strip()
+    home_coord = resolve_commute_postal(clean_home_postal, session=session)
+
+    clean_workplace_postal = (profile.workplace_postal_code or "").strip()
+    has_workplace = bool(clean_workplace_postal)
+    workplace_coord: CommuteCoordinate | None = None
+    if has_workplace:
+        workplace_coord = resolve_commute_postal(
+            clean_workplace_postal, session=session
+        )
+
+    anchors = CommuteAnchors(
+        home=home_coord,
+        centre=centre_coord,
+        workplace=workplace_coord,
+        has_workplace=has_workplace,
+    )
+
+    wednesday_dt, saturday_dt = validate_sample_pair(payload.sample_pair)
+    response_sample_pair = [wednesday_dt.isoformat(), saturday_dt.isoformat()]
+
+    samples = build_commute_samples(
+        mode=payload.mode,
+        anchors=anchors,
+        sample_pair=(wednesday_dt, saturday_dt),
+    )
+
+    return CommuteResponse(
+        centre_id=centre.centre_id or centre_id,
+        profile_id=payload.profile_id,
+        mode=payload.mode,
+        sample_pair=response_sample_pair,
+        anchors=anchors.to_dict(),
+        samples=samples,
     )
 
 
