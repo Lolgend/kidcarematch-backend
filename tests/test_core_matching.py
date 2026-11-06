@@ -22,12 +22,9 @@ from sqlmodel.pool import StaticPool
 from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.core.matching import (
     MatchCriteria,
-    MatchingEngine,
     TravelRoutingMode,
     calculate_cost_fit,
-    evaluate_centre_matches,
     evaluate_government_subsidy,
-    execute_multi_criteria_match,
     map_level_to_care_type,
     resolve_published_programme_fee,
     resolve_travel_routing_mode,
@@ -53,7 +50,7 @@ from kidcarematch_backend.db.db import (
     init_db,
 )
 from kidcarematch_backend.main import app
-from kidcarematch_backend.schemas.match import FeeBreakdownItem, FitExplanationResponse
+from kidcarematch_backend.schemas.match import FeeBreakdownItem
 
 
 @pytest.fixture
@@ -785,140 +782,3 @@ def test_get_route_duration_and_distance_unrecoverable_401_fallback(monkeypatch)
     assert dist == pytest.approx(9.46, abs=0.1)
     # Estimated transit duration = (9.46 / 25.0) * 60 = ~22.7 mins
     assert dur > 0
-
-
-
-# ==============================================================================
-# MatchingEngine Deep Module & Collaborator Adapter Tests
-# ==============================================================================
-
-
-def test_matching_engine_empty_candidates_returns_structured_response(test_engine):
-    """MatchingEngine.execute returns an empty results list and empty explanation when no centres offer cohort."""
-    criteria = MatchCriteria(
-        level=PreschoolLevel.INFANT,
-        enrollment_month_year="2026-07",
-    )
-    with Session(test_engine) as session:
-        engine = MatchingEngine(session)
-        response = engine.execute(criteria)
-
-        assert response.total_candidates == 0
-        assert response.returned_count == 0
-        assert response.results == []
-        assert response.level == PreschoolLevel.INFANT
-        assert response.enrollment_month_year == "2026-07"
-        assert response.explanation is not None
-        assert "No preschool centres" in response.explanation.summary_narrative
-
-
-def test_matching_engine_with_custom_collaborator_adapters(test_engine):
-    """MatchingEngine correctly exercises custom pluggable geocoding, routing, and explanation adapters."""
-    target_dt = datetime(2026, 7, 1, tzinfo=timezone.utc)
-
-    with Session(test_engine) as session:
-        centre = PreschoolCentre(
-            centre_code="ME-001",
-            centre_name="Deep Matching Learning Centre",
-            postal="560123",
-            address="123 Ang Mo Kio Ave 3",
-        )
-        session.add(centre)
-        session.commit()
-        session.refresh(centre)
-
-        svc = PreschoolService(
-            centre_id=centre.centre_id,
-            level=PreschoolLevel.INFANT,
-            type_of_service="Full Day",
-            citizenship_type=CitizenshipType.SC,
-            fee=1200.0,
-        )
-        session.add(svc)
-
-        vac = VacancyRecord(
-            record_id="vac-me-001",
-            centre_id=centre.centre_id,
-            level_type=PreschoolLevel.INFANT,
-            enrollment_month_year=target_dt,
-            vacancy_status="Available",
-        )
-        session.add(vac)
-
-        rule = SubsidyRule(
-            care_type=CareType.INFANT_CARE,
-            citizenship=CitizenshipType.SC,
-            applicant_status=ApplicantStatus.WORKING_APPLICANT,
-            metric=SubsidyMetric.FIXED,
-            subsidy_name="Basic Infant Subsidy",
-            subsidy_amount=600.0,
-        )
-        session.add(rule)
-        session.commit()
-
-        # Custom adapters
-        mock_geocoding_called = []
-        def custom_geocoding(postals, session):
-            mock_geocoding_called.append(list(postals))
-            return {
-                "560123": (1.3691, 103.8512),
-                "123456": (1.3000, 103.8000),
-            }
-
-        mock_routing_called = []
-        def custom_routing(start, end):
-            mock_routing_called.append((start, end))
-            return (15.0, 5.2)
-
-        custom_explanation = FitExplanationResponse(
-            summary_narrative="Custom synthesized explanation for Deep Matching.",
-            top_centre_rationale="Custom rationale for #1 centre.",
-            candidate_highlights=["Custom highlight for Deep Matching Learning Centre."],
-        )
-        mock_explanation_called = []
-        def custom_explanation_generator(criteria, total_candidates, candidates):
-            mock_explanation_called.append((total_candidates, len(candidates)))
-            return custom_explanation
-
-        criteria = MatchCriteria(
-            level=PreschoolLevel.INFANT,
-            enrollment_month_year="2026-07",
-            home_postal_code="123456",
-            budget_max=800.0,
-        )
-
-        engine = MatchingEngine(
-            session=session,
-            geocoding_adapter=custom_geocoding,
-            routing_adapter=custom_routing,
-            explanation_generator=custom_explanation_generator,
-        )
-        response = engine.execute(criteria)
-
-        assert response.total_candidates == 1
-        assert response.returned_count == 1
-        assert len(response.results) == 1
-        cand = response.results[0]
-        assert cand.centre_code == "ME-001"
-        assert cand.vacancy_fit_score == 100.0
-        assert cand.cost_fit_score == 100.0  # (1200 - 600) = 600 <= budget 800
-        assert cand.highlight == "Custom highlight for Deep Matching Learning Centre."
-        assert response.explanation == custom_explanation
-
-        # Verify collaborator calls
-        assert len(mock_geocoding_called) == 1
-        assert len(mock_routing_called) >= 1
-        assert len(mock_explanation_called) == 1
-
-
-def test_evaluate_centre_matches_and_execute_alias(test_engine):
-    """evaluate_centre_matches and execute_multi_criteria_match alias produce identical results."""
-    criteria = MatchCriteria(
-        level=PreschoolLevel.PG,
-        enrollment_month_year="2026-08",
-    )
-    with Session(test_engine) as session:
-        resp1 = evaluate_centre_matches(session, criteria)
-        resp2 = execute_multi_criteria_match(session, criteria)
-        assert resp1.total_candidates == resp2.total_candidates
-        assert resp1.returned_count == resp2.returned_count

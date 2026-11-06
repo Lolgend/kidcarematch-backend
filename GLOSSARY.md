@@ -121,11 +121,6 @@ _Avoid_: Out-of-pocket price, net school fee, subsidised rate
 The AI-generated explanatory rationale and comparative summary explaining the quantitative scoring breakdown and why a particular centre ranks as the top recommendation for a family profile.
 _Avoid_: AI justification, match summary, reasoning notes
 
-
-**Matching Engine**:
-The core domain subsystem responsible for evaluating candidate preschool centres against a family's search profile, orchestrating cohort eligibility filtering, multi-factor scoring (Vacancy Fit, Cost Fit, and Travel Fit), and Fit Explanation generation.
-_Avoid_: Recommendation service, matching algorithm, search pipeline
-
 **Commute Route**:
 A personalised journey used in preschool centre details to compare travel from a family's home to a Preschool Centre, continuing to the workplace when configured on the Family Preference Profile, with route geometry, estimated travel time, and distance.
 _Avoid_: Navigation, trip plan

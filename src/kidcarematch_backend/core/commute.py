@@ -2,6 +2,7 @@
 
 import logging
 import math
+from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone, tzinfo
 from typing import Any
 
@@ -13,7 +14,16 @@ from sqlmodel import Session
 from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.core.onemap import onemap_token_manager
 from kidcarematch_backend.db.db import PostalCoordinateCache
-from kidcarematch_backend.schemas.commute import Coordinate, RouteLeg, TransitLeg
+from kidcarematch_backend.schemas.commute import (
+    AnchorName,
+    CommuteMode,
+    CommuteSample,
+    Coordinate,
+    RouteLeg,
+    RouteTotals,
+    SampleKind,
+    TransitLeg,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,17 +48,22 @@ def clear_commute_postal_cache() -> None:
     _COMMUTE_POSTAL_CACHE.clear()
 
 
-def _get_auth_headers(client: httpx.Client | None = None) -> dict[str, str]:
-    """Retrieve auth headers from onemap_token_manager with static fallback."""
-    headers = onemap_token_manager.get_auth_headers(client=client)
-    if not headers:
-        static_token = settings.ONEMAP_API_TOKEN or getattr(
-            settings, "ONEMAP_API_KEY", None
+def _execute_get_with_retry(
+    http_client: httpx.Client,
+    url: str,
+    params: dict[str, Any],
+    timeout: float,
+) -> httpx.Response:
+    """Execute GET request with OneMap auth headers, invalidating and retrying once on 401."""
+    headers = onemap_token_manager.get_auth_headers(client=http_client)
+    response = http_client.get(url, params=params, headers=headers, timeout=timeout)
+    if response.status_code == 401:
+        onemap_token_manager.invalidate_token()
+        retry_headers = onemap_token_manager.get_auth_headers(client=http_client)
+        response = http_client.get(
+            url, params=params, headers=retry_headers, timeout=timeout
         )
-        if static_token:
-            clean = static_token.removeprefix("Bearer ").strip()
-            headers = {"Authorization": f"Bearer {clean}"}
-    return headers
+    return response
 
 
 def _fetch_onemap(
@@ -58,24 +73,11 @@ def _fetch_onemap(
     timeout: float = 5.0,
 ) -> httpx.Response:
     """Execute OneMap API request with dynamic auth headers and reactive 401 retry."""
-    headers = _get_auth_headers(client=client)
     if client is not None:
-        response = client.get(url, params=params, headers=headers, timeout=timeout)
-        if response.status_code == 401:
-            onemap_token_manager.invalidate_token()
-            retry_headers = _get_auth_headers(client=client)
-            response = client.get(
-                url, params=params, headers=retry_headers, timeout=timeout
-            )
-        return response
+        return _execute_get_with_retry(client, url, params, timeout)
 
     with httpx.Client(timeout=timeout) as http_client:
-        response = http_client.get(url, params=params, headers=headers)
-        if response.status_code == 401:
-            onemap_token_manager.invalidate_token()
-            retry_headers = _get_auth_headers(client=http_client)
-            response = http_client.get(url, params=params, headers=retry_headers)
-        return response
+        return _execute_get_with_retry(http_client, url, params, timeout)
 
 
 def resolve_commute_postal(
@@ -369,7 +371,9 @@ def _required_metric(data: dict[str, Any], key: str) -> float:
     return number
 
 
-def _unavailable_leg(from_anchor: str, to_anchor: str, message: str) -> RouteLeg:
+def _unavailable_leg(
+    from_anchor: AnchorName, to_anchor: AnchorName, message: str
+) -> RouteLeg:
     return RouteLeg(
         from_anchor=from_anchor,
         to_anchor=to_anchor,
@@ -415,11 +419,11 @@ def _itinerary_arrival(
 
 
 def get_commute_leg(
-    from_anchor: str,
-    to_anchor: str,
+    from_anchor: AnchorName,
+    to_anchor: AnchorName,
     start: Coordinate,
     end: Coordinate,
-    mode: str = "drive",
+    mode: CommuteMode = "drive",
     departure: datetime | None = None,
     client: httpx.Client | None = None,
 ) -> RouteLeg:
@@ -574,42 +578,19 @@ def get_commute_leg(
 
         route_geometry = data.get("route_geometry")
         if not route_geometry or not isinstance(route_geometry, str):
-            return RouteLeg(
-                from_anchor=from_anchor,
-                to_anchor=to_anchor,
-                status="unavailable",
-                source=None,
-                duration_seconds=None,
-                distance_meters=None,
-                geometry=None,
-                message="Route geometry unavailable",
+            return _unavailable_leg(
+                from_anchor, to_anchor, "Route geometry unavailable"
             )
 
         coords = decode_polyline(route_geometry)
         if not coords:
-            return RouteLeg(
-                from_anchor=from_anchor,
-                to_anchor=to_anchor,
-                status="unavailable",
-                source=None,
-                duration_seconds=None,
-                distance_meters=None,
-                geometry=None,
-                message="Decoded route geometry is empty",
+            return _unavailable_leg(
+                from_anchor, to_anchor, "Decoded route geometry is empty"
             )
 
         summary = data.get("route_summary")
         if not summary or not isinstance(summary, dict):
-            return RouteLeg(
-                from_anchor=from_anchor,
-                to_anchor=to_anchor,
-                status="unavailable",
-                source=None,
-                duration_seconds=None,
-                distance_meters=None,
-                geometry=None,
-                message="Route summary unavailable",
-            )
+            return _unavailable_leg(from_anchor, to_anchor, "Route summary unavailable")
 
         duration_secs = _required_metric(summary, "total_time")
         dist_meters = _required_metric(summary, "total_distance")
@@ -628,16 +609,7 @@ def get_commute_leg(
         logger.warning(
             "OneMap routing timeout (%s -> %s): %s", from_anchor, to_anchor, exc
         )
-        return RouteLeg(
-            from_anchor=from_anchor,
-            to_anchor=to_anchor,
-            status="unavailable",
-            source=None,
-            duration_seconds=None,
-            distance_meters=None,
-            geometry=None,
-            message="Route request timed out",
-        )
+        return _unavailable_leg(from_anchor, to_anchor, "Route request timed out")
     except (
         httpx.HTTPError,
         ValueError,
@@ -649,13 +621,175 @@ def get_commute_leg(
         logger.warning(
             "OneMap routing failed (%s -> %s): %s", from_anchor, to_anchor, exc
         )
-        return RouteLeg(
-            from_anchor=from_anchor,
-            to_anchor=to_anchor,
-            status="unavailable",
-            source=None,
-            duration_seconds=None,
-            distance_meters=None,
-            geometry=None,
-            message="Route unavailable",
+        return _unavailable_leg(from_anchor, to_anchor, "Route unavailable")
+
+
+@dataclass
+class CommuteAnchors:
+    """Geographic anchors for commute route comparison."""
+
+    home: Coordinate | None
+    centre: Coordinate | None
+    workplace: Coordinate | None = None
+    has_workplace: bool = False
+
+    def __post_init__(self) -> None:
+        if self.workplace is not None and not self.has_workplace:
+            self.has_workplace = True
+
+    def to_dict(self) -> dict[str, Coordinate | None]:
+        res: dict[str, Coordinate | None] = {
+            "home": self.home,
+            "centre": self.centre,
+        }
+        if self.has_workplace:
+            res["workplace"] = self.workplace
+        return res
+
+
+def build_commute_sample(
+    kind: SampleKind,
+    sampled_at: datetime | None,
+    mode: CommuteMode,
+    anchors: CommuteAnchors,
+    client: httpx.Client | None = None,
+) -> CommuteSample:
+    """Build a single CommuteSample with independent routing, failure handling, and totals."""
+    legs: list[RouteLeg] = []
+    leg1_departure = sampled_at if mode == "pt" else None
+
+    # Leg 1: home -> centre
+    if not anchors.home:
+        leg1 = _unavailable_leg(
+            "home",
+            "centre",
+            "Home postal code could not be resolved",
         )
+    elif not anchors.centre:
+        leg1 = _unavailable_leg(
+            "home",
+            "centre",
+            "Centre postal code could not be resolved",
+        )
+    else:
+        leg1 = get_commute_leg(
+            from_anchor="home",
+            to_anchor="centre",
+            start=anchors.home,
+            end=anchors.centre,
+            mode=mode,
+            departure=leg1_departure,
+            client=client,
+        )
+    legs.append(leg1)
+
+    # Leg 2: centre -> workplace (if workplace postal provided)
+    if anchors.has_workplace:
+        if not anchors.centre:
+            leg2 = _unavailable_leg(
+                "centre",
+                "workplace",
+                "Centre postal code could not be resolved",
+            )
+        elif not anchors.workplace:
+            leg2 = _unavailable_leg(
+                "centre",
+                "workplace",
+                "Workplace postal code could not be resolved",
+            )
+        elif mode == "pt" and (leg1.status != "available" or leg1.arrival_at is None):
+            leg2 = _unavailable_leg(
+                "centre",
+                "workplace",
+                "Onward leg departure cannot be determined because first leg arrival is unavailable",
+            )
+        else:
+            leg2_departure = None
+            if mode == "pt" and leg1.arrival_at is not None:
+                leg2_departure = leg1.arrival_at
+
+            leg2 = get_commute_leg(
+                from_anchor="centre",
+                to_anchor="workplace",
+                start=anchors.centre,
+                end=anchors.workplace,
+                mode=mode,
+                departure=leg2_departure,
+                client=client,
+            )
+        legs.append(leg2)
+
+    totals: RouteTotals | None = None
+    if all(
+        leg.status == "available"
+        and leg.duration_seconds is not None
+        and leg.distance_meters is not None
+        for leg in legs
+    ):
+        totals = RouteTotals(
+            duration_seconds=sum(
+                leg.duration_seconds for leg in legs if leg.duration_seconds is not None
+            ),
+            distance_meters=sum(
+                leg.distance_meters for leg in legs if leg.distance_meters is not None
+            ),
+        )
+
+    return CommuteSample(
+        kind=kind,
+        sampled_at=sampled_at,
+        legs=legs,
+        totals=totals,
+    )
+
+
+def build_commute_samples(
+    mode: CommuteMode,
+    anchors: CommuteAnchors,
+    sample_pair: tuple[datetime, datetime],
+    client: httpx.Client | None = None,
+) -> list[CommuteSample]:
+    """Orchestrate commute samples based on travel mode and sample pair."""
+    wednesday_dt, saturday_dt = sample_pair
+    if mode == "pt":
+        sample_weekday = build_commute_sample(
+            kind="weekday",
+            sampled_at=wednesday_dt,
+            mode="pt",
+            anchors=anchors,
+            client=client,
+        )
+        sample_weekend = build_commute_sample(
+            kind="weekend",
+            sampled_at=saturday_dt,
+            mode="pt",
+            anchors=anchors,
+            client=client,
+        )
+        return [sample_weekday, sample_weekend]
+
+    sample_single = build_commute_sample(
+        kind="single",
+        sampled_at=None,
+        mode=mode,
+        anchors=anchors,
+        client=client,
+    )
+    return [sample_single]
+
+
+__all__ = [
+    "SGT",
+    "CommuteAnchors",
+    "build_commute_sample",
+    "build_commute_samples",
+    "clear_commute_postal_cache",
+    "decode_polyline",
+    "get_commute_leg",
+    "get_next_representative_saturday",
+    "get_next_representative_wednesday",
+    "get_representative_day",
+    "get_representative_sample_pair",
+    "resolve_commute_postal",
+    "validate_sample_pair",
+]

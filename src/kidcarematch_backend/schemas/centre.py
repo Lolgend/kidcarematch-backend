@@ -7,7 +7,7 @@ from typing_extensions import Self
 
 from kidcarematch_backend.core.postal_districts import get_district_by_postal_code
 from kidcarematch_backend.db.db import CitizenshipType, PreschoolLevel
-from kidcarematch_backend.schemas.commute import Coordinate
+from kidcarematch_backend.schemas.commute import Coordinate, LegStatus
 
 
 class CentreSummaryResponse(BaseModel):
@@ -46,9 +46,6 @@ class PreschoolCentreItem(BaseModel):
     last_updated: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
-
-
-
 
     @model_validator(mode="after")
     def populate_district(self) -> Self:
@@ -146,9 +143,4 @@ class CentreLocationResponse(BaseModel):
 
     centre_id: int
     coordinate: Coordinate | None = None
-    status: str
-
-
-
-
-
+    status: LegStatus

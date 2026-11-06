@@ -154,6 +154,7 @@ def create_profile(
     test_engine,
     user_id: str,
     profile_id: str = "prof-1",
+    profile_name: str = "Test Profile",
     home_postal: str = "120120",
     workplace_postal: str | None = None,
 ) -> FamilyPreferenceProfile:
@@ -161,7 +162,7 @@ def create_profile(
         p = FamilyPreferenceProfile(
             profile_id=profile_id,
             user_id=user_id,
-            profile_name="Test Profile",
+            profile_name=profile_name,
             level=PreschoolLevel.INFANT,
             citizenship_status=CitizenshipType.SC,
             service_required="Full Day",
@@ -664,51 +665,53 @@ def test_commute_unresolvable_centre_postal_returns_unavailable_leg(
     assert leg["geometry"] is None
 
 
-def test_commute_missing_home_postal_on_profile_returns_unavailable_leg(
+def test_commute_incomplete_profile_missing_home_postal_returns_422(
     client: TestClient, test_engine, parent_user, monkeypatch
 ):
     set_auth(parent_user)
     centre = create_centre(test_engine, centre_id=1, postal="560123")
-    profile = create_profile(
-        test_engine, parent_user.user_id, home_postal="", workplace_postal=None
+
+    # Case 1: Empty string home postal
+    profile_empty = create_profile(
+        test_engine,
+        parent_user.user_id,
+        profile_id="prof-empty",
+        home_postal="",
+        workplace_postal=None,
     )
-
-    def mock_get(self, url, *args, **kwargs):
-        url_str = str(url)
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status = MagicMock()
-
-        if "elastic/search" in url_str:
-            mock_resp.json.return_value = {
-                "found": 1,
-                "results": [
-                    {
-                        "SEARCHVAL": "Centre",
-                        "POSTAL": "560123",
-                        "LATITUDE": "1.3500",
-                        "LONGITUDE": "103.8500",
-                    }
-                ],
-            }
-            return mock_resp
-
-        raise RuntimeError(f"Unexpected routing call: {url_str}")
-
-    monkeypatch.setattr(httpx.Client, "get", mock_get)
-
-    res = client.post(
+    res_empty = client.post(
         f"/api/v1/centres/{centre.centre_id}/commute",
-        json={"profile_id": profile.profile_id, "mode": "drive"},
+        json={"profile_id": profile_empty.profile_id, "mode": "drive"},
     )
-    assert res.status_code == 200
-    data = res.json()
-    assert data["anchors"]["home"] is None
-    assert data["anchors"]["centre"] == {"lat": 1.35, "lng": 103.85}
-    sample = data["samples"][0]
-    assert sample["totals"] is None
-    assert sample["legs"][0]["status"] == "unavailable"
-    assert sample["legs"][0]["message"] == "Home postal code could not be resolved"
+    assert res_empty.status_code == 422
+    assert "home_postal_code is required" in res_empty.json()["detail"]
+
+    # Case 2: None home postal
+    profile_none = create_profile(
+        test_engine,
+        parent_user.user_id,
+        profile_id="prof-none",
+        profile_name="Test Profile None",
+        home_postal="123456",
+        workplace_postal=None,
+    )
+    real_session_get = Session.get
+
+    def fake_get(self, model, ident):
+        if model == FamilyPreferenceProfile and str(ident) == "prof-none":
+            prof = real_session_get(self, model, ident)
+            object.__setattr__(prof, "home_postal_code", None)
+            return prof
+        return real_session_get(self, model, ident)
+
+    monkeypatch.setattr(Session, "get", fake_get)
+
+    res_none = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile_none.profile_id, "mode": "drive"},
+    )
+    assert res_none.status_code == 422
+    assert "home_postal_code is required" in res_none.json()["detail"]
 
 
 def test_commute_routing_timeout_returns_unavailable_leg_without_haversine_fallback(
@@ -1387,7 +1390,9 @@ def test_commute_workplace_leg2_routing_failure_preserves_leg1(
 
     leg2 = sample["legs"][1]
     assert leg2["status"] == "unavailable"
-    assert "timed out" in leg2["message"].lower() or "timeout" in leg2["message"].lower()
+    assert (
+        "timed out" in leg2["message"].lower() or "timeout" in leg2["message"].lower()
+    )
 
 
 def test_commute_workplace_leg1_routing_failure_preserves_leg2(
@@ -1456,7 +1461,9 @@ def test_commute_workplace_leg1_routing_failure_preserves_leg2(
 
     leg1 = sample["legs"][0]
     assert leg1["status"] == "unavailable"
-    assert "timed out" in leg1["message"].lower() or "timeout" in leg1["message"].lower()
+    assert (
+        "timed out" in leg1["message"].lower() or "timeout" in leg1["message"].lower()
+    )
 
     leg2 = sample["legs"][1]
     assert leg2["status"] == "available"
@@ -2553,5 +2560,3 @@ def test_commute_sample_pair_all_modes_and_reuse(
     for i in range(0, 6, 2):
         assert pt_date_calls[i] == expected_wed_date
         assert pt_date_calls[i + 1] == expected_sat_date
-
-

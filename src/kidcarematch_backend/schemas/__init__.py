@@ -21,7 +21,6 @@ from kidcarematch_backend.schemas.match import (
     FeeBreakdownItem,
     FitExplanationResponse,
     MatchCandidateItem,
-    MatchCriteria,
     TravelBreakdownItem,
 )
 from kidcarematch_backend.schemas.profile import (
@@ -47,7 +46,6 @@ __all__ = [
     "FeeBreakdownItem",
     "FitExplanationResponse",
     "MatchCandidateItem",
-    "MatchCriteria",
     "PreschoolCentreDetailResponse",
     "PreschoolCentreItem",
     "PreschoolCentreListResponse",

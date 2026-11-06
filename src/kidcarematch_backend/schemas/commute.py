@@ -1,8 +1,14 @@
 """Pydantic schemas for OneMap commute display and routing comparisons."""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+AnchorName = Literal["home", "centre", "workplace"]
+LegStatus = Literal["available", "unavailable"]
+CommuteMode = Literal["drive", "pt", "walk", "cycle"]
+SampleKind = Literal["single", "weekday", "weekend"]
 
 
 class Coordinate(BaseModel):
@@ -31,11 +37,11 @@ class TransitLeg(BaseModel):
 
 
 class RouteLeg(BaseModel):
-    """Individual journey leg between geographic anchors."""
+    """Individual Journey Leg between geographic anchors in a Commute Route."""
 
-    from_anchor: str
-    to_anchor: str
-    status: str
+    from_anchor: AnchorName
+    to_anchor: AnchorName
+    status: LegStatus
     source: str | None = None
     duration_seconds: float | None = None
     arrival_at: datetime | None = None
@@ -46,9 +52,9 @@ class RouteLeg(BaseModel):
 
 
 class CommuteSample(BaseModel):
-    """Commute evaluation sample for a representative time or single trip."""
+    """Commute evaluation sample for a representative time or Commute Route."""
 
-    kind: str
+    kind: SampleKind
     sampled_at: datetime | None = None
     legs: list[RouteLeg] = Field(default_factory=list)
     totals: RouteTotals | None = None
@@ -58,7 +64,7 @@ class CommuteRequest(BaseModel):
     """Request payload for personalised centre commute comparison."""
 
     profile_id: int | str
-    mode: str = "drive"
+    mode: CommuteMode = "drive"
     sample_pair: list[str] | None = None
 
 
@@ -67,7 +73,7 @@ class CommuteResponse(BaseModel):
 
     centre_id: int
     profile_id: int | str
-    mode: str
+    mode: CommuteMode
     sample_pair: list[str] | None = None
     anchors: dict[str, Coordinate | None] = Field(default_factory=dict)
     samples: list[CommuteSample] = Field(default_factory=list)

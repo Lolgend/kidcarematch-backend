@@ -1,7 +1,5 @@
 """Schemas for Multi-Criteria Centre Matching (Spec #66, ADR-0007)."""
 
-from dataclasses import dataclass
-
 from pydantic import (
     BaseModel,
     Field,
@@ -21,29 +19,6 @@ from kidcarematch_backend.schemas.profile import (
     validate_non_empty_str,
     validate_singapore_postal_code,
 )
-
-
-@dataclass
-class MatchCriteria:
-    """Encapsulated criteria and parameters for multi-criteria preschool matching (ADR-0007)."""
-
-    level: PreschoolLevel
-    enrollment_month_year: str
-    citizenship_status: CitizenshipType = CitizenshipType.SC
-    service_required: str = "Full Day"
-    household_income: float = 0.0
-    household_member_count: int = 1
-    budget_max: float | None = None
-    home_postal_code: str | None = None
-    workplace_postal_code: str | None = None
-    location_preference: LocationPreference = LocationPreference.HOME
-    is_default_location_preference: bool = False
-    vacancy_weight: float = 0.40
-    cost_weight: float = 0.30
-    travel_weight: float = 0.30
-    applicant_status: ApplicantStatus = ApplicantStatus.WORKING_APPLICANT
-    top_n: int = 5
-    profile_id: str | None = None
 
 
 class FeeBreakdownItem(BaseModel):
