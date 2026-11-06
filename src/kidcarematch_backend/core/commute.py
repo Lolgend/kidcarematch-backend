@@ -13,7 +13,7 @@ from sqlmodel import Session
 from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.core.onemap import onemap_token_manager
 from kidcarematch_backend.db.db import PostalCoordinateCache
-from kidcarematch_backend.schemas.commute import Coordinate, RouteLeg
+from kidcarematch_backend.schemas.commute import Coordinate, RouteLeg, TransitLeg
 
 logger = logging.getLogger(__name__)
 
@@ -397,6 +397,51 @@ def _required_metric(data: dict[str, Any], key: str) -> float:
     return number
 
 
+def _unavailable_leg(from_anchor: str, to_anchor: str, message: str) -> RouteLeg:
+    return RouteLeg(
+        from_anchor=from_anchor,
+        to_anchor=to_anchor,
+        status="unavailable",
+        source=None,
+        duration_seconds=None,
+        distance_meters=None,
+        geometry=None,
+        message=message,
+    )
+
+
+def _itinerary_arrival(
+    itinerary: dict[str, Any], departure: datetime | None, duration_seconds: float
+) -> tuple[datetime | None, float | None]:
+    depart = None
+    if departure is not None:
+        depart = (
+            departure.replace(tzinfo=SGT)
+            if departure.tzinfo is None
+            else departure.astimezone(SGT)
+        )
+    raw_end = itinerary.get("endTime")
+    if raw_end is not None and not isinstance(raw_end, bool):
+        try:
+            end_ms = float(raw_end)
+            if math.isfinite(end_ms) and end_ms > 0:
+                arrival = datetime.fromtimestamp(
+                    end_ms / 1000, tz=timezone.utc
+                ).astimezone(SGT)
+                if depart is None:
+                    return arrival, None
+                elapsed = (arrival - depart).total_seconds()
+                if duration_seconds <= elapsed <= 24 * 60 * 60:
+                    return arrival, elapsed
+        except (OverflowError, OSError, TypeError, ValueError):
+            pass
+
+    if depart is not None:
+        arrival = depart + timedelta(seconds=duration_seconds)
+        return arrival, duration_seconds
+    return None, None
+
+
 def get_commute_leg(
     from_anchor: str,
     to_anchor: str,
@@ -413,11 +458,26 @@ def get_commute_leg(
     - If routing fails or geometry is missing, returns status='unavailable' with null metrics.
     - NEVER returns straight-line fallback.
     """
-    params: dict[str, Any] = {
-        "start": f"{start.lat},{start.lng}",
-        "end": f"{end.lat},{end.lng}",
-        "routeType": mode,
-    }
+    effective_departure: datetime | None = departure
+    if mode == "pt":
+        dep = departure or get_next_representative_wednesday()
+        effective_departure = dep
+        params: dict[str, Any] = {
+            "start": f"{start.lat},{start.lng}",
+            "end": f"{end.lat},{end.lng}",
+            "routeType": "pt",
+            "date": dep.strftime("%m-%d-%Y"),
+            "time": dep.strftime("%H:%M:%S"),
+            "mode": "TRANSIT",
+            "maxWalkDistance": 1000,
+            "numItineraries": 1,
+        }
+    else:
+        params = {
+            "start": f"{start.lat},{start.lng}",
+            "end": f"{end.lat},{end.lng}",
+            "routeType": mode,
+        }
 
     try:
         response = _fetch_onemap(
@@ -431,6 +491,114 @@ def get_commute_leg(
 
         if not isinstance(data, dict):
             raise TypeError("Malformed OneMap routing response")
+
+        if mode == "pt" and "plan" not in data:
+            return _unavailable_leg(
+                from_anchor, to_anchor, "Public transport plan unavailable"
+            )
+
+        if "plan" in data:
+            plan = data.get("plan")
+            if not isinstance(plan, dict):
+                raise TypeError("Malformed public transport plan")
+            itineraries = plan.get("itineraries")
+            if not isinstance(itineraries, list):
+                raise ValueError("Malformed public transport itineraries")
+            if not itineraries:
+                return _unavailable_leg(
+                    from_anchor, to_anchor, "No public transport itinerary found"
+                )
+            itinerary = itineraries[0]
+            if not isinstance(itinerary, dict):
+                raise TypeError("Malformed public transport itinerary")
+            raw_legs = itinerary.get("legs")
+            if not isinstance(raw_legs, list) or not raw_legs:
+                raise ValueError("Public transport itinerary legs unavailable")
+
+            transit_legs: list[TransitLeg] = []
+            all_coords: list[Coordinate] = []
+
+            for raw_leg in raw_legs:
+                if not isinstance(raw_leg, dict):
+                    raise TypeError("Malformed public transport sub-leg")
+                sub_mode = str(raw_leg.get("mode", "TRANSIT")).upper()
+                sub_duration = _required_metric(raw_leg, "duration")
+                sub_distance = _required_metric(raw_leg, "distance")
+                sub_route = (
+                    raw_leg.get("route")
+                    or raw_leg.get("routeShortName")
+                    or raw_leg.get("routeLongName")
+                )
+                if sub_route:
+                    sub_route = str(sub_route)
+
+                geom_val = raw_leg.get("legGeometry")
+                if isinstance(geom_val, dict):
+                    geom_poly = geom_val.get("points") or ""
+                elif isinstance(geom_val, str):
+                    geom_poly = geom_val
+                else:
+                    geom_poly = ""
+
+                sub_coords = decode_polyline(geom_poly) if geom_poly else []
+                if not sub_coords:
+                    return _unavailable_leg(
+                        from_anchor,
+                        to_anchor,
+                        "Route geometry unavailable for transit sub-leg",
+                    )
+                all_coords.extend(sub_coords)
+
+                instruction = raw_leg.get("instruction")
+                if not instruction:
+                    if sub_mode == "WALK":
+                        dist_fmt = (
+                            f"{int(sub_distance)} m"
+                            if sub_distance < 1000
+                            else f"{sub_distance / 1000:.1f} km"
+                        )
+                        instruction = f"Walk ({dist_fmt})"
+                    elif sub_route:
+                        instruction = f"Take {sub_mode.title()} {sub_route}"
+                    else:
+                        instruction = f"Take {sub_mode.title()}"
+
+                transit_legs.append(
+                    TransitLeg(
+                        mode=sub_mode,
+                        duration_seconds=sub_duration,
+                        distance_meters=sub_distance,
+                        route=sub_route,
+                        instruction=instruction,
+                        geometry=sub_coords if sub_coords else None,
+                    )
+                )
+
+            if not all_coords:
+                return _unavailable_leg(
+                    from_anchor, to_anchor, "Route geometry unavailable"
+                )
+
+            duration_secs = _required_metric(itinerary, "duration")
+            total_dist = sum(t.distance_meters or 0 for t in transit_legs)
+            arrival_at, elapsed = _itinerary_arrival(
+                itinerary, effective_departure, duration_secs
+            )
+            if elapsed is not None:
+                duration_secs = elapsed
+
+            return RouteLeg(
+                from_anchor=from_anchor,
+                to_anchor=to_anchor,
+                status="available",
+                source="onemap",
+                duration_seconds=duration_secs,
+                arrival_at=arrival_at,
+                distance_meters=total_dist,
+                geometry=all_coords,
+                message=None,
+                transit_legs=transit_legs if transit_legs else None,
+            )
 
         route_geometry = data.get("route_geometry")
         if not route_geometry or not isinstance(route_geometry, str):

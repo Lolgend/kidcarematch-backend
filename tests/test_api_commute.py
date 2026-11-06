@@ -1523,6 +1523,721 @@ def test_commute_workplace_whitespace_omits_workplace_anchor(
     assert sample["totals"]["duration_seconds"] == 600.0
 
 
+def test_commute_home_only_pt_success(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal=None,
+    )
+
+    pt_fixture = {
+        "plan": {
+            "date": 1762300800000,
+            "itineraries": [
+                {
+                    "duration": 1500,
+                    "legs": [
+                        {
+                            "mode": "WALK",
+                            "duration": 300,
+                            "distance": 250,
+                            "legGeometry": {"points": "sagGwhtxRsDkC"},
+                        },
+                        {
+                            "mode": "BUS",
+                            "route": "159",
+                            "duration": 900,
+                            "distance": 4500,
+                            "legGeometry": {"points": "sagGwhtxRsDkC"},
+                        },
+                        {
+                            "mode": "WALK",
+                            "duration": 300,
+                            "distance": 250,
+                            "legGeometry": {"points": "sagGwhtxRsDkC"},
+                        },
+                    ],
+                }
+            ],
+        }
+    }
+
+    routing_calls = []
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
+                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            params = kwargs.get("params", {})
+            routing_calls.append(params)
+            assert params.get("routeType") == "pt"
+            assert params.get("mode") == "TRANSIT"
+            assert params.get("time") == "08:00:00"
+            assert params.get("maxWalkDistance") == 1000
+            assert params.get("numItineraries") == 1
+            mock_resp.json.return_value = pt_fixture
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "pt"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["mode"] == "pt"
+    assert len(data["samples"]) == 2
+    assert len(data["sample_pair"]) == 2
+    assert len(routing_calls) == 2
+
+    # Weekday sample
+    sample_wd = data["samples"][0]
+    assert sample_wd["kind"] == "weekday"
+    assert sample_wd["sampled_at"] is not None
+    assert "+08:00" in sample_wd["sampled_at"]
+    assert "08:00:00" in sample_wd["sampled_at"]
+    assert len(sample_wd["legs"]) == 1
+    leg1_wd = sample_wd["legs"][0]
+    assert leg1_wd["from_anchor"] == "home"
+    assert leg1_wd["to_anchor"] == "centre"
+    assert leg1_wd["status"] == "available"
+    assert leg1_wd["source"] == "onemap"
+    assert leg1_wd["duration_seconds"] == 1500.0
+    assert leg1_wd["distance_meters"] == 5000.0
+    assert len(leg1_wd["geometry"]) == 6
+    assert len(leg1_wd["transit_legs"]) == 3
+    assert leg1_wd["transit_legs"][0]["mode"] == "WALK"
+    assert leg1_wd["transit_legs"][0]["instruction"] == "Walk (250 m)"
+    assert leg1_wd["transit_legs"][1]["mode"] == "BUS"
+    assert leg1_wd["transit_legs"][1]["route"] == "159"
+    assert leg1_wd["transit_legs"][1]["instruction"] == "Take Bus 159"
+    assert sample_wd["totals"]["duration_seconds"] == 1500.0
+    assert sample_wd["totals"]["distance_meters"] == 5000.0
+
+    # Weekend sample
+    sample_we = data["samples"][1]
+    assert sample_we["kind"] == "weekend"
+    assert sample_we["sampled_at"] is not None
+    assert "+08:00" in sample_we["sampled_at"]
+    assert "08:00:00" in sample_we["sampled_at"]
+    assert len(sample_we["legs"]) == 1
+    leg1_we = sample_we["legs"][0]
+    assert leg1_we["from_anchor"] == "home"
+    assert leg1_we["to_anchor"] == "centre"
+    assert leg1_we["status"] == "available"
+    assert leg1_we["duration_seconds"] == 1500.0
+    assert sample_we["totals"]["duration_seconds"] == 1500.0
+
+
+def test_commute_two_legs_pt_sequential_onward_timing(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal="048581",
+    )
+
+    pt_calls = []
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": "1.3000"
+                        if postal == "120120"
+                        else ("1.3500" if postal == "560123" else "1.2800"),
+                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            params = kwargs.get("params", {})
+            assert params.get("routeType") == "pt"
+            pt_calls.append(params)
+            start = str(params.get("start", ""))
+
+            if "1.3000" in start or start.startswith("1.3,"):
+                # Leg 1: 1500s (25 mins = 08:00 to 08:25)
+                mock_resp.json.return_value = {
+                    "plan": {
+                        "itineraries": [
+                            {
+                                "duration": 1500,
+                                "legs": [
+                                    {
+                                        "mode": "WALK",
+                                        "duration": 300,
+                                        "distance": 250,
+                                        "legGeometry": {"points": "sagGwhtxRsDkC"},
+                                    },
+                                    {
+                                        "mode": "BUS",
+                                        "route": "159",
+                                        "duration": 1200,
+                                        "distance": 4750,
+                                        "legGeometry": {"points": "sagGwhtxRsDkC"},
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                }
+            else:
+                # Leg 2: 1200s (20 mins)
+                mock_resp.json.return_value = {
+                    "plan": {
+                        "itineraries": [
+                            {
+                                "duration": 1200,
+                                "legs": [
+                                    {
+                                        "mode": "SUBWAY",
+                                        "route": "NSL",
+                                        "duration": 900,
+                                        "distance": 4000,
+                                        "legGeometry": {"points": "sagGwhtxRsDkC"},
+                                    },
+                                    {
+                                        "mode": "WALK",
+                                        "duration": 300,
+                                        "distance": 200,
+                                        "legGeometry": {"points": "sagGwhtxRsDkC"},
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                }
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "pt"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert len(pt_calls) == 4
+    # Weekday Leg 1 departure is 08:00:00
+    assert pt_calls[0]["time"] == "08:00:00"
+    # Weekday Leg 2 onward departure is exactly 08:25:00 (first leg arrival + 0 drop-off duration)
+    assert pt_calls[1]["time"] == "08:25:00"
+    # Weekend Leg 1 departure is 08:00:00
+    assert pt_calls[2]["time"] == "08:00:00"
+    # Weekend Leg 2 onward departure is exactly 08:25:00
+    assert pt_calls[3]["time"] == "08:25:00"
+
+    assert len(data["samples"]) == 2
+    sample_wd = data["samples"][0]
+    assert sample_wd["kind"] == "weekday"
+    assert len(sample_wd["legs"]) == 2
+    assert sample_wd["legs"][0]["duration_seconds"] == 1500.0
+    assert sample_wd["legs"][0]["arrival_at"] is not None
+    assert "08:25:00" in sample_wd["legs"][0]["arrival_at"]
+    assert sample_wd["legs"][1]["duration_seconds"] == 1200.0
+    assert sample_wd["totals"]["duration_seconds"] == 2700.0
+    assert sample_wd["totals"]["distance_meters"] == 9200.0
+
+
+def test_commute_pt_first_leg_failure_marks_onward_unavailable(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal="048581",
+    )
+
+    pt_calls = []
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": "1.3000"
+                        if postal == "120120"
+                        else ("1.3500" if postal == "560123" else "1.2800"),
+                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            params = kwargs.get("params", {})
+            pt_calls.append(params)
+            # Leg 1 returns no itineraries
+            mock_resp.json.return_value = {"plan": {"itineraries": []}}
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "pt"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    # Leg 2 must not be requested because Leg 1 arrival cannot be determined (1 call for weekday leg 1, 1 call for weekend leg 1)
+    assert len(pt_calls) == 2
+    for sample in data["samples"]:
+        assert sample["totals"] is None
+        assert len(sample["legs"]) == 2
+        assert sample["legs"][0]["status"] == "unavailable"
+        assert sample["legs"][1]["status"] == "unavailable"
+        assert (
+            sample["legs"][1]["message"]
+            == "Onward leg departure cannot be determined because first leg arrival is unavailable"
+        )
+
+
+def test_commute_pt_second_leg_failure_preserves_leg1(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal="048581",
+    )
+
+    pt_calls = []
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": "1.3000"
+                        if postal == "120120"
+                        else ("1.3500" if postal == "560123" else "1.2800"),
+                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            params = kwargs.get("params", {})
+            pt_calls.append(params)
+            start = str(params.get("start", ""))
+            if "1.3000" in start or start.startswith("1.3,"):
+                # Leg 1 succeeds
+                mock_resp.json.return_value = {
+                    "plan": {
+                        "itineraries": [
+                            {
+                                "duration": 1500,
+                                "legs": [
+                                    {
+                                        "mode": "WALK",
+                                        "duration": 300,
+                                        "distance": 250,
+                                        "legGeometry": {"points": "sagGwhtxRsDkC"},
+                                    },
+                                    {
+                                        "mode": "BUS",
+                                        "route": "159",
+                                        "duration": 1200,
+                                        "distance": 4750,
+                                        "legGeometry": {"points": "sagGwhtxRsDkC"},
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                }
+                return mock_resp
+            # Leg 2 times out
+            raise httpx.ConnectTimeout("OneMap PT routing timed out for leg 2")
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "pt"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert len(pt_calls) == 4
+    for sample in data["samples"]:
+        assert sample["totals"] is None
+        assert len(sample["legs"]) == 2
+        assert sample["legs"][0]["status"] == "available"
+        assert sample["legs"][0]["duration_seconds"] == 1500.0
+        assert sample["legs"][1]["status"] == "unavailable"
+        assert (
+            "timed out" in sample["legs"][1]["message"].lower()
+            or "timeout" in sample["legs"][1]["message"].lower()
+        )
+
+
+def test_commute_pt_subleg_missing_geometry_marks_leg_unavailable(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal=None,
+    )
+
+    pt_fixture = {
+        "plan": {
+            "itineraries": [
+                {
+                    "duration": 600,
+                    "legs": [
+                        {
+                            "mode": "WALK",
+                            "duration": 600,
+                            "distance": 500,
+                            "legGeometry": {"points": ""},  # empty polyline
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
+                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            mock_resp.json.return_value = pt_fixture
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "pt"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    for sample in data["samples"]:
+        assert sample["totals"] is None
+        assert sample["legs"][0]["status"] == "unavailable"
+        assert "geometry unavailable" in sample["legs"][0]["message"].lower()
+
+
+def test_commute_pt_subleg_missing_metrics_marks_leg_unavailable(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal=None,
+    )
+
+    pt_fixture = {
+        "plan": {
+            "itineraries": [
+                {
+                    "duration": 600,
+                    "legs": [
+                        {
+                            "mode": "WALK",
+                            "duration": -10,  # invalid negative duration
+                            "distance": 500,
+                            "legGeometry": {"points": "sagGwhtxRsDkC"},
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
+                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            mock_resp.json.return_value = pt_fixture
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "pt"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    for sample in data["samples"]:
+        assert sample["totals"] is None
+        assert sample["legs"][0]["status"] == "unavailable"
+
+
+def test_commute_pt_missing_plan_marks_leg_unavailable(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal=None,
+    )
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
+                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            # OneMap returns response without plan
+            mock_resp.json.return_value = {"status": "error"}
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "pt"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    for sample in data["samples"]:
+        assert sample["totals"] is None
+        assert sample["legs"][0]["status"] == "unavailable"
+        assert sample["legs"][0]["message"] == "Public transport plan unavailable"
+
+
+def test_commute_pt_default_instruction_formats(
+    client: TestClient, test_engine, parent_user, monkeypatch
+):
+    set_auth(parent_user)
+    centre = create_centre(test_engine, centre_id=1, postal="560123")
+    profile = create_profile(
+        test_engine,
+        parent_user.user_id,
+        home_postal="120120",
+        workplace_postal=None,
+    )
+
+    pt_fixture = {
+        "plan": {
+            "itineraries": [
+                {
+                    "duration": 2500,
+                    "legs": [
+                        {
+                            "mode": "WALK",
+                            "duration": 900,
+                            "distance": 1500,  # >= 1000m -> "Walk (1.5 km)"
+                            "legGeometry": {"points": "sagGwhtxRsDkC"},
+                        },
+                        {
+                            "mode": "SUBWAY",
+                            "routeShortName": "NS",
+                            "duration": 600,
+                            "distance": 3000,
+                            "legGeometry": {"points": "sagGwhtxRsDkC"},
+                        },
+                        {
+                            "mode": "BUS",
+                            # no route
+                            "duration": 1000,
+                            "distance": 2000,
+                            "legGeometry": {"points": "sagGwhtxRsDkC"},
+                        },
+                    ],
+                }
+            ]
+        }
+    }
+
+    def mock_get(self, url, *args, **kwargs):
+        url_str = str(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        if "elastic/search" in url_str:
+            params = kwargs.get("params", {})
+            postal = str(params.get("searchVal", ""))
+            mock_resp.json.return_value = {
+                "found": 1,
+                "results": [
+                    {
+                        "SEARCHVAL": f"Location {postal}",
+                        "POSTAL": postal,
+                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
+                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                    }
+                ],
+            }
+            return mock_resp
+
+        if "routingsvc/route" in url_str:
+            mock_resp.json.return_value = pt_fixture
+            return mock_resp
+
+        raise RuntimeError(f"Unexpected URL: {url_str}")
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    res = client.post(
+        f"/api/v1/centres/{centre.centre_id}/commute",
+        json={"profile_id": profile.profile_id, "mode": "pt"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    sample = data["samples"][0]
+    tlegs = sample["legs"][0]["transit_legs"]
+    assert tlegs[0]["instruction"] == "Walk (1.5 km)"
+    assert tlegs[1]["instruction"] == "Take Subway NS"
+    assert tlegs[2]["instruction"] == "Take Bus"
+
+
+
+
+
+
 
 
 

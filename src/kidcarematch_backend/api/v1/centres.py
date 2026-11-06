@@ -634,59 +634,18 @@ def get_centre_location(
     )
 
 
-@router.post(
-    "/{centre_id}/commute",
-    response_model=CommuteResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Get personalised commute comparison to preschool centre",
-)
-def get_centre_commute(
-    centre_id: int,
-    payload: CommuteRequest,
-    session: Annotated[Session, Depends(get_session)],
-    current_user: Annotated[User, Depends(get_current_parent)],
-) -> CommuteResponse:
-    """Calculate personalised commute route from home to centre."""
-    centre = session.get(PreschoolCentre, centre_id)
-    if not centre:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Centre not found",
-        )
-
-    profile = session.get(FamilyPreferenceProfile, str(payload.profile_id))
-    if not profile or profile.user_id != current_user.user_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preference profile not found",
-        )
-
-    if payload.mode not in ("drive", "walk", "cycle"):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Invalid travel mode",
-        )
-
-    clean_centre_postal = (centre.postal or "").strip()
-    centre_coord = resolve_commute_postal(clean_centre_postal, session=session)
-
-    clean_home_postal = (profile.home_postal_code or "").strip()
-    home_coord = resolve_commute_postal(clean_home_postal, session=session)
-
-    anchors: dict[str, CommuteCoordinate | None] = {
-        "home": home_coord,
-        "centre": centre_coord,
-    }
-
-    clean_workplace_postal = (profile.workplace_postal_code or "").strip()
-    has_workplace = bool(clean_workplace_postal)
-    workplace_coord: CommuteCoordinate | None = None
-    if has_workplace:
-        workplace_coord = resolve_commute_postal(clean_workplace_postal, session=session)
-        anchors["workplace"] = workplace_coord
-
-    wednesday_dt, saturday_dt = validate_sample_pair(payload.sample_pair)
-    response_sample_pair = [wednesday_dt.isoformat(), saturday_dt.isoformat()]
+def _build_commute_sample(
+    kind: str,
+    sampled_at: datetime | None,
+    mode: str,
+    home_coord: CommuteCoordinate | None,
+    centre_coord: CommuteCoordinate | None,
+    workplace_coord: CommuteCoordinate | None,
+    has_workplace: bool,
+) -> CommuteSample:
+    """Build a single CommuteSample with independent routing, failure handling, and totals."""
+    legs: list[RouteLeg] = []
+    leg1_departure = sampled_at if mode == "pt" else None
 
     # Leg 1: home -> centre
     if not home_coord:
@@ -717,13 +676,13 @@ def get_centre_commute(
             to_anchor="centre",
             start=home_coord,
             end=centre_coord,
-            mode=payload.mode,
+            mode=mode,
+            departure=leg1_departure,
         )
+    legs.append(leg1)
 
-    legs: list[RouteLeg] = [leg1]
-
+    # Leg 2: centre -> workplace (if workplace postal provided)
     if has_workplace:
-        # Leg 2: centre -> workplace
         if not centre_coord:
             leg2 = RouteLeg(
                 from_anchor="centre",
@@ -746,13 +705,29 @@ def get_centre_commute(
                 geometry=None,
                 message="Workplace postal code could not be resolved",
             )
+        elif mode == "pt" and (leg1.status != "available" or leg1.arrival_at is None):
+            leg2 = RouteLeg(
+                from_anchor="centre",
+                to_anchor="workplace",
+                status="unavailable",
+                source=None,
+                duration_seconds=None,
+                distance_meters=None,
+                geometry=None,
+                message="Onward leg departure cannot be determined because first leg arrival is unavailable",
+            )
         else:
+            leg2_departure = None
+            if mode == "pt" and leg1.arrival_at is not None:
+                leg2_departure = leg1.arrival_at
+
             leg2 = get_commute_leg(
                 from_anchor="centre",
                 to_anchor="workplace",
                 start=centre_coord,
                 end=workplace_coord,
-                mode=payload.mode,
+                mode=mode,
+                departure=leg2_departure,
             )
         legs.append(leg2)
 
@@ -772,12 +747,100 @@ def get_centre_commute(
             ),
         )
 
-    sample = CommuteSample(
-        kind="single",
-        sampled_at=None,
+    return CommuteSample(
+        kind=kind,
+        sampled_at=sampled_at,
         legs=legs,
         totals=totals,
     )
+
+
+@router.post(
+    "/{centre_id}/commute",
+    response_model=CommuteResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get personalised commute comparison to preschool centre",
+)
+def get_centre_commute(
+    centre_id: int,
+    payload: CommuteRequest,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_parent)],
+) -> CommuteResponse:
+    """Calculate personalised commute route(s) from home through centre (and optional workplace)."""
+    centre = session.get(PreschoolCentre, centre_id)
+    if not centre:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Centre not found",
+        )
+
+    profile = session.get(FamilyPreferenceProfile, str(payload.profile_id))
+    if not profile or profile.user_id != current_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Preference profile not found",
+        )
+
+    if payload.mode not in ("drive", "pt", "walk", "cycle"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid travel mode",
+        )
+
+    clean_centre_postal = (centre.postal or "").strip()
+    centre_coord = resolve_commute_postal(clean_centre_postal, session=session)
+
+    clean_home_postal = (profile.home_postal_code or "").strip()
+    home_coord = resolve_commute_postal(clean_home_postal, session=session)
+
+    clean_workplace_postal = (profile.workplace_postal_code or "").strip()
+    has_workplace = bool(clean_workplace_postal)
+    workplace_coord: CommuteCoordinate | None = None
+    if has_workplace:
+        workplace_coord = resolve_commute_postal(clean_workplace_postal, session=session)
+
+    anchors: dict[str, CommuteCoordinate | None] = {
+        "home": home_coord,
+        "centre": centre_coord,
+    }
+    if has_workplace:
+        anchors["workplace"] = workplace_coord
+
+    wednesday_dt, saturday_dt = validate_sample_pair(payload.sample_pair)
+    response_sample_pair = [wednesday_dt.isoformat(), saturday_dt.isoformat()]
+
+    if payload.mode == "pt":
+        sample_weekday = _build_commute_sample(
+            kind="weekday",
+            sampled_at=wednesday_dt,
+            mode="pt",
+            home_coord=home_coord,
+            centre_coord=centre_coord,
+            workplace_coord=workplace_coord,
+            has_workplace=has_workplace,
+        )
+        sample_weekend = _build_commute_sample(
+            kind="weekend",
+            sampled_at=saturday_dt,
+            mode="pt",
+            home_coord=home_coord,
+            centre_coord=centre_coord,
+            workplace_coord=workplace_coord,
+            has_workplace=has_workplace,
+        )
+        samples = [sample_weekday, sample_weekend]
+    else:
+        sample_single = _build_commute_sample(
+            kind="single",
+            sampled_at=None,
+            mode=payload.mode,
+            home_coord=home_coord,
+            centre_coord=centre_coord,
+            workplace_coord=workplace_coord,
+            has_workplace=has_workplace,
+        )
+        samples = [sample_single]
 
     return CommuteResponse(
         centre_id=centre.centre_id or centre_id,
@@ -785,7 +848,7 @@ def get_centre_commute(
         mode=payload.mode,
         sample_pair=response_sample_pair,
         anchors=anchors,
-        samples=[sample],
+        samples=samples,
     )
 
 
