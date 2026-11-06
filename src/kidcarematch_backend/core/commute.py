@@ -681,10 +681,6 @@ def _itinerary_arrival(
                 elapsed = (arrival - depart).total_seconds()
                 if duration_seconds <= elapsed <= 24 * 60 * 60:
                     return arrival, elapsed, True
-                candidate_arrival = datetime.combine(depart.date(), arrival.timetz())
-                candidate_elapsed = (candidate_arrival - depart).total_seconds()
-                if duration_seconds <= candidate_elapsed <= 24 * 60 * 60:
-                    return candidate_arrival, candidate_elapsed, True
         except (OverflowError, OSError, TypeError, ValueError):
             pass
 
@@ -713,13 +709,18 @@ def get_commute_leg(
     effective_departure: datetime | None = departure
     if mode == "pt":
         dep = departure or get_next_representative_wednesday()
-        effective_departure = dep
+        dep_sgt = (
+            dep.replace(tzinfo=SGT)
+            if dep.tzinfo is None
+            else dep.astimezone(SGT)
+        )
+        effective_departure = dep_sgt
         params: dict[str, Any] = {
             "start": f"{start.lat},{start.lng}",
             "end": f"{end.lat},{end.lng}",
             "routeType": "pt",
-            "date": dep.strftime("%m-%d-%Y"),
-            "time": dep.strftime("%H:%M:%S"),
+            "date": dep_sgt.strftime("%m-%d-%Y"),
+            "time": dep_sgt.strftime("%H:%M:%S"),
             "mode": "TRANSIT",
             "maxWalkDistance": 1000,
             "numItineraries": 1,
@@ -833,10 +834,10 @@ def get_commute_leg(
 
             duration_secs = _required_metric(itinerary, "duration")
             total_dist = sum(t.distance_meters or 0 for t in transit_legs)
-            arrival_at, elapsed, _ = _itinerary_arrival(
+            arrival_at, elapsed, is_provider_end_time = _itinerary_arrival(
                 itinerary, effective_departure, duration_secs
             )
-            if elapsed is not None:
+            if is_provider_end_time and elapsed is not None:
                 duration_secs = elapsed
 
             return RouteLeg(
@@ -1097,13 +1098,18 @@ def get_negotiated_commute_leg(
     effective_departure: datetime | None = departure
     if mode == "pt":
         dep = departure or get_next_representative_wednesday()
-        effective_departure = dep
+        dep_sgt = (
+            dep.replace(tzinfo=SGT)
+            if dep.tzinfo is None
+            else dep.astimezone(SGT)
+        )
+        effective_departure = dep_sgt
         params: dict[str, Any] = {
             "start": f"{start.lat},{start.lng}",
             "end": f"{end.lat},{end.lng}",
             "routeType": "pt",
-            "date": dep.strftime("%m-%d-%Y"),
-            "time": dep.strftime("%H:%M:%S"),
+            "date": dep_sgt.strftime("%m-%d-%Y"),
+            "time": dep_sgt.strftime("%H:%M:%S"),
             "mode": "TRANSIT",
             "maxWalkDistance": 1000,
             "numItineraries": 1,
@@ -1459,6 +1465,7 @@ def build_negotiated_commute_sample(
     anchors: CommuteAnchors,
     include_direct_baseline: bool = True,
     conditions_id: str | None = None,
+    provider_options_id: str | None = None,
     client: httpx.Client | None = None,
 ) -> NegotiatedCommuteSample:
     """Build a NegotiatedCommuteSample with conditions, via_status, direct_route, and comparison."""
@@ -1577,14 +1584,16 @@ def build_negotiated_commute_sample(
         else:
             conditions_id = f"{mode}:provider_default"
 
-    provider_options_id = (
+    expected_options_id = (
         "onemap_pt_default" if mode == "pt" else f"onemap_{mode}_default"
     )
+    effective_options_id = provider_options_id or expected_options_id
+
     conditions = SampleConditions(
         conditions_id=conditions_id,
         timing_basis="scheduled_departure" if mode == "pt" else "provider_default",
         initial_departure_at=sampled_at if mode == "pt" else None,
-        provider_options_id=provider_options_id,
+        provider_options_id=effective_options_id,
     )
 
     # Direct Route
@@ -1689,15 +1698,23 @@ def build_negotiated_commute_sample(
                 )
             else:
                 # Both available
-                if mode == "pt":
+                if conditions.provider_options_id != expected_options_id:
+                    comparison = CommuteComparison(
+                        status="unavailable",
+                        reasons=[build_commute_reason("conditions_mismatch")],
+                        certification=None,
+                    )
+                elif mode == "pt":
+                    all_legs_to_verify = list(direct_route.legs) + list(legs)
                     all_elapsed = (
-                        len(direct_route.legs) > 0
-                        and direct_route.legs[0].timing.duration_basis
-                        == "elapsed_from_requested_departure"
+                        len(all_legs_to_verify) >= 2
                         and all(
                             l.timing.duration_basis
                             == "elapsed_from_requested_departure"
-                            for l in legs
+                            and l.timing.arrival_source
+                            == "provider_end_time"
+                            and l.timing.initial_wait_included is True
+                            for l in all_legs_to_verify
                         )
                     )
                     if all_elapsed:
@@ -1706,7 +1723,7 @@ def build_negotiated_commute_sample(
                             reasons=[],
                             certification=ComparisonCertification(
                                 duration_basis="elapsed_from_requested_departure",
-                                provider_options_id="onemap_pt_default",
+                                provider_options_id=conditions.provider_options_id,
                             ),
                         )
                     else:
@@ -1716,14 +1733,32 @@ def build_negotiated_commute_sample(
                             certification=None,
                         )
                 else:
-                    comparison = CommuteComparison(
-                        status="available",
-                        reasons=[],
-                        certification=ComparisonCertification(
-                            duration_basis="provider_default",
-                            provider_options_id=f"onemap_{mode}_default",
-                        ),
+                    all_legs_to_verify = list(direct_route.legs) + list(legs)
+                    all_default_verified = (
+                        len(all_legs_to_verify) >= 2
+                        and all(
+                            l.timing.duration_basis == "provider_default"
+                            and l.timing.arrival_source == "not_applicable"
+                            and l.departure_at is None
+                            and l.arrival_at is None
+                            for l in all_legs_to_verify
+                        )
                     )
+                    if all_default_verified:
+                        comparison = CommuteComparison(
+                            status="available",
+                            reasons=[],
+                            certification=ComparisonCertification(
+                                duration_basis="provider_default",
+                                provider_options_id=conditions.provider_options_id,
+                            ),
+                        )
+                    else:
+                        comparison = CommuteComparison(
+                            status="unavailable",
+                            reasons=[build_commute_reason("timing_unverified")],
+                            certification=None,
+                        )
 
     return NegotiatedCommuteSample(
         kind=kind,
