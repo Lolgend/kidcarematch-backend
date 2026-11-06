@@ -14,13 +14,8 @@ from kidcarematch_backend.auth.security import (
     get_optional_current_user,
 )
 from kidcarematch_backend.core.matching import (
-    calculate_cost_fit,
-    evaluate_government_subsidy,
-    execute_multi_criteria_match,
-    map_level_to_care_type,
+    evaluate_centre_matches,
     resolve_match_criteria,
-    resolve_published_programme_fee,
-    score_vacancy_fit,
 )
 from kidcarematch_backend.core.postal_districts import (
     get_all_postal_districts,
@@ -85,14 +80,8 @@ CITIZENSHIP_PRIORITY_ORDER: dict[str, int] = {
 }
 
 __all__ = [
-    "calculate_cost_fit",
-    "evaluate_government_subsidy",
     "get_centre_or_404",
-    "map_level_to_care_type",
-    "resolve_match_criteria",
-    "resolve_published_programme_fee",
     "router",
-    "score_vacancy_fit",
 ]
 
 
@@ -622,4 +611,4 @@ def match_centres(
 ) -> CentreMatchResponse:
     """Evaluate and rank candidate preschool centres against multi-criteria requirements."""
     criteria = resolve_match_criteria(request, session, current_user)
-    return execute_multi_criteria_match(session, criteria)
+    return evaluate_centre_matches(session, criteria)
