@@ -196,14 +196,34 @@ def test_commute_capabilities_both_flags_enabled_returns_both_contracts(
         }
 
 
+def test_commute_capabilities_default_returns_both_contracts(
+    client: TestClient, parent_user: User
+):
+    """By default (release gate open), both capabilities are enabled and returned."""
+    set_auth(parent_user)
+    response = client.get("/api/v1/commute/capabilities")
+    assert response.status_code == 200
+    data = response.json()
+    assert data == {
+        "direct_baseline_contract": "direct_baseline_v1",
+        "sampling_contract": "weekday_0800_wed_thu_fri_v1",
+    }
+
+
 def test_commute_config_default_settings():
-    """Verify settings defaults for commute feature flags and cycle secret key."""
+    """Verify settings defaults for commute feature flags, cycle secret key, and operational budgets."""
     assert hasattr(settings, "COMMUTE_ENABLE_DIRECT_BASELINE")
-    assert settings.COMMUTE_ENABLE_DIRECT_BASELINE is False
+    assert settings.COMMUTE_ENABLE_DIRECT_BASELINE is True
     assert hasattr(settings, "COMMUTE_ENABLE_WEEKDAY_SAMPLING")
-    assert settings.COMMUTE_ENABLE_WEEKDAY_SAMPLING is False
+    assert settings.COMMUTE_ENABLE_WEEKDAY_SAMPLING is True
     assert hasattr(settings, "COMMUTE_CYCLE_SECRET_KEY")
     assert settings.COMMUTE_CYCLE_SECRET_KEY == "kidcarematch-commute-cycle-secret-key-v1"
+    assert hasattr(settings, "COMMUTE_CALL_TIMEOUT_SECONDS")
+    assert settings.COMMUTE_CALL_TIMEOUT_SECONDS == 6.0
+    assert hasattr(settings, "COMMUTE_EVALUATION_DEADLINE_SECONDS")
+    assert settings.COMMUTE_EVALUATION_DEADLINE_SECONDS == 12.0
+    assert hasattr(settings, "COMMUTE_MAX_WORKERS")
+    assert settings.COMMUTE_MAX_WORKERS == 4
 
 
 def test_commute_extensible_schemas_instantiation():
