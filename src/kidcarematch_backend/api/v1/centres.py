@@ -1,5 +1,6 @@
 """Preschool centre API endpoints."""
 
+import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated
@@ -18,10 +19,12 @@ from kidcarematch_backend.auth.security import (
 from kidcarematch_backend.core.commute import (
     CommuteAnchors,
     build_commute_samples,
+    build_negotiated_commute_sample,
     build_negotiated_commute_samples,
     compute_anchor_revision,
     compute_profile_revision,
     resolve_commute_postal,
+    validate_cycle_token,
     validate_sample_pair,
 )
 from kidcarematch_backend.core.matching import (
@@ -67,7 +70,7 @@ from kidcarematch_backend.schemas.centre import (
 from kidcarematch_backend.schemas.commute import (
     CommuteRequest,
     CommuteResponse,
-    DirectBaselineContract,
+    CommuteSamplingResponse,
     EvaluationMetadata,
     NegotiatedCommuteResponse,
 )
@@ -699,17 +702,71 @@ def get_centre_commute(
         has_workplace=has_workplace,
     )
 
+    if payload.sampling is not None:
+        if payload.mode != "pt":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="sampling is only permitted for public transport (mode='pt')",
+            )
+
+        cycle_res = validate_cycle_token(
+            cycle_id=payload.sampling.cycle_id,
+            sample_index=payload.sampling.sample_index,
+            policy=payload.sampling.policy,
+        )
+
+        selected_sample_def = cycle_res.allowed_samples[cycle_res.selected_index]
+        sample = build_negotiated_commute_sample(
+            kind="weekday",
+            sampled_at=selected_sample_def.departure_at,
+            mode="pt",
+            anchors=anchors,
+            include_direct_baseline=payload.include_direct_baseline,
+            conditions_id=selected_sample_def.conditions_id,
+        )
+
+        now_utc = datetime.now(timezone.utc)
+        profile_rev = compute_profile_revision(
+            profile.home_postal_code, profile.workplace_postal_code
+        )
+        anchor_rev = compute_anchor_revision(
+            home_coord, centre_coord, workplace_coord
+        )
+
+        evaluation = EvaluationMetadata(
+            evaluation_id=f"eval_{secrets.token_hex(12)}",
+            evaluated_at=now_utc,
+            profile_revision=profile_rev,
+            anchor_revision=anchor_rev,
+        )
+
+        sampling_response = CommuteSamplingResponse(
+            policy=cycle_res.policy,  # type: ignore[arg-type]
+            cycle_id=cycle_res.cycle_id,
+            cycle_expires_at=cycle_res.cycle_expires_at,
+            selected_index=cycle_res.selected_index,  # type: ignore[arg-type]
+            allowed_samples=cycle_res.allowed_samples,
+        )
+
+        return NegotiatedCommuteResponse(
+            centre_id=centre.centre_id or centre_id,
+            profile_id=payload.profile_id,
+            mode=payload.mode,
+            anchors=anchors.to_dict(include_workplace_key=True),
+            sample_pair=None,
+            samples=[sample],
+            comparison_contract="direct_baseline_v1"
+            if payload.include_direct_baseline
+            else None,
+            sampling_contract="weekday_0800_wed_thu_fri_v1",
+            evaluation=evaluation,
+            sampling=sampling_response,
+        )
+
     wednesday_dt, saturday_dt = validate_sample_pair(payload.sample_pair)
     response_sample_pair = [wednesday_dt.isoformat(), saturday_dt.isoformat()]
 
-    is_negotiated = payload.include_direct_baseline or (
-        payload.sampling is not None
-    )
-
-    if is_negotiated:
-        comparison_contract: DirectBaselineContract | None = (
-            "direct_baseline_v1" if payload.include_direct_baseline else None
-        )
+    if payload.include_direct_baseline:
         profile_rev = compute_profile_revision(
             profile.home_postal_code, profile.workplace_postal_code
         )
@@ -726,7 +783,7 @@ def get_centre_commute(
             mode=payload.mode,
             anchors=anchors,
             sample_pair=(wednesday_dt, saturday_dt),
-            include_direct_baseline=payload.include_direct_baseline,
+            include_direct_baseline=True,
         )
         return NegotiatedCommuteResponse(
             centre_id=centre.centre_id or centre_id,
@@ -735,7 +792,7 @@ def get_centre_commute(
             sample_pair=response_sample_pair,
             anchors=anchors.to_dict(include_workplace_key=True),
             samples=negotiated_samples,
-            comparison_contract=comparison_contract,
+            comparison_contract="direct_baseline_v1",
             sampling_contract=None,
             evaluation=evaluation,
             sampling=None,
