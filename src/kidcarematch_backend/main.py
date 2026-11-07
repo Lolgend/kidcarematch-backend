@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from kidcarematch_backend.api.v1.admin import router as admin_router
 from kidcarematch_backend.api.v1.centres import router as centres_router
+from kidcarematch_backend.api.v1.commute import router as commute_router
 from kidcarematch_backend.api.v1.profile import router as profile_router
 from kidcarematch_backend.api.v1.reviews import router as reviews_router
 from kidcarematch_backend.api.v1.users import router as users_router
@@ -21,6 +22,7 @@ app.add_middleware(
 
 app.include_router(users_router)
 app.include_router(centres_router)
+app.include_router(commute_router)
 app.include_router(reviews_router)
 app.include_router(watchlist_router)
 app.include_router(profile_router)

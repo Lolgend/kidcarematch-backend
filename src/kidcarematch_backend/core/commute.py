@@ -1,7 +1,17 @@
 """Strict OneMap geospatial adapter for commute route and centre location display (ADR-0008, ADR-0009)."""
 
+import base64
+import binascii
+import concurrent.futures
+import hashlib
+import hmac
+import json
 import logging
 import math
+import secrets
+import time as time_module
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone, tzinfo
 from typing import Any
@@ -15,14 +25,29 @@ from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.core.onemap import onemap_token_manager
 from kidcarematch_backend.db.db import PostalCoordinateCache
 from kidcarematch_backend.schemas.commute import (
+    AllowedSampleDefinition,
     AnchorName,
+    ArrivalSource,
+    CommuteComparison,
     CommuteMode,
+    CommuteReason,
     CommuteSample,
+    ComparisonCertification,
     Coordinate,
+    DirectRoute,
+    DurationBasis,
+    EvaluationMetadata,
+    FailureClass,
+    LegTiming,
+    NegotiatedCommuteSample,
+    NegotiatedRouteLeg,
+    ReasonCode,
     RouteLeg,
     RouteTotals,
+    SampleConditions,
     SampleKind,
     TransitLeg,
+    ViaStatus,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,9 +63,74 @@ try:
 except ImportError:
     SGT = timezone(timedelta(hours=8))
 
+# Operational budget constants (ADR-0010)
+COMMUTE_CALL_TIMEOUT_SECONDS: float = getattr(
+    settings, "COMMUTE_CALL_TIMEOUT_SECONDS", 6.0
+)
+COMMUTE_EVALUATION_DEADLINE_SECONDS: float = getattr(
+    settings, "COMMUTE_EVALUATION_DEADLINE_SECONDS", 12.0
+)
+COMMUTE_MAX_WORKERS: int = getattr(settings, "COMMUTE_MAX_WORKERS", 4)
+
 # Bounded in-memory cache for verified exact-postcode resolutions
 _COMMUTE_POSTAL_CACHE_MAX = 512
 _COMMUTE_POSTAL_CACHE: dict[str, Coordinate] = {}
+
+REASON_METADATA: dict[ReasonCode, tuple[FailureClass, bool]] = {
+    "no_itinerary": ("sample_dependent", True),
+    "direct_unavailable": ("conditions", False),
+    "via_centre_incomplete": ("conditions", False),
+    "home_unresolved": ("location", False),
+    "centre_unresolved": ("location", False),
+    "workplace_unresolved": ("location", False),
+    "workplace_not_configured": ("not_applicable", False),
+    "timing_unverified": ("conditions", False),
+    "conditions_mismatch": ("conditions", False),
+    "provider_timeout": ("service", True),
+    "provider_unavailable": ("service", True),
+    "provider_auth_failed": ("service", True),
+    "evaluation_budget_exhausted": ("service", True),
+    "invalid_provider_payload": ("service", False),
+    "geometry_unavailable": ("service", False),
+}
+
+
+def build_commute_reason(code: ReasonCode) -> CommuteReason:
+    """Construct structured diagnostic Reason mapping accurately to FailureClass and retryable."""
+    failure_class, retryable = REASON_METADATA[code]
+    return CommuteReason(
+        code=code,
+        failure_class=failure_class,
+        retryable=retryable,
+    )
+
+
+def compute_profile_revision(
+    home_postal: str | None,
+    workplace_postal: str | None,
+) -> str:
+    """Compute opaque SHA-256 hash of saved routing-relevant profile state without plaintext PII."""
+    h = (home_postal or "").strip()
+    w = (workplace_postal or "").strip()
+    raw = f"home:{h}|workplace:{w}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def compute_anchor_revision(
+    home: Coordinate | None,
+    centre: Coordinate | None,
+    workplace: Coordinate | None,
+) -> str:
+    """Compute opaque SHA-256 hash of resolved coordinate snapshot without plaintext PII."""
+    parts = [
+        f"home:{home.lat:.6f},{home.lng:.6f}" if home else "home:none",
+        f"centre:{centre.lat:.6f},{centre.lng:.6f}" if centre else "centre:none",
+        f"workplace:{workplace.lat:.6f},{workplace.lng:.6f}"
+        if workplace
+        else "workplace:none",
+    ]
+    raw = "|".join(parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def clear_commute_postal_cache() -> None:
@@ -70,14 +160,23 @@ def _fetch_onemap(
     url: str,
     params: dict[str, Any],
     client: httpx.Client | None = None,
-    timeout: float = 5.0,
+    timeout: float | None = None,
 ) -> httpx.Response:
     """Execute OneMap API request with dynamic auth headers and reactive 401 retry."""
+    effective_timeout = (
+        timeout
+        if timeout is not None
+        else getattr(
+            settings,
+            "COMMUTE_CALL_TIMEOUT_SECONDS",
+            COMMUTE_CALL_TIMEOUT_SECONDS,
+        )
+    )
     if client is not None:
-        return _execute_get_with_retry(client, url, params, timeout)
+        return _execute_get_with_retry(client, url, params, effective_timeout)
 
-    with httpx.Client(timeout=timeout) as http_client:
-        return _execute_get_with_retry(http_client, url, params, timeout)
+    with httpx.Client(timeout=effective_timeout) as http_client:
+        return _execute_get_with_retry(http_client, url, params, effective_timeout)
 
 
 def resolve_commute_postal(
@@ -361,6 +460,202 @@ def validate_sample_pair(
     return dt1_sgt, dt2_sgt
 
 
+def get_primary_wednesday(now: datetime | None = None) -> datetime:
+    """Calculate the primary Wednesday at 08:00 Asia/Singapore for selected weekday sampling."""
+    return get_next_representative_wednesday(now)
+
+
+def build_cycle_conditions_id(departure_at: datetime) -> str:
+    """Generate deterministic conditions identifier for a scheduled PT sample condition."""
+    return f"pt_{departure_at.strftime('%Y%m%d_%H%M%S')}_onemap_v1"
+
+
+def build_allowed_samples(primary_wed: datetime) -> list[AllowedSampleDefinition]:
+    """Build the three allowed sample definitions for a sampling cycle (Wed=0, Thu=1, Fri=2)."""
+    allowed: list[AllowedSampleDefinition] = []
+    for idx in (0, 1, 2):
+        dep = primary_wed + timedelta(days=idx)
+        allowed.append(
+            AllowedSampleDefinition(
+                sample_index=idx,  # type: ignore[arg-type]
+                conditions_id=build_cycle_conditions_id(dep),
+                departure_at=dep,
+            )
+        )
+    return allowed
+
+
+def create_cycle_token(
+    primary_wed: datetime,
+    cycle_expires_at: datetime,
+    policy: str = "weekday_0800_wed_thu_fri_v1",
+    salt: str | None = None,
+) -> str:
+    """Encode and HMAC-sign a stateless URL-safe base64 cycle token."""
+    if salt is None:
+        salt = secrets.token_hex(8)
+    payload = {
+        "policy": policy,
+        "primary_wed_iso": primary_wed.isoformat(),
+        "cycle_expires_at_iso": cycle_expires_at.isoformat(),
+        "salt": salt,
+    }
+    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
+    sig = hmac.new(
+        settings.COMMUTE_CYCLE_SECRET_KEY.encode("utf-8"),
+        payload_json,
+        hashlib.sha256,
+    ).hexdigest()
+    envelope = {
+        "payload": payload,
+        "signature": sig,
+    }
+    envelope_json = json.dumps(envelope, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
+    return base64.urlsafe_b64encode(envelope_json).decode("ascii").rstrip("=")
+
+
+def decode_cycle_token(token: str) -> dict[str, Any]:
+    """Decode and verify HMAC signature on a stateless cycle token."""
+    if not token or not isinstance(token, str):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid or malformed cycle token",
+        )
+    try:
+        padded = token + "=" * ((4 - len(token) % 4) % 4)
+        raw_bytes = base64.urlsafe_b64decode(padded.encode("ascii"))
+        data = json.loads(raw_bytes.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise TypeError("Token body is not a JSON object")
+        if "payload" not in data or "signature" not in data:
+            raise ValueError("Missing payload or signature in token")
+        payload = data["payload"]
+        signature = data["signature"]
+        if not isinstance(payload, dict) or not isinstance(signature, str):
+            raise TypeError("Malformed payload or signature")
+
+        payload_json = json.dumps(
+            payload, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        expected_sig = hmac.new(
+            settings.COMMUTE_CYCLE_SECRET_KEY.encode("utf-8"),
+            payload_json,
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected_sig):
+            raise ValueError("HMAC signature mismatch")
+        return payload
+    except (
+        ValueError,
+        binascii.Error,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid or tampered cycle token",
+        ) from exc
+
+
+@dataclass
+class CycleValidationResult:
+    """Result of cycle token lifecycle resolution and sample validation."""
+
+    cycle_id: str
+    policy: str
+    primary_wed: datetime
+    cycle_expires_at: datetime
+    selected_index: int
+    selected_departure_at: datetime
+    allowed_samples: list[AllowedSampleDefinition]
+
+
+def validate_cycle_token(
+    cycle_id: str | None,
+    sample_index: int,
+    policy: str = "weekday_0800_wed_thu_fri_v1",
+    now: datetime | None = None,
+) -> CycleValidationResult:
+    """Validate client-supplied cycle parameters or issue a new cycle for primary index 0."""
+    if now is None:
+        now_sgt = datetime.now(SGT)
+    elif now.tzinfo is None:
+        now_sgt = now.replace(tzinfo=SGT)
+    else:
+        now_sgt = now.astimezone(SGT)
+
+    if policy != "weekday_0800_wed_thu_fri_v1":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unsupported sampling policy: {policy}",
+        )
+
+    if sample_index not in (0, 1, 2):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid sample_index: must be 0, 1, or 2",
+        )
+
+    if cycle_id is None:
+        if sample_index != 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="cycle_id is required for sample_index 1 or 2",
+            )
+        primary_wed = get_primary_wednesday(now_sgt)
+        cycle_expires_at = primary_wed
+        active_token = create_cycle_token(
+            primary_wed=primary_wed, cycle_expires_at=cycle_expires_at, policy=policy
+        )
+    else:
+        payload = decode_cycle_token(cycle_id)
+        if payload.get("policy") != policy:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Policy mismatch in cycle token",
+            )
+        try:
+            primary_wed = datetime.fromisoformat(payload["primary_wed_iso"]).astimezone(
+                SGT
+            )
+            cycle_expires_at = datetime.fromisoformat(
+                payload["cycle_expires_at_iso"]
+            ).astimezone(SGT)
+        except (KeyError, ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Malformed timestamps in cycle token",
+            ) from exc
+
+        if now_sgt >= cycle_expires_at:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "sample_expired",
+                    "message": "Commute sampling cycle has expired",
+                },
+            )
+        active_token = cycle_id
+
+    allowed_samples = build_allowed_samples(primary_wed)
+    selected_departure = primary_wed + timedelta(days=sample_index)
+
+    return CycleValidationResult(
+        cycle_id=active_token,
+        policy=policy,
+        primary_wed=primary_wed,
+        cycle_expires_at=cycle_expires_at,
+        selected_index=sample_index,
+        selected_departure_at=selected_departure,
+        allowed_samples=allowed_samples,
+    )
+
+
 def _required_metric(data: dict[str, Any], key: str) -> float:
     value = data.get(key)
     if value is None or isinstance(value, bool):
@@ -388,7 +683,7 @@ def _unavailable_leg(
 
 def _itinerary_arrival(
     itinerary: dict[str, Any], departure: datetime | None, duration_seconds: float
-) -> tuple[datetime | None, float | None]:
+) -> tuple[datetime | None, float | None, bool]:
     depart = None
     if departure is not None:
         depart = (
@@ -405,17 +700,17 @@ def _itinerary_arrival(
                     end_ms / 1000, tz=timezone.utc
                 ).astimezone(SGT)
                 if depart is None:
-                    return arrival, None
+                    return arrival, None, True
                 elapsed = (arrival - depart).total_seconds()
                 if duration_seconds <= elapsed <= 24 * 60 * 60:
-                    return arrival, elapsed
+                    return arrival, elapsed, True
         except (OverflowError, OSError, TypeError, ValueError):
             pass
 
     if depart is not None:
         arrival = depart + timedelta(seconds=duration_seconds)
-        return arrival, duration_seconds
-    return None, None
+        return arrival, duration_seconds, False
+    return None, None, False
 
 
 def get_commute_leg(
@@ -426,6 +721,8 @@ def get_commute_leg(
     mode: CommuteMode = "drive",
     departure: datetime | None = None,
     client: httpx.Client | None = None,
+    timeout: float | None = None,
+    deadline: float | None = None,
 ) -> RouteLeg:
     """Query OneMap routing endpoint for a single commute journey leg.
 
@@ -433,17 +730,497 @@ def get_commute_leg(
     - Normalizes route geometry, duration in seconds, distance in meters.
     - If routing fails or geometry is missing, returns status='unavailable' with null metrics.
     - NEVER returns straight-line fallback.
+    - Delegates to get_negotiated_commute_leg and projects base RouteLeg fields.
     """
+    negotiated = get_negotiated_commute_leg(
+        from_anchor=from_anchor,
+        to_anchor=to_anchor,
+        start=start,
+        end=end,
+        mode=mode,
+        departure=departure,
+        client=client,
+        timeout=timeout,
+        deadline=deadline,
+    )
+    return RouteLeg(
+        from_anchor=negotiated.from_anchor,
+        to_anchor=negotiated.to_anchor,
+        status=negotiated.status,
+        source=negotiated.source,
+        duration_seconds=negotiated.duration_seconds,
+        arrival_at=negotiated.arrival_at,
+        distance_meters=negotiated.distance_meters,
+        geometry=negotiated.geometry,
+        message=negotiated.message,
+        transit_legs=negotiated.transit_legs,
+    )
+
+
+@dataclass
+class CommuteAnchors:
+    """Geographic anchors for commute route comparison."""
+
+    home: Coordinate | None
+    centre: Coordinate | None
+    workplace: Coordinate | None = None
+    has_workplace: bool = False
+
+    def __post_init__(self) -> None:
+        if self.workplace is not None and not self.has_workplace:
+            self.has_workplace = True
+
+    def to_dict(
+        self, include_workplace_key: bool = False
+    ) -> dict[str, Coordinate | None]:
+        res: dict[str, Coordinate | None] = {
+            "home": self.home,
+            "centre": self.centre,
+        }
+        if self.has_workplace or include_workplace_key:
+            res["workplace"] = self.workplace
+        return res
+
+
+def build_evaluation_metadata(
+    home_postal: str,
+    workplace_postal: str | None,
+    anchors: CommuteAnchors,
+    now: datetime | None = None,
+) -> EvaluationMetadata:
+    """Construct evaluation metadata with consistent ID format and state revisions."""
+    evaluated_at = now if now is not None else datetime.now(timezone.utc)
+    profile_rev = compute_profile_revision(home_postal, workplace_postal)
+    anchor_rev = compute_anchor_revision(
+        anchors.home, anchors.centre, anchors.workplace
+    )
+    return EvaluationMetadata(
+        evaluation_id=f"eval_{secrets.token_hex(12)}",
+        evaluated_at=evaluated_at,
+        profile_revision=profile_rev,
+        anchor_revision=anchor_rev,
+    )
+
+
+def build_commute_sample(
+    kind: SampleKind,
+    sampled_at: datetime | None,
+    mode: CommuteMode,
+    anchors: CommuteAnchors,
+    client: httpx.Client | None = None,
+    deadline: float | None = None,
+    call_timeout_seconds: float | None = None,
+    evaluation_deadline_seconds: float | None = None,
+    max_workers: int | None = None,
+) -> CommuteSample:
+    """Build a single CommuteSample with independent routing, failure handling, and totals."""
+    eval_secs = (
+        evaluation_deadline_seconds
+        if evaluation_deadline_seconds is not None
+        else getattr(
+            settings,
+            "COMMUTE_EVALUATION_DEADLINE_SECONDS",
+            COMMUTE_EVALUATION_DEADLINE_SECONDS,
+        )
+    )
+    effective_deadline = (
+        deadline if deadline is not None else (time_module.monotonic() + eval_secs)
+    )
+    effective_call_timeout = (
+        call_timeout_seconds
+        if call_timeout_seconds is not None
+        else getattr(
+            settings,
+            "COMMUTE_CALL_TIMEOUT_SECONDS",
+            COMMUTE_CALL_TIMEOUT_SECONDS,
+        )
+    )
+    effective_max_workers = (
+        max_workers
+        if max_workers is not None
+        else getattr(
+            settings,
+            "COMMUTE_MAX_WORKERS",
+            COMMUTE_MAX_WORKERS,
+        )
+    )
+
+    leg1_departure = sampled_at if mode == "pt" else None
+
+    # Pre-check Leg 1
+    leg1: RouteLeg | None = None
+    if not anchors.home:
+        leg1 = _unavailable_leg(
+            "home",
+            "centre",
+            "Home postal code could not be resolved",
+        )
+    elif not anchors.centre:
+        leg1 = _unavailable_leg(
+            "home",
+            "centre",
+            "Centre postal code could not be resolved",
+        )
+
+    # Pre-check Leg 2
+    leg2: RouteLeg | None = None
+    if anchors.has_workplace:
+        if not anchors.centre:
+            leg2 = _unavailable_leg(
+                "centre",
+                "workplace",
+                "Centre postal code could not be resolved",
+            )
+        elif not anchors.workplace:
+            leg2 = _unavailable_leg(
+                "centre",
+                "workplace",
+                "Workplace postal code could not be resolved",
+            )
+
+    executor = ThreadPoolExecutor(max_workers=effective_max_workers)
+    deadline_expired = False
+    pending_futures: list[concurrent.futures.Future[RouteLeg]] = []
+
+    def _remaining_budget() -> float:
+        return max(0.0, effective_deadline - time_module.monotonic())
+
+    try:
+        if mode == "pt":
+            # PT Mode: sequential leg dependency
+            future_leg1: concurrent.futures.Future[RouteLeg] | None = None
+            if leg1 is None and anchors.home and anchors.centre:
+                rem = _remaining_budget()
+                if rem <= 0.0:
+                    deadline_expired = True
+                    leg1 = _unavailable_leg(
+                        "home",
+                        "centre",
+                        "Evaluation budget exhausted",
+                    )
+                else:
+                    future_leg1 = executor.submit(
+                        get_commute_leg,
+                        from_anchor="home",
+                        to_anchor="centre",
+                        start=anchors.home,
+                        end=anchors.centre,
+                        mode="pt",
+                        departure=leg1_departure,
+                        client=client,
+                        timeout=effective_call_timeout,
+                        deadline=effective_deadline,
+                    )
+                    pending_futures.append(future_leg1)
+
+            if future_leg1 is not None:
+                rem = _remaining_budget()
+                if rem <= 0.0:
+                    deadline_expired = True
+                    leg1 = _unavailable_leg(
+                        "home",
+                        "centre",
+                        "Evaluation budget exhausted",
+                    )
+                else:
+                    try:
+                        leg1 = future_leg1.result(timeout=rem)
+                    except (TimeoutError, FutureTimeoutError):
+                        deadline_expired = True
+                        leg1 = _unavailable_leg(
+                            "home",
+                            "centre",
+                            "Evaluation budget exhausted",
+                        )
+
+            if anchors.has_workplace and leg2 is None:
+                if deadline_expired or _remaining_budget() <= 0.0:
+                    deadline_expired = True
+                    leg2 = _unavailable_leg(
+                        "centre",
+                        "workplace",
+                        "Evaluation budget exhausted",
+                    )
+                elif leg1 is None or leg1.status != "available" or leg1.arrival_at is None:
+                    leg2 = _unavailable_leg(
+                        "centre",
+                        "workplace",
+                        "Onward leg departure cannot be determined because first leg arrival is unavailable",
+                    )
+                elif anchors.centre and anchors.workplace:
+                    rem = _remaining_budget()
+                    if rem <= 0.0:
+                        deadline_expired = True
+                        leg2 = _unavailable_leg(
+                            "centre",
+                            "workplace",
+                            "Evaluation budget exhausted",
+                        )
+                    else:
+                        future_leg2 = executor.submit(
+                            get_commute_leg,
+                            from_anchor="centre",
+                            to_anchor="workplace",
+                            start=anchors.centre,
+                            end=anchors.workplace,
+                            mode="pt",
+                            departure=leg1.arrival_at,
+                            client=client,
+                            timeout=effective_call_timeout,
+                            deadline=effective_deadline,
+                        )
+                        pending_futures.append(future_leg2)
+                        try:
+                            leg2 = future_leg2.result(timeout=rem)
+                        except (TimeoutError, FutureTimeoutError):
+                            deadline_expired = True
+                            leg2 = _unavailable_leg(
+                                "centre",
+                                "workplace",
+                                "Evaluation budget exhausted",
+                            )
+        else:
+            # Non-PT Mode: Leg 1 and Leg 2 are independent and dispatched concurrently
+            future_leg1 = None
+            if leg1 is None and anchors.home and anchors.centre:
+                rem = _remaining_budget()
+                if rem <= 0.0:
+                    deadline_expired = True
+                    leg1 = _unavailable_leg(
+                        "home",
+                        "centre",
+                        "Evaluation budget exhausted",
+                    )
+                else:
+                    future_leg1 = executor.submit(
+                        get_commute_leg,
+                        from_anchor="home",
+                        to_anchor="centre",
+                        start=anchors.home,
+                        end=anchors.centre,
+                        mode=mode,
+                        departure=None,
+                        client=client,
+                        timeout=effective_call_timeout,
+                        deadline=effective_deadline,
+                    )
+                    pending_futures.append(future_leg1)
+
+            future_leg2 = None
+            if anchors.has_workplace and leg2 is None and anchors.centre and anchors.workplace:
+                rem = _remaining_budget()
+                if rem <= 0.0:
+                    deadline_expired = True
+                    leg2 = _unavailable_leg(
+                        "centre",
+                        "workplace",
+                        "Evaluation budget exhausted",
+                    )
+                else:
+                    future_leg2 = executor.submit(
+                        get_commute_leg,
+                        from_anchor="centre",
+                        to_anchor="workplace",
+                        start=anchors.centre,
+                        end=anchors.workplace,
+                        mode=mode,
+                        departure=None,
+                        client=client,
+                        timeout=effective_call_timeout,
+                        deadline=effective_deadline,
+                    )
+                    pending_futures.append(future_leg2)
+
+            def _collect_non_pt_legacy_leg(
+                fut: concurrent.futures.Future[RouteLeg] | None,
+                from_a: AnchorName,
+                to_a: AnchorName,
+            ) -> RouteLeg | None:
+                nonlocal deadline_expired
+                if fut is None:
+                    return None
+                if fut.done():
+                    try:
+                        return fut.result(timeout=0)
+                    except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError, AttributeError, concurrent.futures.CancelledError):
+                        return _unavailable_leg(from_a, to_a, "Route unavailable")
+                if deadline_expired:
+                    fut.cancel()
+                    return _unavailable_leg(from_a, to_a, "Evaluation budget exhausted")
+                rem = _remaining_budget()
+                if rem <= 0.0:
+                    deadline_expired = True
+                    fut.cancel()
+                    return _unavailable_leg(from_a, to_a, "Evaluation budget exhausted")
+                try:
+                    return fut.result(timeout=rem)
+                except (TimeoutError, FutureTimeoutError):
+                    deadline_expired = True
+                    fut.cancel()
+                    return _unavailable_leg(from_a, to_a, "Evaluation budget exhausted")
+
+            if future_leg1 is not None and leg1 is None:
+                leg1 = _collect_non_pt_legacy_leg(future_leg1, "home", "centre")
+            if future_leg2 is not None and leg2 is None:
+                leg2 = _collect_non_pt_legacy_leg(future_leg2, "centre", "workplace")
+
+    finally:
+        for f in pending_futures:
+            if not f.done():
+                f.cancel()
+        if deadline_expired:
+            executor.shutdown(wait=False, cancel_futures=True)
+        else:
+            executor.shutdown(wait=False)
+
+    legs: list[RouteLeg] = []
+    if leg1 is not None:
+        legs.append(leg1)
+    if anchors.has_workplace and leg2 is not None:
+        legs.append(leg2)
+
+    totals: RouteTotals | None = None
+    if all(
+        leg.status == "available"
+        and leg.duration_seconds is not None
+        and leg.distance_meters is not None
+        for leg in legs
+    ) and len(legs) > 0:
+        totals = RouteTotals(
+            duration_seconds=sum(
+                leg.duration_seconds for leg in legs if leg.duration_seconds is not None
+            ),
+            distance_meters=sum(
+                leg.distance_meters for leg in legs if leg.distance_meters is not None
+            ),
+        )
+
+    return CommuteSample(
+        kind=kind,
+        sampled_at=sampled_at,
+        legs=legs,
+        totals=totals,
+    )
+
+
+def build_commute_samples(
+    mode: CommuteMode,
+    anchors: CommuteAnchors,
+    sample_pair: tuple[datetime, datetime],
+    client: httpx.Client | None = None,
+    deadline: float | None = None,
+    call_timeout_seconds: float | None = None,
+    evaluation_deadline_seconds: float | None = None,
+    max_workers: int | None = None,
+) -> list[CommuteSample]:
+    """Orchestrate commute samples based on travel mode and sample pair."""
+    eval_secs = (
+        evaluation_deadline_seconds
+        if evaluation_deadline_seconds is not None
+        else getattr(
+            settings,
+            "COMMUTE_EVALUATION_DEADLINE_SECONDS",
+            COMMUTE_EVALUATION_DEADLINE_SECONDS,
+        )
+    )
+    effective_deadline = (
+        deadline if deadline is not None else (time_module.monotonic() + eval_secs)
+    )
+    wednesday_dt, saturday_dt = sample_pair
+    if mode == "pt":
+        sample_weekday = build_commute_sample(
+            kind="weekday",
+            sampled_at=wednesday_dt,
+            mode="pt",
+            anchors=anchors,
+            client=client,
+            deadline=effective_deadline,
+            call_timeout_seconds=call_timeout_seconds,
+            evaluation_deadline_seconds=evaluation_deadline_seconds,
+            max_workers=max_workers,
+        )
+        sample_weekend = build_commute_sample(
+            kind="weekend",
+            sampled_at=saturday_dt,
+            mode="pt",
+            anchors=anchors,
+            client=client,
+            deadline=effective_deadline,
+            call_timeout_seconds=call_timeout_seconds,
+            evaluation_deadline_seconds=evaluation_deadline_seconds,
+            max_workers=max_workers,
+        )
+        return [sample_weekday, sample_weekend]
+
+    sample_single = build_commute_sample(
+        kind="single",
+        sampled_at=None,
+        mode=mode,
+        anchors=anchors,
+        client=client,
+        deadline=effective_deadline,
+        call_timeout_seconds=call_timeout_seconds,
+        evaluation_deadline_seconds=evaluation_deadline_seconds,
+        max_workers=max_workers,
+    )
+    return [sample_single]
+
+
+def _unavailable_negotiated_leg(
+    from_anchor: AnchorName,
+    to_anchor: AnchorName,
+    message: str,
+    reason: CommuteReason,
+    departure_at: datetime | None = None,
+) -> NegotiatedRouteLeg:
+    return NegotiatedRouteLeg(
+        from_anchor=from_anchor,
+        to_anchor=to_anchor,
+        status="unavailable",
+        source=None,
+        duration_seconds=None,
+        distance_meters=None,
+        geometry=None,
+        arrival_at=None,
+        message=message,
+        transit_legs=None,
+        departure_at=departure_at,
+        timing=LegTiming(
+            duration_basis="unknown",
+            arrival_source="unknown",
+            initial_wait_included=None,
+        ),
+        reasons=[reason],
+    )
+
+
+def get_negotiated_commute_leg(
+    from_anchor: AnchorName,
+    to_anchor: AnchorName,
+    start: Coordinate,
+    end: Coordinate,
+    mode: CommuteMode = "drive",
+    departure: datetime | None = None,
+    client: httpx.Client | None = None,
+    timeout: float | None = None,
+    deadline: float | None = None,
+) -> NegotiatedRouteLeg:
+    """Query OneMap routing endpoint returning NegotiatedRouteLeg with classified diagnostics."""
     effective_departure: datetime | None = departure
     if mode == "pt":
         dep = departure or get_next_representative_wednesday()
-        effective_departure = dep
+        dep_sgt = (
+            dep.replace(tzinfo=SGT)
+            if dep.tzinfo is None
+            else dep.astimezone(SGT)
+        )
+        effective_departure = dep_sgt
         params: dict[str, Any] = {
             "start": f"{start.lat},{start.lng}",
             "end": f"{end.lat},{end.lng}",
             "routeType": "pt",
-            "date": dep.strftime("%m-%d-%Y"),
-            "time": dep.strftime("%H:%M:%S"),
+            "date": dep_sgt.strftime("%m-%d-%Y"),
+            "time": dep_sgt.strftime("%H:%M:%S"),
             "mode": "TRANSIT",
             "maxWalkDistance": 1000,
             "numItineraries": 1,
@@ -455,51 +1232,134 @@ def get_commute_leg(
             "routeType": mode,
         }
 
+    call_timeout = (
+        timeout
+        if timeout is not None
+        else getattr(
+            settings,
+            "COMMUTE_CALL_TIMEOUT_SECONDS",
+            COMMUTE_CALL_TIMEOUT_SECONDS,
+        )
+    )
+    if deadline is not None:
+        rem = max(0.0, deadline - time_module.monotonic())
+        if rem <= 0.0:
+            return _unavailable_negotiated_leg(
+                from_anchor,
+                to_anchor,
+                "Evaluation budget exhausted",
+                build_commute_reason("evaluation_budget_exhausted"),
+                departure_at=effective_departure if mode == "pt" else None,
+            )
+        effective_timeout = min(call_timeout, rem)
+    else:
+        effective_timeout = call_timeout
+
     try:
         response = _fetch_onemap(
             settings.ONEMAP_ROUTING_API_URL,
             params=params,
             client=client,
-            timeout=10.0,
+            timeout=effective_timeout,
         )
+        if response.status_code == 401:
+            return _unavailable_negotiated_leg(
+                from_anchor,
+                to_anchor,
+                "Provider authentication failed",
+                build_commute_reason("provider_auth_failed"),
+                departure_at=effective_departure if mode == "pt" else None,
+            )
         response.raise_for_status()
         data = response.json()
 
         if not isinstance(data, dict):
-            raise TypeError("Malformed OneMap routing response")
-
-        if mode == "pt" and "plan" not in data:
-            return _unavailable_leg(
-                from_anchor, to_anchor, "Public transport plan unavailable"
+            return _unavailable_negotiated_leg(
+                from_anchor,
+                to_anchor,
+                "Malformed OneMap routing response",
+                build_commute_reason("invalid_provider_payload"),
+                departure_at=effective_departure if mode == "pt" else None,
             )
 
-        if "plan" in data:
+        if mode == "pt":
+            if "plan" not in data:
+                return _unavailable_negotiated_leg(
+                    from_anchor,
+                    to_anchor,
+                    "Public transport plan unavailable",
+                    build_commute_reason("no_itinerary"),
+                    departure_at=effective_departure,
+                )
             plan = data.get("plan")
             if not isinstance(plan, dict):
-                raise TypeError("Malformed public transport plan")
+                return _unavailable_negotiated_leg(
+                    from_anchor,
+                    to_anchor,
+                    "Malformed public transport plan",
+                    build_commute_reason("invalid_provider_payload"),
+                    departure_at=effective_departure,
+                )
             itineraries = plan.get("itineraries")
             if not isinstance(itineraries, list):
-                raise ValueError("Malformed public transport itineraries")
+                return _unavailable_negotiated_leg(
+                    from_anchor,
+                    to_anchor,
+                    "Malformed public transport itineraries",
+                    build_commute_reason("invalid_provider_payload"),
+                    departure_at=effective_departure,
+                )
             if not itineraries:
-                return _unavailable_leg(
-                    from_anchor, to_anchor, "No public transport itinerary found"
+                return _unavailable_negotiated_leg(
+                    from_anchor,
+                    to_anchor,
+                    "No public transport itinerary found",
+                    build_commute_reason("no_itinerary"),
+                    departure_at=effective_departure,
                 )
             itinerary = itineraries[0]
             if not isinstance(itinerary, dict):
-                raise TypeError("Malformed public transport itinerary")
+                return _unavailable_negotiated_leg(
+                    from_anchor,
+                    to_anchor,
+                    "Malformed public transport itinerary",
+                    build_commute_reason("invalid_provider_payload"),
+                    departure_at=effective_departure,
+                )
             raw_legs = itinerary.get("legs")
             if not isinstance(raw_legs, list) or not raw_legs:
-                raise ValueError("Public transport itinerary legs unavailable")
+                return _unavailable_negotiated_leg(
+                    from_anchor,
+                    to_anchor,
+                    "Public transport itinerary legs unavailable",
+                    build_commute_reason("invalid_provider_payload"),
+                    departure_at=effective_departure,
+                )
 
             transit_legs: list[TransitLeg] = []
             all_coords: list[Coordinate] = []
 
             for raw_leg in raw_legs:
                 if not isinstance(raw_leg, dict):
-                    raise TypeError("Malformed public transport sub-leg")
+                    return _unavailable_negotiated_leg(
+                        from_anchor,
+                        to_anchor,
+                        "Malformed public transport sub-leg",
+                        build_commute_reason("invalid_provider_payload"),
+                        departure_at=effective_departure,
+                    )
+                try:
+                    sub_duration = _required_metric(raw_leg, "duration")
+                    sub_distance = _required_metric(raw_leg, "distance")
+                except ValueError:
+                    return _unavailable_negotiated_leg(
+                        from_anchor,
+                        to_anchor,
+                        "Missing sub-leg metric",
+                        build_commute_reason("invalid_provider_payload"),
+                        departure_at=effective_departure,
+                    )
                 sub_mode = str(raw_leg.get("mode", "TRANSIT")).upper()
-                sub_duration = _required_metric(raw_leg, "duration")
-                sub_distance = _required_metric(raw_leg, "distance")
                 sub_route = (
                     raw_leg.get("route")
                     or raw_leg.get("routeShortName")
@@ -518,10 +1378,12 @@ def get_commute_leg(
 
                 sub_coords = decode_polyline(geom_poly) if geom_poly else []
                 if not sub_coords:
-                    return _unavailable_leg(
+                    return _unavailable_negotiated_leg(
                         from_anchor,
                         to_anchor,
                         "Route geometry unavailable for transit sub-leg",
+                        build_commute_reason("geometry_unavailable"),
+                        departure_at=effective_departure,
                     )
                 all_coords.extend(sub_coords)
 
@@ -551,19 +1413,44 @@ def get_commute_leg(
                 )
 
             if not all_coords:
-                return _unavailable_leg(
-                    from_anchor, to_anchor, "Route geometry unavailable"
+                return _unavailable_negotiated_leg(
+                    from_anchor,
+                    to_anchor,
+                    "Route geometry unavailable",
+                    build_commute_reason("geometry_unavailable"),
+                    departure_at=effective_departure,
                 )
 
-            duration_secs = _required_metric(itinerary, "duration")
+            try:
+                duration_secs = _required_metric(itinerary, "duration")
+            except ValueError:
+                return _unavailable_negotiated_leg(
+                    from_anchor,
+                    to_anchor,
+                    "Missing itinerary duration",
+                    build_commute_reason("invalid_provider_payload"),
+                    departure_at=effective_departure,
+                )
             total_dist = sum(t.distance_meters or 0 for t in transit_legs)
-            arrival_at, elapsed = _itinerary_arrival(
+            arrival_at, elapsed, is_provider_end_time = _itinerary_arrival(
                 itinerary, effective_departure, duration_secs
             )
-            if elapsed is not None:
+            initial_wait_included = False
+            duration_basis: DurationBasis = "itinerary_duration"
+            arrival_source: ArrivalSource = "duration_derived"
+            if is_provider_end_time and elapsed is not None:
                 duration_secs = elapsed
+                initial_wait_included = True
+                duration_basis = "elapsed_from_requested_departure"
+                arrival_source = "provider_end_time"
 
-            return RouteLeg(
+            timing = LegTiming(
+                duration_basis=duration_basis,
+                arrival_source=arrival_source,
+                initial_wait_included=initial_wait_included,
+            )
+
+            return NegotiatedRouteLeg(
                 from_anchor=from_anchor,
                 to_anchor=to_anchor,
                 status="available",
@@ -574,28 +1461,61 @@ def get_commute_leg(
                 geometry=all_coords,
                 message=None,
                 transit_legs=transit_legs if transit_legs else None,
+                departure_at=effective_departure,
+                timing=timing,
+                reasons=[],
             )
 
+        # Drive / walk / cycle modes
         route_geometry = data.get("route_geometry")
         if not route_geometry or not isinstance(route_geometry, str):
-            return _unavailable_leg(
-                from_anchor, to_anchor, "Route geometry unavailable"
+            return _unavailable_negotiated_leg(
+                from_anchor,
+                to_anchor,
+                "Route geometry unavailable",
+                build_commute_reason("geometry_unavailable"),
+                departure_at=None,
             )
 
         coords = decode_polyline(route_geometry)
         if not coords:
-            return _unavailable_leg(
-                from_anchor, to_anchor, "Decoded route geometry is empty"
+            return _unavailable_negotiated_leg(
+                from_anchor,
+                to_anchor,
+                "Decoded route geometry is empty",
+                build_commute_reason("geometry_unavailable"),
+                departure_at=None,
             )
 
         summary = data.get("route_summary")
         if not summary or not isinstance(summary, dict):
-            return _unavailable_leg(from_anchor, to_anchor, "Route summary unavailable")
+            return _unavailable_negotiated_leg(
+                from_anchor,
+                to_anchor,
+                "Route summary unavailable",
+                build_commute_reason("invalid_provider_payload"),
+                departure_at=None,
+            )
 
-        duration_secs = _required_metric(summary, "total_time")
-        dist_meters = _required_metric(summary, "total_distance")
+        try:
+            duration_secs = _required_metric(summary, "total_time")
+            dist_meters = _required_metric(summary, "total_distance")
+        except ValueError:
+            return _unavailable_negotiated_leg(
+                from_anchor,
+                to_anchor,
+                "Route summary metrics invalid",
+                build_commute_reason("invalid_provider_payload"),
+                departure_at=None,
+            )
 
-        return RouteLeg(
+        timing = LegTiming(
+            duration_basis="provider_default",
+            arrival_source="not_applicable",
+            initial_wait_included=None,
+        )
+
+        return NegotiatedRouteLeg(
             from_anchor=from_anchor,
             to_anchor=to_anchor,
             status="available",
@@ -604,192 +1524,850 @@ def get_commute_leg(
             distance_meters=dist_meters,
             geometry=coords,
             message=None,
+            departure_at=None,
+            timing=timing,
+            reasons=[],
         )
+
     except httpx.TimeoutException as exc:
         logger.warning(
             "OneMap routing timeout (%s -> %s): %s", from_anchor, to_anchor, exc
         )
-        return _unavailable_leg(from_anchor, to_anchor, "Route request timed out")
+        if deadline is not None and time_module.monotonic() >= deadline:
+            return _unavailable_negotiated_leg(
+                from_anchor,
+                to_anchor,
+                "Evaluation budget exhausted",
+                build_commute_reason("evaluation_budget_exhausted"),
+                departure_at=effective_departure if mode == "pt" else None,
+            )
+        return _unavailable_negotiated_leg(
+            from_anchor,
+            to_anchor,
+            "Route request timed out",
+            build_commute_reason("provider_timeout"),
+            departure_at=effective_departure if mode == "pt" else None,
+        )
+    except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "OneMap routing HTTP error (%s -> %s): %s", from_anchor, to_anchor, exc
+        )
+        reason_code: ReasonCode = (
+            "provider_auth_failed"
+            if exc.response.status_code == 401
+            else "provider_unavailable"
+        )
+        msg = (
+            "Provider authentication failed"
+            if exc.response.status_code == 401
+            else "Route service unavailable"
+        )
+        return _unavailable_negotiated_leg(
+            from_anchor,
+            to_anchor,
+            msg,
+            build_commute_reason(reason_code),
+            departure_at=effective_departure if mode == "pt" else None,
+        )
     except (
         httpx.HTTPError,
-        ValueError,
-        KeyError,
-        TypeError,
-        AttributeError,
         OSError,
     ) as exc:
         logger.warning(
             "OneMap routing failed (%s -> %s): %s", from_anchor, to_anchor, exc
         )
-        return _unavailable_leg(from_anchor, to_anchor, "Route unavailable")
+        return _unavailable_negotiated_leg(
+            from_anchor,
+            to_anchor,
+            "Route unavailable",
+            build_commute_reason("provider_unavailable"),
+            departure_at=effective_departure if mode == "pt" else None,
+        )
+    except (
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+    ) as exc:
+        logger.warning(
+            "OneMap routing parsing failed (%s -> %s): %s", from_anchor, to_anchor, exc
+        )
+        return _unavailable_negotiated_leg(
+            from_anchor,
+            to_anchor,
+            "Invalid provider response",
+            build_commute_reason("invalid_provider_payload"),
+            departure_at=effective_departure if mode == "pt" else None,
+        )
 
-
-@dataclass
-class CommuteAnchors:
-    """Geographic anchors for commute route comparison."""
-
-    home: Coordinate | None
-    centre: Coordinate | None
-    workplace: Coordinate | None = None
-    has_workplace: bool = False
-
-    def __post_init__(self) -> None:
-        if self.workplace is not None and not self.has_workplace:
-            self.has_workplace = True
-
-    def to_dict(self) -> dict[str, Coordinate | None]:
-        res: dict[str, Coordinate | None] = {
-            "home": self.home,
-            "centre": self.centre,
-        }
-        if self.has_workplace:
-            res["workplace"] = self.workplace
-        return res
-
-
-def build_commute_sample(
+def build_negotiated_commute_sample(
     kind: SampleKind,
     sampled_at: datetime | None,
     mode: CommuteMode,
     anchors: CommuteAnchors,
+    include_direct_baseline: bool = True,
+    conditions_id: str | None = None,
+    provider_options_id: str | None = None,
     client: httpx.Client | None = None,
-) -> CommuteSample:
-    """Build a single CommuteSample with independent routing, failure handling, and totals."""
-    legs: list[RouteLeg] = []
-    leg1_departure = sampled_at if mode == "pt" else None
+    deadline: float | None = None,
+    call_timeout_seconds: float | None = None,
+    evaluation_deadline_seconds: float | None = None,
+    max_workers: int | None = None,
+) -> NegotiatedCommuteSample:
+    """Build a NegotiatedCommuteSample with conditions, via_status, direct_route, and comparison."""
+    eval_secs = (
+        evaluation_deadline_seconds
+        if evaluation_deadline_seconds is not None
+        else getattr(
+            settings,
+            "COMMUTE_EVALUATION_DEADLINE_SECONDS",
+            COMMUTE_EVALUATION_DEADLINE_SECONDS,
+        )
+    )
+    effective_deadline = (
+        deadline if deadline is not None else (time_module.monotonic() + eval_secs)
+    )
+    effective_call_timeout = (
+        call_timeout_seconds
+        if call_timeout_seconds is not None
+        else getattr(
+            settings,
+            "COMMUTE_CALL_TIMEOUT_SECONDS",
+            COMMUTE_CALL_TIMEOUT_SECONDS,
+        )
+    )
+    effective_max_workers = (
+        max_workers
+        if max_workers is not None
+        else getattr(
+            settings,
+            "COMMUTE_MAX_WORKERS",
+            COMMUTE_MAX_WORKERS,
+        )
+    )
 
-    # Leg 1: home -> centre
+    leg1_departure = sampled_at if mode == "pt" else None
+    direct_departure = sampled_at if mode == "pt" else None
+
+    # Pre-check Leg 1
+    leg1: NegotiatedRouteLeg | None = None
     if not anchors.home:
-        leg1 = _unavailable_leg(
-            "home",
-            "centre",
-            "Home postal code could not be resolved",
-        )
-    elif not anchors.centre:
-        leg1 = _unavailable_leg(
-            "home",
-            "centre",
-            "Centre postal code could not be resolved",
-        )
-    else:
-        leg1 = get_commute_leg(
+        leg1 = _unavailable_negotiated_leg(
             from_anchor="home",
             to_anchor="centre",
-            start=anchors.home,
-            end=anchors.centre,
-            mode=mode,
-            departure=leg1_departure,
-            client=client,
+            message="Home postal code could not be resolved",
+            reason=build_commute_reason("home_unresolved"),
+            departure_at=leg1_departure,
         )
-    legs.append(leg1)
+    elif not anchors.centre:
+        leg1 = _unavailable_negotiated_leg(
+            from_anchor="home",
+            to_anchor="centre",
+            message="Centre postal code could not be resolved",
+            reason=build_commute_reason("centre_unresolved"),
+            departure_at=leg1_departure,
+        )
 
-    # Leg 2: centre -> workplace (if workplace postal provided)
+    # Pre-check Leg 2
+    leg2: NegotiatedRouteLeg | None = None
     if anchors.has_workplace:
         if not anchors.centre:
-            leg2 = _unavailable_leg(
-                "centre",
-                "workplace",
-                "Centre postal code could not be resolved",
-            )
-        elif not anchors.workplace:
-            leg2 = _unavailable_leg(
-                "centre",
-                "workplace",
-                "Workplace postal code could not be resolved",
-            )
-        elif mode == "pt" and (leg1.status != "available" or leg1.arrival_at is None):
-            leg2 = _unavailable_leg(
-                "centre",
-                "workplace",
-                "Onward leg departure cannot be determined because first leg arrival is unavailable",
-            )
-        else:
-            leg2_departure = None
-            if mode == "pt" and leg1.arrival_at is not None:
-                leg2_departure = leg1.arrival_at
-
-            leg2 = get_commute_leg(
+            leg2 = _unavailable_negotiated_leg(
                 from_anchor="centre",
                 to_anchor="workplace",
-                start=anchors.centre,
-                end=anchors.workplace,
-                mode=mode,
-                departure=leg2_departure,
-                client=client,
+                message="Centre postal code could not be resolved",
+                reason=build_commute_reason("centre_unresolved"),
+                departure_at=None,
             )
+        elif not anchors.workplace:
+            leg2 = _unavailable_negotiated_leg(
+                from_anchor="centre",
+                to_anchor="workplace",
+                message="Workplace postal code could not be resolved",
+                reason=build_commute_reason("workplace_unresolved"),
+                departure_at=None,
+            )
+
+    # Pre-check Direct Route / Direct Leg
+    direct_route: DirectRoute | None = None
+    direct_leg: NegotiatedRouteLeg | None = None
+    comparison: CommuteComparison | None = None
+
+    if include_direct_baseline:
+        if not anchors.has_workplace:
+            direct_route = DirectRoute(
+                status="not_applicable",
+                legs=[],
+                totals=None,
+                reasons=[build_commute_reason("workplace_not_configured")],
+            )
+            comparison = CommuteComparison(
+                status="not_applicable",
+                reasons=[build_commute_reason("workplace_not_configured")],
+                certification=None,
+            )
+        elif not anchors.home:
+            direct_leg = _unavailable_negotiated_leg(
+                from_anchor="home",
+                to_anchor="workplace",
+                message="Home postal code could not be resolved",
+                reason=build_commute_reason("home_unresolved"),
+                departure_at=direct_departure,
+            )
+        elif not anchors.workplace:
+            direct_leg = _unavailable_negotiated_leg(
+                from_anchor="home",
+                to_anchor="workplace",
+                message="Workplace postal code could not be resolved",
+                reason=build_commute_reason("workplace_unresolved"),
+                departure_at=direct_departure,
+            )
+
+    executor = ThreadPoolExecutor(max_workers=effective_max_workers)
+    deadline_expired = False
+    pending_futures: list[concurrent.futures.Future[NegotiatedRouteLeg]] = []
+
+    def _remaining_budget() -> float:
+        return max(0.0, effective_deadline - time_module.monotonic())
+
+    try:
+        if mode == "pt":
+            # PT Mode:
+            # Leg 1 (home -> centre) and Direct Leg (home -> workplace) both depart at 08:00 SGT and are independent!
+            future_leg1: concurrent.futures.Future[NegotiatedRouteLeg] | None = None
+            if leg1 is None and anchors.home and anchors.centre:
+                rem = _remaining_budget()
+                if rem <= 0.0:
+                    deadline_expired = True
+                    leg1 = _unavailable_negotiated_leg(
+                        from_anchor="home",
+                        to_anchor="centre",
+                        message="Evaluation budget exhausted",
+                        reason=build_commute_reason("evaluation_budget_exhausted"),
+                        departure_at=leg1_departure,
+                    )
+                else:
+                    future_leg1 = executor.submit(
+                        get_negotiated_commute_leg,
+                        from_anchor="home",
+                        to_anchor="centre",
+                        start=anchors.home,
+                        end=anchors.centre,
+                        mode="pt",
+                        departure=leg1_departure,
+                        client=client,
+                        timeout=effective_call_timeout,
+                        deadline=effective_deadline,
+                    )
+                    pending_futures.append(future_leg1)
+
+            future_direct: concurrent.futures.Future[NegotiatedRouteLeg] | None = None
+            if (
+                include_direct_baseline
+                and anchors.has_workplace
+                and direct_leg is None
+                and anchors.home
+                and anchors.workplace
+            ):
+                rem = _remaining_budget()
+                if rem <= 0.0:
+                    deadline_expired = True
+                    direct_leg = _unavailable_negotiated_leg(
+                        from_anchor="home",
+                        to_anchor="workplace",
+                        message="Evaluation budget exhausted",
+                        reason=build_commute_reason("evaluation_budget_exhausted"),
+                        departure_at=direct_departure,
+                    )
+                else:
+                    future_direct = executor.submit(
+                        get_negotiated_commute_leg,
+                        from_anchor="home",
+                        to_anchor="workplace",
+                        start=anchors.home,
+                        end=anchors.workplace,
+                        mode="pt",
+                        departure=direct_departure,
+                        client=client,
+                        timeout=effective_call_timeout,
+                        deadline=effective_deadline,
+                    )
+                    pending_futures.append(future_direct)
+
+            # Wait for Leg 1
+            if future_leg1 is not None:
+                rem = _remaining_budget()
+                if rem <= 0.0:
+                    deadline_expired = True
+                    leg1 = _unavailable_negotiated_leg(
+                        from_anchor="home",
+                        to_anchor="centre",
+                        message="Evaluation budget exhausted",
+                        reason=build_commute_reason("evaluation_budget_exhausted"),
+                        departure_at=leg1_departure,
+                    )
+                else:
+                    try:
+                        leg1 = future_leg1.result(timeout=rem)
+                    except (TimeoutError, FutureTimeoutError):
+                        deadline_expired = True
+                        leg1 = _unavailable_negotiated_leg(
+                            from_anchor="home",
+                            to_anchor="centre",
+                            message="Evaluation budget exhausted",
+                            reason=build_commute_reason("evaluation_budget_exhausted"),
+                            departure_at=leg1_departure,
+                        )
+
+            # Leg 1 is resolved. Now handle Leg 2 in PT mode:
+            if anchors.has_workplace and leg2 is None:
+                if deadline_expired or _remaining_budget() <= 0.0:
+                    deadline_expired = True
+                    leg2 = _unavailable_negotiated_leg(
+                        from_anchor="centre",
+                        to_anchor="workplace",
+                        message="Evaluation budget exhausted",
+                        reason=build_commute_reason("evaluation_budget_exhausted"),
+                        departure_at=None,
+                    )
+                elif leg1 is None or leg1.status != "available" or leg1.arrival_at is None:
+                    leg2 = _unavailable_negotiated_leg(
+                        from_anchor="centre",
+                        to_anchor="workplace",
+                        message="Onward leg departure cannot be determined because first leg arrival is unavailable",
+                        reason=build_commute_reason("timing_unverified"),
+                        departure_at=None,
+                    )
+                elif anchors.centre and anchors.workplace:
+                    rem = _remaining_budget()
+                    if rem <= 0.0:
+                        deadline_expired = True
+                        leg2 = _unavailable_negotiated_leg(
+                            from_anchor="centre",
+                            to_anchor="workplace",
+                            message="Evaluation budget exhausted",
+                            reason=build_commute_reason("evaluation_budget_exhausted"),
+                            departure_at=None,
+                        )
+                    else:
+                        future_leg2 = executor.submit(
+                            get_negotiated_commute_leg,
+                            from_anchor="centre",
+                            to_anchor="workplace",
+                            start=anchors.centre,
+                            end=anchors.workplace,
+                            mode="pt",
+                            departure=leg1.arrival_at,
+                            client=client,
+                            timeout=effective_call_timeout,
+                            deadline=effective_deadline,
+                        )
+                        pending_futures.append(future_leg2)
+                        try:
+                            leg2 = future_leg2.result(timeout=rem)
+                        except (TimeoutError, FutureTimeoutError):
+                            deadline_expired = True
+                            leg2 = _unavailable_negotiated_leg(
+                                from_anchor="centre",
+                                to_anchor="workplace",
+                                message="Evaluation budget exhausted",
+                                reason=build_commute_reason("evaluation_budget_exhausted"),
+                                departure_at=None,
+                            )
+
+            # Resolve Direct Leg in PT mode:
+            if (
+                include_direct_baseline
+                and anchors.has_workplace
+                and direct_leg is None
+                and future_direct is not None
+            ):
+                if future_direct.done():
+                    try:
+                        direct_leg = future_direct.result(timeout=0)
+                    except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError, AttributeError, concurrent.futures.CancelledError) as exc:
+                        direct_leg = _unavailable_negotiated_leg(
+                            from_anchor="home",
+                            to_anchor="workplace",
+                            message=f"Direct leg error: {exc}",
+                            reason=build_commute_reason("provider_unavailable"),
+                            departure_at=direct_departure,
+                        )
+                elif deadline_expired:
+                    future_direct.cancel()
+                    direct_leg = _unavailable_negotiated_leg(
+                        from_anchor="home",
+                        to_anchor="workplace",
+                        message="Evaluation budget exhausted",
+                        reason=build_commute_reason("evaluation_budget_exhausted"),
+                        departure_at=direct_departure,
+                    )
+                else:
+                    rem = _remaining_budget()
+                    if rem <= 0.0:
+                        deadline_expired = True
+                        future_direct.cancel()
+                        direct_leg = _unavailable_negotiated_leg(
+                            from_anchor="home",
+                            to_anchor="workplace",
+                            message="Evaluation budget exhausted",
+                            reason=build_commute_reason("evaluation_budget_exhausted"),
+                            departure_at=direct_departure,
+                        )
+                    else:
+                        try:
+                            direct_leg = future_direct.result(timeout=rem)
+                        except (TimeoutError, FutureTimeoutError):
+                            deadline_expired = True
+                            future_direct.cancel()
+                            direct_leg = _unavailable_negotiated_leg(
+                                from_anchor="home",
+                                to_anchor="workplace",
+                                message="Evaluation budget exhausted",
+                                reason=build_commute_reason("evaluation_budget_exhausted"),
+                                departure_at=direct_departure,
+                            )
+
+        else:
+            # Non-PT Mode: drive, walk, cycle
+            # Leg 1, Leg 2, and Direct Leg can all be dispatched concurrently!
+            future_leg1 = None
+            if leg1 is None and anchors.home and anchors.centre:
+                rem = _remaining_budget()
+                if rem <= 0.0:
+                    deadline_expired = True
+                    leg1 = _unavailable_negotiated_leg(
+                        from_anchor="home",
+                        to_anchor="centre",
+                        message="Evaluation budget exhausted",
+                        reason=build_commute_reason("evaluation_budget_exhausted"),
+                        departure_at=None,
+                    )
+                else:
+                    future_leg1 = executor.submit(
+                        get_negotiated_commute_leg,
+                        from_anchor="home",
+                        to_anchor="centre",
+                        start=anchors.home,
+                        end=anchors.centre,
+                        mode=mode,
+                        departure=None,
+                        client=client,
+                        timeout=effective_call_timeout,
+                        deadline=effective_deadline,
+                    )
+                    pending_futures.append(future_leg1)
+
+            future_leg2 = None
+            if anchors.has_workplace and leg2 is None and anchors.centre and anchors.workplace:
+                rem = _remaining_budget()
+                if rem <= 0.0:
+                    deadline_expired = True
+                    leg2 = _unavailable_negotiated_leg(
+                        from_anchor="centre",
+                        to_anchor="workplace",
+                        message="Evaluation budget exhausted",
+                        reason=build_commute_reason("evaluation_budget_exhausted"),
+                        departure_at=None,
+                    )
+                else:
+                    future_leg2 = executor.submit(
+                        get_negotiated_commute_leg,
+                        from_anchor="centre",
+                        to_anchor="workplace",
+                        start=anchors.centre,
+                        end=anchors.workplace,
+                        mode=mode,
+                        departure=None,
+                        client=client,
+                        timeout=effective_call_timeout,
+                        deadline=effective_deadline,
+                    )
+                    pending_futures.append(future_leg2)
+
+            future_direct = None
+            if (
+                include_direct_baseline
+                and anchors.has_workplace
+                and direct_leg is None
+                and anchors.home
+                and anchors.workplace
+            ):
+                rem = _remaining_budget()
+                if rem <= 0.0:
+                    deadline_expired = True
+                    direct_leg = _unavailable_negotiated_leg(
+                        from_anchor="home",
+                        to_anchor="workplace",
+                        message="Evaluation budget exhausted",
+                        reason=build_commute_reason("evaluation_budget_exhausted"),
+                        departure_at=None,
+                    )
+                else:
+                    future_direct = executor.submit(
+                        get_negotiated_commute_leg,
+                        from_anchor="home",
+                        to_anchor="workplace",
+                        start=anchors.home,
+                        end=anchors.workplace,
+                        mode=mode,
+                        departure=None,
+                        client=client,
+                        timeout=effective_call_timeout,
+                        deadline=effective_deadline,
+                    )
+                    pending_futures.append(future_direct)
+
+            def _collect_non_pt_leg(
+                fut: concurrent.futures.Future[NegotiatedRouteLeg] | None,
+                from_a: AnchorName,
+                to_a: AnchorName,
+            ) -> NegotiatedRouteLeg | None:
+                nonlocal deadline_expired
+                if fut is None:
+                    return None
+                if fut.done():
+                    try:
+                        return fut.result(timeout=0)
+                    except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError, AttributeError, concurrent.futures.CancelledError) as exc:
+                        return _unavailable_negotiated_leg(
+                            from_a,
+                            to_a,
+                            f"Routing error: {exc}",
+                            build_commute_reason("provider_unavailable"),
+                            departure_at=None,
+                        )
+                if deadline_expired:
+                    fut.cancel()
+                    return _unavailable_negotiated_leg(
+                        from_a,
+                        to_a,
+                        "Evaluation budget exhausted",
+                        build_commute_reason("evaluation_budget_exhausted"),
+                        departure_at=None,
+                    )
+                rem = _remaining_budget()
+                if rem <= 0.0:
+                    deadline_expired = True
+                    fut.cancel()
+                    return _unavailable_negotiated_leg(
+                        from_a,
+                        to_a,
+                        "Evaluation budget exhausted",
+                        build_commute_reason("evaluation_budget_exhausted"),
+                        departure_at=None,
+                    )
+                try:
+                    return fut.result(timeout=rem)
+                except (TimeoutError, FutureTimeoutError):
+                    deadline_expired = True
+                    fut.cancel()
+                    return _unavailable_negotiated_leg(
+                        from_a,
+                        to_a,
+                        "Evaluation budget exhausted",
+                        build_commute_reason("evaluation_budget_exhausted"),
+                        departure_at=None,
+                    )
+
+            if future_leg1 is not None and leg1 is None:
+                leg1 = _collect_non_pt_leg(future_leg1, "home", "centre")
+            if future_leg2 is not None and leg2 is None:
+                leg2 = _collect_non_pt_leg(future_leg2, "centre", "workplace")
+            if future_direct is not None and direct_leg is None:
+                direct_leg = _collect_non_pt_leg(future_direct, "home", "workplace")
+
+    finally:
+        for f in pending_futures:
+            if not f.done():
+                f.cancel()
+        if deadline_expired:
+            executor.shutdown(wait=False, cancel_futures=True)
+        else:
+            executor.shutdown(wait=False)
+
+    legs: list[NegotiatedRouteLeg] = []
+    if leg1 is not None:
+        legs.append(leg1)
+    if anchors.has_workplace and leg2 is not None:
         legs.append(leg2)
 
-    totals: RouteTotals | None = None
-    if all(
-        leg.status == "available"
-        and leg.duration_seconds is not None
-        and leg.distance_meters is not None
-        for leg in legs
-    ):
-        totals = RouteTotals(
+    # Via totals and status
+    required_legs = legs
+    available_legs = [l for l in required_legs if l.status == "available"]
+    if len(available_legs) == len(required_legs) and len(required_legs) > 0:
+        via_status: ViaStatus = "available"
+        totals: RouteTotals | None = RouteTotals(
             duration_seconds=sum(
-                leg.duration_seconds for leg in legs if leg.duration_seconds is not None
+                l.duration_seconds
+                for l in required_legs
+                if l.duration_seconds is not None
             ),
             distance_meters=sum(
-                leg.distance_meters for leg in legs if leg.distance_meters is not None
+                l.distance_meters
+                for l in required_legs
+                if l.distance_meters is not None
             ),
         )
+    elif len(available_legs) > 0:
+        via_status = "partial"
+        totals = None
+    else:
+        via_status = "unavailable"
+        totals = None
 
-    return CommuteSample(
+    # Via sample reasons
+    sample_reasons: list[CommuteReason] = []
+    seen_codes: set[str] = set()
+    for l in required_legs:
+        for r in l.reasons:
+            if r.code not in seen_codes:
+                seen_codes.add(r.code)
+                sample_reasons.append(r)
+    if via_status != "available" and not sample_reasons:
+        sample_reasons.append(build_commute_reason("via_centre_incomplete"))
+
+    # Conditions
+    if conditions_id is None:
+        if mode == "pt":
+            conditions_id = (
+                f"pt:{sampled_at.isoformat() if sampled_at else 'default'}"
+            )
+        else:
+            conditions_id = f"{mode}:provider_default"
+
+    expected_options_id = (
+        "onemap_pt_default" if mode == "pt" else f"onemap_{mode}_default"
+    )
+    effective_options_id = provider_options_id or expected_options_id
+
+    conditions = SampleConditions(
+        conditions_id=conditions_id,
+        timing_basis="scheduled_departure" if mode == "pt" else "provider_default",
+        initial_departure_at=sampled_at if mode == "pt" else None,
+        provider_options_id=effective_options_id,
+    )
+
+    # Direct Route
+    if include_direct_baseline and direct_route is None and direct_leg is not None:
+        if direct_leg.status == "available":
+            direct_route = DirectRoute(
+                status="available",
+                legs=[direct_leg],
+                totals=RouteTotals(
+                    duration_seconds=direct_leg.duration_seconds or 0,
+                    distance_meters=direct_leg.distance_meters or 0,
+                ),
+                reasons=[],
+            )
+        else:
+            direct_route = DirectRoute(
+                status="unavailable",
+                legs=[direct_leg],
+                totals=None,
+                reasons=list(direct_leg.reasons),
+            )
+
+    if include_direct_baseline and comparison is None and direct_route is not None:
+        if direct_route.status == "unavailable" or via_status != "available":
+            comp_reasons: list[CommuteReason] = []
+            comp_seen: set[str] = set()
+            if direct_route.status == "unavailable":
+                r_dir = build_commute_reason("direct_unavailable")
+                comp_reasons.append(r_dir)
+                comp_seen.add(r_dir.code)
+                for r in direct_route.reasons:
+                    if r.code not in comp_seen:
+                        comp_reasons.append(r)
+                        comp_seen.add(r.code)
+            if via_status != "available":
+                r_via = build_commute_reason("via_centre_incomplete")
+                if r_via.code not in comp_seen:
+                    comp_reasons.append(r_via)
+                    comp_seen.add(r_via.code)
+                for r in sample_reasons:
+                    if r.code not in comp_seen:
+                        comp_reasons.append(r)
+                        comp_seen.add(r.code)
+            comparison = CommuteComparison(
+                status="unavailable",
+                reasons=comp_reasons,
+                certification=None,
+            )
+        else:
+            # Both available
+            if conditions.provider_options_id != expected_options_id:
+                comparison = CommuteComparison(
+                    status="unavailable",
+                    reasons=[build_commute_reason("conditions_mismatch")],
+                    certification=None,
+                )
+            elif mode == "pt":
+                all_legs_to_verify = list(direct_route.legs) + list(legs)
+                all_elapsed = (
+                    len(all_legs_to_verify) >= 2
+                    and all(
+                        l.timing.duration_basis
+                        == "elapsed_from_requested_departure"
+                        and l.timing.arrival_source
+                        == "provider_end_time"
+                        and l.timing.initial_wait_included is True
+                        for l in all_legs_to_verify
+                    )
+                )
+                if all_elapsed:
+                    comparison = CommuteComparison(
+                        status="available",
+                        reasons=[],
+                        certification=ComparisonCertification(
+                            duration_basis="elapsed_from_requested_departure",
+                            provider_options_id=conditions.provider_options_id,
+                        ),
+                    )
+                else:
+                    comparison = CommuteComparison(
+                        status="unavailable",
+                        reasons=[build_commute_reason("timing_unverified")],
+                        certification=None,
+                    )
+            else:
+                all_legs_to_verify = list(direct_route.legs) + list(legs)
+                all_default_verified = (
+                    len(all_legs_to_verify) >= 2
+                    and all(
+                        l.timing.duration_basis == "provider_default"
+                        and l.timing.arrival_source == "not_applicable"
+                        and l.departure_at is None
+                        and l.arrival_at is None
+                        for l in all_legs_to_verify
+                    )
+                )
+                if all_default_verified:
+                    comparison = CommuteComparison(
+                        status="available",
+                        reasons=[],
+                        certification=ComparisonCertification(
+                            duration_basis="provider_default",
+                            provider_options_id=conditions.provider_options_id,
+                        ),
+                    )
+                else:
+                    comparison = CommuteComparison(
+                        status="unavailable",
+                        reasons=[build_commute_reason("timing_unverified")],
+                        certification=None,
+                    )
+
+    return NegotiatedCommuteSample(
         kind=kind,
         sampled_at=sampled_at,
         legs=legs,
         totals=totals,
+        conditions=conditions,
+        via_status=via_status,
+        reasons=sample_reasons,
+        direct_route=direct_route,
+        comparison=comparison,
     )
 
 
-def build_commute_samples(
+def build_negotiated_commute_samples(
     mode: CommuteMode,
     anchors: CommuteAnchors,
     sample_pair: tuple[datetime, datetime],
+    include_direct_baseline: bool = True,
     client: httpx.Client | None = None,
-) -> list[CommuteSample]:
-    """Orchestrate commute samples based on travel mode and sample pair."""
+    deadline: float | None = None,
+    call_timeout_seconds: float | None = None,
+    evaluation_deadline_seconds: float | None = None,
+    max_workers: int | None = None,
+) -> list[NegotiatedCommuteSample]:
+    """Orchestrate negotiated commute samples based on travel mode, anchors, and direct baseline."""
+    eval_secs = (
+        evaluation_deadline_seconds
+        if evaluation_deadline_seconds is not None
+        else getattr(
+            settings,
+            "COMMUTE_EVALUATION_DEADLINE_SECONDS",
+            COMMUTE_EVALUATION_DEADLINE_SECONDS,
+        )
+    )
+    effective_deadline = (
+        deadline if deadline is not None else (time_module.monotonic() + eval_secs)
+    )
     wednesday_dt, saturday_dt = sample_pair
     if mode == "pt":
-        sample_weekday = build_commute_sample(
+        sample_weekday = build_negotiated_commute_sample(
             kind="weekday",
             sampled_at=wednesday_dt,
             mode="pt",
             anchors=anchors,
+            include_direct_baseline=include_direct_baseline,
             client=client,
+            deadline=effective_deadline,
+            call_timeout_seconds=call_timeout_seconds,
+            evaluation_deadline_seconds=evaluation_deadline_seconds,
+            max_workers=max_workers,
         )
-        sample_weekend = build_commute_sample(
+        sample_weekend = build_negotiated_commute_sample(
             kind="weekend",
             sampled_at=saturday_dt,
             mode="pt",
             anchors=anchors,
+            include_direct_baseline=include_direct_baseline,
             client=client,
+            deadline=effective_deadline,
+            call_timeout_seconds=call_timeout_seconds,
+            evaluation_deadline_seconds=evaluation_deadline_seconds,
+            max_workers=max_workers,
         )
         return [sample_weekday, sample_weekend]
 
-    sample_single = build_commute_sample(
+    sample_single = build_negotiated_commute_sample(
         kind="single",
         sampled_at=None,
         mode=mode,
         anchors=anchors,
+        include_direct_baseline=include_direct_baseline,
         client=client,
+        deadline=effective_deadline,
+        call_timeout_seconds=call_timeout_seconds,
+        evaluation_deadline_seconds=evaluation_deadline_seconds,
+        max_workers=max_workers,
     )
     return [sample_single]
 
 
 __all__ = [
+    "COMMUTE_CALL_TIMEOUT_SECONDS",
+    "COMMUTE_EVALUATION_DEADLINE_SECONDS",
+    "COMMUTE_MAX_WORKERS",
+    "REASON_METADATA",
     "SGT",
     "CommuteAnchors",
+    "CycleValidationResult",
+    "build_allowed_samples",
+    "build_commute_reason",
     "build_commute_sample",
     "build_commute_samples",
+    "build_cycle_conditions_id",
+    "build_evaluation_metadata",
+    "build_negotiated_commute_sample",
+    "build_negotiated_commute_samples",
     "clear_commute_postal_cache",
+    "compute_anchor_revision",
+    "compute_profile_revision",
+    "create_cycle_token",
+    "decode_cycle_token",
     "decode_polyline",
     "get_commute_leg",
+    "get_negotiated_commute_leg",
     "get_next_representative_saturday",
     "get_next_representative_wednesday",
+    "get_primary_wednesday",
     "get_representative_day",
     "get_representative_sample_pair",
     "resolve_commute_postal",
+    "validate_cycle_token",
     "validate_sample_pair",
 ]

@@ -110,7 +110,7 @@ The composite weighted matching score (0% to 100%) calculated as the linear comb
 _Avoid_: Total match, recommendation score, rank score
 
 **Commute Deviation**:
-The additional morning travel time and distance incurred by detouring through a preschool centre relative to the direct baseline morning route from Home to Workplace.
+The signed difference in morning travel time incurred by travelling via a Preschool Centre relative to the direct baseline route from Home to Workplace, supported by travel distance context.
 _Avoid_: Detour delay, detour distance, route overhead
 
 **Estimated Monthly Payable Fee**:
@@ -126,7 +126,7 @@ A personalised journey used in preschool centre details to compare travel from a
 _Avoid_: Navigation, trip plan
 
 **Journey Leg**:
-The portion of a Commute Route between two consecutive stops (`home` to `centre`, or `centre` to `workplace`).
+A distinct portion of a travel route between two consecutive anchors (`home` to `centre`, `centre` to `workplace`, or direct `home` to `workplace`).
 _Avoid_: Segment, hop, stage
 
 **Travel Time Estimate**:
@@ -134,5 +134,9 @@ The estimated duration of travelling along a Commute Route or Journey Leg, exclu
 _Avoid_: Trip duration, total elapsed time
 
 **Representative Weekday/Weekend Estimate**:
-A Travel Time Estimate evaluated for selected sample conditions at 08:00 Singapore time on the next upcoming Wednesday (weekday) or Saturday (weekend) to compare Preschool Centres consistently across a browsing session, rather than an average across all days or departure times.
+A Travel Time Estimate evaluated for legacy sample conditions at 08:00 Singapore time on the next upcoming Wednesday (weekday) or Saturday (weekend) to compare Preschool Centres consistently across a browsing session, rather than an average across all days or departure times.
 _Avoid_: Average commute time, traffic forecast
+
+**Selected Weekday Sampling Policy**:
+A public transport evaluation policy (`weekday_0800_wed_thu_fri_v1`) evaluating a single representative weekday selected from a bounded cycle of upcoming Wednesday, Thursday, or Friday at 08:00 SGT, expiring strictly at the primary Wednesday 08:00 SGT.
+_Avoid_: Weekend sampling, rolling weekday average, dynamic departure query
