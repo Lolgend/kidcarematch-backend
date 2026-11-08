@@ -27,8 +27,8 @@ KidCareMatch provides parents in Singapore with personalized preschool recommend
 
 4. **Two-Stage Spatial Corridor Routing & Deviation Scoring**:
    - To prevent rate limiting and high latency across ~1,500 centres (which would require 3,000+ OneMap HTTP calls per search), candidate evaluation uses a two-stage approach:
-     - **Stage 1 (Corridor Pre-Filter)**: Coordinates for Home, Workplace, and candidate centres are resolved via OneMap with persistent coordinate caching. Candidates are pruned by straight-line distance corridor relative to the direct baseline route.
-     - **Stage 2 (Detour Routing)**: OneMap Routing API (`pt` public transit, falling back to straight-line travel time estimates during external API degradation) evaluates the top ~30 spatial candidates.
+     - **Stage 1 (Corridor Pre-Filter)**: Coordinates for Home, Workplace, and candidate centres are resolved via OneMap with persistent coordinate caching. Candidates are pruned by straight-line distance corridor relative to the direct baseline route down to a bounded candidate pool (`STAGE1_MAX_CANDIDATES = 15`, scaling dynamically to `effective_stage1_cap = max(15, top_n)` when `top_n > 15`).
+     - **Stage 2 (Detour Routing)**: OneMap Routing API (`pt` public transit, falling back to straight-line travel time estimates during external API degradation) evaluates the top spatial candidates.
    - For **Dual-Anchor** (Home + Workplace), Travel Fit evaluates commute delay deviation:
      $$\Delta Time = Time(Home \to Centre) + Time(Centre \to Workplace) - Time(Home \to Workplace)$$
    - For **Single-Anchor** (Home only), Travel Fit evaluates direct physical distance:
@@ -39,7 +39,7 @@ KidCareMatch provides parents in Singapore with personalized preschool recommend
    `FamilyPreferenceProfile` and associated API request/response schemas persist raw integer Importance Ratings in `vacancy_weight`, `cost_weight`, and `travel_weight` ($1$ through $5$ inclusive, defaulting to $3, 3, 3$) alongside `applicant_status` (defaulting to `WORKING_APPLICANT`). Both profile-linked and inline `POST /api/v1/centres/match` requests accept `1`–`5` integer ratings and derive normalized Effective Matching Weights once for scoring and AI explanation generation.
 
 6. **Gemini AI Explanation with Resilient Fallback**:
-   Top recommendation explanations are powered by `gemini-2.5-flash` using `google-genai` and `GEMINI_API_KEY`. Gemini generates a synthesized rationale explaining why Centre #1 achieved the top rank, plus a concise one-line highlight for each top candidate. If the Gemini API call times out or encounters network/quota errors, the service falls back to a deterministic structured template, guaranteeing zero matching API failures.
+   Top recommendation explanations are powered by `gemini-2.5-flash` using `google-genai` and `GEMINI_API_KEY`. Gemini generates a synthesized narrative explaining multi-criteria search trade-offs (`summary_narrative`), a deep-dive rationale explaining why Centre #1 achieved the top rank (`top_centre_rationale`), a comparative rationale explaining why the shortlisted candidates are ordered in their specific sequence (`ranking_rationale`), and concise one-line highlights for each shortlisted candidate (`candidate_highlights`). If the Gemini API call times out or encounters network/quota errors, the service falls back to a deterministic structured template (setting `fallback_used = True`), guaranteeing zero matching API failures.
 
 7. **Matching REST API Endpoint**:
-   `POST /api/v1/centres/match` supports both profile-linked matching (`profile_id`) and ad-hoc simulation payloads, returning the top $N$ candidates (default 5, maximum 20) with scoring metrics, breakdown components, and the AI explanation.
+   `POST /api/v1/centres/match` supports both profile-linked matching (`profile_id`) and ad-hoc simulation payloads, returning the top $N$ candidates (default 6, maximum 20) with scoring metrics, breakdown components, and the AI explanation (`FitExplanationResponse`).
