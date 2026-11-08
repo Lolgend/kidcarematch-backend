@@ -198,11 +198,12 @@ def warm_verified_postal_from_db(postal: str, lat: float, lng: float) -> None:
 
 
 def clear_commute_postal_cache() -> None:
-    """Clear in-memory cache of verified postal resolutions (useful for test isolation)."""
+    """Clear in-memory caches of verified postal resolutions and route legs (useful for test isolation)."""
     with _commute_postal_lock:
         _COMMUTE_POSTAL_CACHE.clear()
         _VERIFIED_POSTAL_CODES.clear()
         _commute_postal_in_flight.clear()
+    _COMMUTE_ROUTE_CACHE.clear()
 
 
 def clear_commute_route_cache() -> None:

@@ -36,6 +36,7 @@ class BoundedTTLCacheWithCoalescing(Generic[K, V]):
         self._maxsize = maxsize
         self._ttl = ttl
         self._lock = threading.Lock()
+        self._generation: int = 0
         self._cache: collections.OrderedDict[K, tuple[float, V]] = (
             collections.OrderedDict()
         )
@@ -55,6 +56,7 @@ class BoundedTTLCacheWithCoalescing(Generic[K, V]):
         """
         now = time.monotonic()
         with self._lock:
+            gen = self._generation
             # 1. Check existing cache entry
             if key in self._cache:
                 expires_at, cached_val = self._cache[key]
@@ -89,18 +91,20 @@ class BoundedTTLCacheWithCoalescing(Generic[K, V]):
         except Exception as exc:
             with self._lock:
                 flight.exception = exc
-                self._in_flight.pop(key, None)
+                if self._in_flight.get(key) is flight:
+                    self._in_flight.pop(key, None)
                 flight.event.set()
             raise
 
         with self._lock:
-            if is_cacheable:
+            if is_cacheable and self._generation == gen:
                 self._cache[key] = (time.monotonic() + self._ttl, result)
                 if len(self._cache) > self._maxsize:
                     self._cache.popitem(last=False)
             flight.result = result
             flight.cacheable = is_cacheable
-            self._in_flight.pop(key, None)
+            if self._in_flight.get(key) is flight:
+                self._in_flight.pop(key, None)
             flight.event.set()
 
         return result
@@ -108,5 +112,6 @@ class BoundedTTLCacheWithCoalescing(Generic[K, V]):
     def clear(self) -> None:
         """Clear all cached entries and in-flight tracking."""
         with self._lock:
+            self._generation += 1
             self._cache.clear()
             self._in_flight.clear()

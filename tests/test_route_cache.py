@@ -209,3 +209,31 @@ def test_clear_resets_cache_and_in_flight():
     # After clear(), next call recomputes
     assert cache.get_or_compute("k1", compute) == "v1"
     assert calls == 2
+
+
+def test_clear_prevents_in_flight_leader_from_polluting_cache() -> None:
+    cache: BoundedTTLCacheWithCoalescing[str, str] = BoundedTTLCacheWithCoalescing(
+        maxsize=10, ttl=60.0
+    )
+    entered = threading.Event()
+    proceed = threading.Event()
+
+    def stale_compute() -> tuple[str, bool]:
+        entered.set()
+        proceed.wait(timeout=2.0)
+        return "stale-val", True
+
+    t = threading.Thread(target=lambda: cache.get_or_compute("k1", stale_compute))
+    t.start()
+    assert entered.wait(timeout=2.0)
+
+    # Clear cache while leader is still in flight
+    cache.clear()
+    proceed.set()
+    t.join(timeout=2.0)
+
+    # Stale leader must not have populated the cache after clear()
+    fresh_res = cache.get_or_compute("k1", lambda: ("fresh-val", True))
+    assert fresh_res == "fresh-val"
+
+    assert calls == 2
