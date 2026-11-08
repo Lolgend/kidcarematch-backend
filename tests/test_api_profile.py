@@ -143,9 +143,9 @@ def valid_profile_payload(**overrides) -> dict:
         "household_member_count": 4,
         "budget_max": 1200.0,
         "enrollment_month_year": "2027-03",
-        "vacancy_weight": 0.4,
-        "cost_weight": 0.3,
-        "travel_weight": 0.3,
+        "vacancy_weight": 3,
+        "cost_weight": 3,
+        "travel_weight": 3,
         "applicant_status": "WORKING_APPLICANT",
     }
     payload.update(overrides)
@@ -181,9 +181,9 @@ def test_create_profile_success(client: TestClient, sample_parent: User, test_en
     assert data["household_member_count"] == 4
     assert data["budget_max"] == 1200.0
     assert data["enrollment_month_year"] == "2027-03"
-    assert data["vacancy_weight"] == 0.4
-    assert data["cost_weight"] == 0.3
-    assert data["travel_weight"] == 0.3
+    assert data["vacancy_weight"] == 3
+    assert data["cost_weight"] == 3
+    assert data["travel_weight"] == 3
     assert data["applicant_status"] == "WORKING_APPLICANT"
 
     # Verify persistence in database and UTC datetime normalization
@@ -195,9 +195,9 @@ def test_create_profile_success(client: TestClient, sample_parent: User, test_en
         assert profile.enrollment_month_year.year == 2027
         assert profile.enrollment_month_year.month == 3
         assert profile.enrollment_month_year.day == 1
-        assert profile.vacancy_weight == 0.4
-        assert profile.cost_weight == 0.3
-        assert profile.travel_weight == 0.3
+        assert profile.vacancy_weight == 3
+        assert profile.cost_weight == 3
+        assert profile.travel_weight == 3
         assert profile.applicant_status == ApplicantStatus.WORKING_APPLICANT
 
 
@@ -334,36 +334,47 @@ def test_create_profile_location_preference_home_without_workplace_postal_succee
 
 
 @pytest.mark.parametrize(
-    "cost_w, travel_w",
+    "vacancy_w, cost_w, travel_w",
     [
-        (0.5, 0.6),  # Sum with vacancy 0.4 = 1.5 != 1.0
-        (0.3, 0.4),  # Sum with vacancy 0.4 = 1.1 != 1.0
-        (0.0, 0.9),  # Sum = 0.9
-        (1.0, 0.1),  # Sum = 1.1
+        (1, 1, 1),
+        (3, 3, 3),
+        (5, 5, 5),
+        (5, 5, 1),
     ],
 )
-def test_create_profile_weights_not_summing_to_one_returns_422(
-    client: TestClient, sample_parent: User, cost_w: float, travel_w: float
+def test_create_profile_independent_importance_ratings_success(
+    client: TestClient, sample_parent: User, vacancy_w: int, cost_w: int, travel_w: int
 ):
-    """Cost and travel weights must sum to 1.0; otherwise returns HTTP 422."""
+    """Independent 1-5 integer ratings (tied or skewed) succeed without sum-to-1.0 requirement."""
     set_mock_auth(sample_parent)
-    payload = valid_profile_payload(cost_weight=cost_w, travel_weight=travel_w)
+    payload = valid_profile_payload(
+        profile_name=f"Profile {vacancy_w}-{cost_w}-{travel_w}",
+        vacancy_weight=vacancy_w,
+        cost_weight=cost_w,
+        travel_weight=travel_w,
+    )
     response = client.post("/api/v1/profile", json=payload)
-    assert response.status_code == 422
-    assert "1.0" in response.text
+    assert response.status_code == 201
+    data = response.json()
+    assert data["vacancy_weight"] == vacancy_w
+    assert data["cost_weight"] == cost_w
+    assert data["travel_weight"] == travel_w
 
 
 @pytest.mark.parametrize(
     "cost_w, travel_w",
     [
-        (-0.1, 1.1),  # sum=1.0 but out of bounds
-        (1.2, -0.2),
+        (0, 3),
+        (6, 3),
+        (-1, 3),
+        (3, 0),
+        (3, 6),
     ],
 )
 def test_create_profile_weights_out_of_bounds_returns_422(
-    client: TestClient, sample_parent: User, cost_w: float, travel_w: float
+    client: TestClient, sample_parent: User, cost_w: int, travel_w: int
 ):
-    """Weights out of [0.0, 1.0] interval return HTTP 422."""
+    """Weights out of [1, 5] integer interval return HTTP 422."""
     set_mock_auth(sample_parent)
     payload = valid_profile_payload(cost_weight=cost_w, travel_weight=travel_w)
     response = client.post("/api/v1/profile", json=payload)
@@ -463,8 +474,8 @@ def test_database_level_composite_uniqueness(test_engine, sample_parent: User):
             household_member_count=3,
             budget_max=1000.0,
             enrollment_month_year=datetime(2027, 3, 1, 0, 0, 0, tzinfo=timezone.utc),
-            cost_weight=0.5,
-            travel_weight=0.5,
+            cost_weight=3,
+            travel_weight=3,
         )
         session.add(p1)
         session.commit()
@@ -481,8 +492,8 @@ def test_database_level_composite_uniqueness(test_engine, sample_parent: User):
             household_member_count=3,
             budget_max=1000.0,
             enrollment_month_year=datetime(2027, 4, 1, 0, 0, 0, tzinfo=timezone.utc),
-            cost_weight=0.5,
-            travel_weight=0.5,
+            cost_weight=3,
+            travel_weight=3,
         )
         session.add(p2)
         with pytest.raises(IntegrityError):
@@ -605,9 +616,9 @@ def test_get_single_profile_success(client: TestClient, sample_parent: User):
     assert data["household_member_count"] == 4
     assert data["budget_max"] == 1200.0
     assert data["enrollment_month_year"] == "2027-03"
-    assert data["vacancy_weight"] == 0.4
-    assert data["cost_weight"] == 0.3
-    assert data["travel_weight"] == 0.3
+    assert data["vacancy_weight"] == 3
+    assert data["cost_weight"] == 3
+    assert data["travel_weight"] == 3
     assert data["applicant_status"] == "WORKING_APPLICANT"
 
 
@@ -687,9 +698,9 @@ def test_put_profile_success(client: TestClient, sample_parent: User, test_engin
         "household_member_count": 5,
         "budget_max": 1800.0,
         "enrollment_month_year": "2027-06",
-        "vacancy_weight": 0.2,
-        "cost_weight": 0.3,
-        "travel_weight": 0.5,
+        "vacancy_weight": 2,
+        "cost_weight": 3,
+        "travel_weight": 5,
         "applicant_status": "NON_WORKING_APPLICANT",
     }
 
@@ -710,9 +721,9 @@ def test_put_profile_success(client: TestClient, sample_parent: User, test_engin
     assert data["household_member_count"] == 5
     assert data["budget_max"] == 1800.0
     assert data["enrollment_month_year"] == "2027-06"
-    assert data["vacancy_weight"] == 0.2
-    assert data["cost_weight"] == 0.3
-    assert data["travel_weight"] == 0.5
+    assert data["vacancy_weight"] == 2
+    assert data["cost_weight"] == 3
+    assert data["travel_weight"] == 5
     assert data["applicant_status"] == "NON_WORKING_APPLICANT"
 
     # Verify persistence in database
@@ -723,9 +734,9 @@ def test_put_profile_success(client: TestClient, sample_parent: User, test_engin
         assert profile.level == PreschoolLevel.PG
         assert profile.enrollment_month_year.year == 2027
         assert profile.enrollment_month_year.month == 6
-        assert profile.vacancy_weight == 0.2
-        assert profile.cost_weight == 0.3
-        assert profile.travel_weight == 0.5
+        assert profile.vacancy_weight == 2
+        assert profile.cost_weight == 3
+        assert profile.travel_weight == 5
         assert profile.applicant_status == ApplicantStatus.NON_WORKING_APPLICANT
 
 
@@ -826,7 +837,8 @@ def test_put_profile_other_user_returns_404(
         ("home_postal_code", "ABCDEF"),
         ("workplace_postal_code", "999"),
         ("location_preference", "WORKPLACE"),  # without workplace postal
-        ("cost_weight", 0.7),  # sum = 0.7 + 0.4 = 1.1 != 1.0
+        ("cost_weight", 6),  # out of bounds > 5
+        ("cost_weight", 0),  # out of bounds < 1
         ("enrollment_month_year", "2027-13"),
         ("enrollment_month_year", "2027/03"),
         ("household_income", -10.0),
@@ -912,9 +924,9 @@ def test_patch_profile_budget_max_success(
     # Original fields preserved
     assert data["profile_name"] == "Infant Liam"
     assert data["household_income"] == 8500.0
-    assert data["vacancy_weight"] == 0.4
-    assert data["cost_weight"] == 0.3
-    assert data["travel_weight"] == 0.3
+    assert data["vacancy_weight"] == 3
+    assert data["cost_weight"] == 3
+    assert data["travel_weight"] == 3
     assert data["applicant_status"] == "WORKING_APPLICANT"
 
     with Session(test_engine) as session:
@@ -943,63 +955,68 @@ def test_patch_profile_income_and_members_success(
 
 
 def test_patch_profile_weights_pair_success(client: TestClient, sample_parent: User):
-    """PATCH updating both cost_weight and travel_weight summing to 1.0 succeeds."""
+    """PATCH updating multiple weights succeeds independently."""
     set_mock_auth(sample_parent)
     create_res = client.post(
         "/api/v1/profile",
-        json=valid_profile_payload(vacancy_weight=0.4, cost_weight=0.3, travel_weight=0.3),
+        json=valid_profile_payload(vacancy_weight=3, cost_weight=3, travel_weight=3),
     )
     assert create_res.status_code == 201
     profile_id = create_res.json()["profile_id"]
 
     patch_res = client.patch(
         f"/api/v1/profile/{profile_id}",
-        json={"cost_weight": 0.4, "travel_weight": 0.2},
+        json={"cost_weight": 4, "travel_weight": 2},
     )
     assert patch_res.status_code == 200
     data = patch_res.json()
-    assert data["vacancy_weight"] == 0.4
-    assert data["cost_weight"] == 0.4
-    assert data["travel_weight"] == 0.2
+    assert data["vacancy_weight"] == 3
+    assert data["cost_weight"] == 4
+    assert data["travel_weight"] == 2
 
 
-def test_patch_profile_single_weight_merged_sum_invalid_returns_422(
+def test_patch_profile_single_weight_independent_success(
     client: TestClient, sample_parent: User
 ):
-    """PATCH updating one weight such that merged sum != 1.0 returns HTTP 422."""
+    """PATCH updating one weight independently succeeds without sum-to-1.0 requirement."""
     set_mock_auth(sample_parent)
     create_res = client.post(
         "/api/v1/profile",
-        json=valid_profile_payload(vacancy_weight=0.4, cost_weight=0.3, travel_weight=0.3),
+        json=valid_profile_payload(vacancy_weight=3, cost_weight=3, travel_weight=3),
     )
     assert create_res.status_code == 201
     profile_id = create_res.json()["profile_id"]
 
-    # Existing travel_weight is 0.3, vacancy_weight is 0.4. Patching cost_weight to 0.9 makes sum = 1.6
-    patch_res = client.patch(f"/api/v1/profile/{profile_id}", json={"cost_weight": 0.9})
-    assert patch_res.status_code == 422
-    assert "1.0" in patch_res.text
-
-
-def test_patch_profile_single_weight_merged_sum_valid_success(
-    client: TestClient, sample_parent: User
-):
-    """PATCH updating one weight where merged sum equals 1.0 succeeds."""
-    set_mock_auth(sample_parent)
-    # Create with 0.4, 0.3, 0.3
-    create_res = client.post(
-        "/api/v1/profile",
-        json=valid_profile_payload(vacancy_weight=0.4, cost_weight=0.3, travel_weight=0.3),
-    )
-    assert create_res.status_code == 201
-    profile_id = create_res.json()["profile_id"]
-
-    # Existing cost_weight is 0.3, vacancy_weight is 0.4. Patching travel_weight to 0.3 keeps sum = 1.0
-    patch_res = client.patch(
-        f"/api/v1/profile/{profile_id}", json={"travel_weight": 0.3}
-    )
+    # Existing cost_weight is 3, vacancy_weight is 3. Patching travel_weight to 5 succeeds independently
+    patch_res = client.patch(f"/api/v1/profile/{profile_id}", json={"travel_weight": 5})
     assert patch_res.status_code == 200
-    assert patch_res.json()["travel_weight"] == 0.3
+    data = patch_res.json()
+    assert data["vacancy_weight"] == 3
+    assert data["cost_weight"] == 3
+    assert data["travel_weight"] == 5
+
+
+def test_patch_profile_single_weight_out_of_bounds_returns_422(
+    client: TestClient, sample_parent: User
+):
+    """PATCH updating weight out of [1, 5] integer interval returns HTTP 422."""
+    set_mock_auth(sample_parent)
+    create_res = client.post(
+        "/api/v1/profile",
+        json=valid_profile_payload(vacancy_weight=3, cost_weight=3, travel_weight=3),
+    )
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}", json={"travel_weight": 6}
+    )
+    assert patch_res.status_code == 422
+
+    patch_res_0 = client.patch(
+        f"/api/v1/profile/{profile_id}", json={"travel_weight": 0}
+    )
+    assert patch_res_0.status_code == 422
 
 
 def test_patch_profile_location_pref_workplace_missing_postal_returns_422(
@@ -1178,8 +1195,11 @@ def test_patch_profile_other_user_returns_404(
         {"workplace_postal_code": "invalid"},
         {"enrollment_month_year": "2027-13"},
         {"enrollment_month_year": "invalid-date"},
-        {"cost_weight": -0.1},
-        {"cost_weight": 1.2},
+        {"cost_weight": 0},
+        {"cost_weight": 6},
+        {"cost_weight": 0.4},
+        {"cost_weight": "3"},
+        {"cost_weight": True},
     ],
 )
 def test_patch_profile_field_validations_return_422(
@@ -1342,8 +1362,8 @@ def test_cascade_delete_user_removes_preference_profiles(
             household_member_count=3,
             budget_max=1000.0,
             enrollment_month_year=datetime(2027, 5, 1, tzinfo=timezone.utc),
-            cost_weight=0.5,
-            travel_weight=0.5,
+            cost_weight=3,
+            travel_weight=3,
         )
         p2 = FamilyPreferenceProfile(
             profile_id="cascade-prof-2",
@@ -1358,8 +1378,8 @@ def test_cascade_delete_user_removes_preference_profiles(
             household_member_count=3,
             budget_max=800.0,
             enrollment_month_year=datetime(2027, 8, 1, tzinfo=timezone.utc),
-            cost_weight=0.5,
-            travel_weight=0.5,
+            cost_weight=3,
+            travel_weight=3,
         )
         session.add_all([p1, p2])
         session.commit()
@@ -1487,24 +1507,20 @@ def test_profile_helper_functions(test_engine):
     dt = parse_year_month("2028-09")
     assert dt == datetime(2028, 9, 1, 0, 0, 0, tzinfo=timezone.utc)
 
-    # 2. validate_location_and_weights
+    # 2. validate_location_preference and validate_location_and_weights
+    from kidcarematch_backend.schemas.profile import validate_location_preference
+
     with pytest.raises(ValueError, match="Workplace postal code is required"):
-        validate_location_and_weights(
+        validate_location_preference(
             location_preference=LocationPreference.WORKPLACE,
             workplace_postal_code=None,
-            vacancy_weight=0.4,
-            cost_weight=0.3,
-            travel_weight=0.3,
         )
 
-    with pytest.raises(ValueError, match="sum to 1.0"):
-        validate_location_and_weights(
-            location_preference=LocationPreference.HOME,
-            workplace_postal_code=None,
-            vacancy_weight=0.4,
-            cost_weight=0.6,
-            travel_weight=0.6,
-        )
+    # validate_location_and_weights backwards compatibility wrapper
+    validate_location_and_weights(
+        location_preference=LocationPreference.HOME,
+        workplace_postal_code=None,
+    )
 
     # 3. get_profile_or_404
     with Session(test_engine) as session:
@@ -1534,7 +1550,7 @@ def test_unexpected_integrity_error_re_raised(client: TestClient, sample_parent:
 def test_create_profile_with_3_factor_weights_and_applicant_status_defaults(
     client: TestClient, sample_parent: User, test_engine
 ):
-    """POST /api/v1/profile omitting weights & applicant_status uses 0.40, 0.30, 0.30, and WORKING_APPLICANT."""
+    """POST /api/v1/profile omitting weights & applicant_status uses 3, 3, 3, and WORKING_APPLICANT."""
     set_mock_auth(sample_parent)
     payload = valid_profile_payload(profile_name="Weights Default Scenario")
     payload.pop("cost_weight", None)
@@ -1545,17 +1561,17 @@ def test_create_profile_with_3_factor_weights_and_applicant_status_defaults(
     response = client.post("/api/v1/profile", json=payload)
     assert response.status_code == 201, response.text
     data = response.json()
-    assert data["vacancy_weight"] == 0.40
-    assert data["cost_weight"] == 0.30
-    assert data["travel_weight"] == 0.30
+    assert data["vacancy_weight"] == 3
+    assert data["cost_weight"] == 3
+    assert data["travel_weight"] == 3
     assert data["applicant_status"] == "WORKING_APPLICANT"
 
     with Session(test_engine) as session:
         profile = session.get(FamilyPreferenceProfile, data["profile_id"])
         assert profile is not None
-        assert profile.vacancy_weight == 0.40
-        assert profile.cost_weight == 0.30
-        assert profile.travel_weight == 0.30
+        assert profile.vacancy_weight == 3
+        assert profile.cost_weight == 3
+        assert profile.travel_weight == 3
         assert profile.applicant_status == ApplicantStatus.WORKING_APPLICANT
 
 
@@ -1566,42 +1582,44 @@ def test_create_profile_with_custom_3_factor_weights_and_applicant_status(
     set_mock_auth(sample_parent)
     payload = valid_profile_payload(
         profile_name="Custom 3-Factor Scenario",
-        vacancy_weight=0.50,
-        cost_weight=0.20,
-        travel_weight=0.30,
+        vacancy_weight=5,
+        cost_weight=4,
+        travel_weight=2,
         applicant_status="NON_WORKING_APPLICANT",
     )
 
     response = client.post("/api/v1/profile", json=payload)
     assert response.status_code == 201, response.text
     data = response.json()
-    assert data["vacancy_weight"] == 0.50
-    assert data["cost_weight"] == 0.20
-    assert data["travel_weight"] == 0.30
+    assert data["vacancy_weight"] == 5
+    assert data["cost_weight"] == 4
+    assert data["travel_weight"] == 2
     assert data["applicant_status"] == "NON_WORKING_APPLICANT"
 
     with Session(test_engine) as session:
         profile = session.get(FamilyPreferenceProfile, data["profile_id"])
         assert profile is not None
-        assert profile.vacancy_weight == 0.50
-        assert profile.cost_weight == 0.20
-        assert profile.travel_weight == 0.30
+        assert profile.vacancy_weight == 5
+        assert profile.cost_weight == 4
+        assert profile.travel_weight == 2
         assert profile.applicant_status == ApplicantStatus.NON_WORKING_APPLICANT
 
 
 @pytest.mark.parametrize(
     "v_weight, c_weight, t_weight",
     [
-        (0.4, 0.4, 0.4),  # sum = 1.2
-        (0.2, 0.2, 0.2),  # sum = 0.6
-        (0.0, 0.0, 0.0),  # sum = 0.0
-        (0.5, 0.5, 0.5),  # sum = 1.5
+        (0, 3, 3),
+        (6, 3, 3),
+        (3, 0, 3),
+        (3, 6, 3),
+        (3, 3, 0),
+        (3, 3, 6),
     ],
 )
-def test_create_profile_3_factor_weights_not_summing_to_one_returns_422(
-    client: TestClient, sample_parent: User, v_weight: float, c_weight: float, t_weight: float
+def test_create_profile_3_factor_weights_out_of_range_returns_422(
+    client: TestClient, sample_parent: User, v_weight: int, c_weight: int, t_weight: int
 ):
-    """POST /api/v1/profile rejecting weights whose rounded sum != 1.0 with HTTP 422."""
+    """POST /api/v1/profile rejecting weights outside [1, 5] with HTTP 422."""
     set_mock_auth(sample_parent)
     payload = valid_profile_payload(
         vacancy_weight=v_weight,
@@ -1610,7 +1628,6 @@ def test_create_profile_3_factor_weights_not_summing_to_one_returns_422(
     )
     response = client.post("/api/v1/profile", json=payload)
     assert response.status_code == 422
-    assert "1.0" in response.text
 
 
 def test_create_profile_invalid_applicant_status_returns_422(
@@ -1630,9 +1647,9 @@ def test_get_profile_serializes_3_factor_weights_and_applicant_status(
     set_mock_auth(sample_parent)
     payload = valid_profile_payload(
         profile_name="Serialization Check",
-        vacancy_weight=0.50,
-        cost_weight=0.25,
-        travel_weight=0.25,
+        vacancy_weight=5,
+        cost_weight=2,
+        travel_weight=2,
         applicant_status="NON_WORKING_APPLICANT",
     )
     create_res = client.post("/api/v1/profile", json=payload)
@@ -1642,9 +1659,9 @@ def test_get_profile_serializes_3_factor_weights_and_applicant_status(
     get_res = client.get(f"/api/v1/profile/{profile_id}")
     assert get_res.status_code == 200
     data = get_res.json()
-    assert data["vacancy_weight"] == 0.50
-    assert data["cost_weight"] == 0.25
-    assert data["travel_weight"] == 0.25
+    assert data["vacancy_weight"] == 5
+    assert data["cost_weight"] == 2
+    assert data["travel_weight"] == 2
     assert data["applicant_status"] == "NON_WORKING_APPLICANT"
 
 
@@ -1659,75 +1676,76 @@ def test_put_profile_updates_3_factor_weights_and_applicant_status(
 
     put_payload = valid_profile_payload(
         profile_name="Updated 3-Factor",
-        vacancy_weight=0.60,
-        cost_weight=0.20,
-        travel_weight=0.20,
+        vacancy_weight=5,
+        cost_weight=4,
+        travel_weight=1,
         applicant_status="NON_WORKING_APPLICANT",
     )
     put_res = client.put(f"/api/v1/profile/{profile_id}", json=put_payload)
     assert put_res.status_code == 200
     data = put_res.json()
-    assert data["vacancy_weight"] == 0.60
-    assert data["cost_weight"] == 0.20
-    assert data["travel_weight"] == 0.20
+    assert data["vacancy_weight"] == 5
+    assert data["cost_weight"] == 4
+    assert data["travel_weight"] == 1
     assert data["applicant_status"] == "NON_WORKING_APPLICANT"
 
     with Session(test_engine) as session:
         profile = session.get(FamilyPreferenceProfile, profile_id)
         assert profile is not None
-        assert profile.vacancy_weight == 0.60
-        assert profile.cost_weight == 0.20
-        assert profile.travel_weight == 0.20
+        assert profile.vacancy_weight == 5
+        assert profile.cost_weight == 4
+        assert profile.travel_weight == 1
         assert profile.applicant_status == ApplicantStatus.NON_WORKING_APPLICANT
 
 
 def test_patch_profile_weights_3_factor_merged_sum_success(
     client: TestClient, sample_parent: User
 ):
-    """PATCH updating weights where merged 3-factor sum == 1.0 succeeds."""
+    """PATCH updating weights independently succeeds."""
     set_mock_auth(sample_parent)
     payload = valid_profile_payload(
-        vacancy_weight=0.40,
-        cost_weight=0.30,
-        travel_weight=0.30,
+        vacancy_weight=3,
+        cost_weight=3,
+        travel_weight=3,
     )
     create_res = client.post("/api/v1/profile", json=payload)
     assert create_res.status_code == 201
     profile_id = create_res.json()["profile_id"]
 
-    # Patch cost_weight=0.40 and travel_weight=0.20 (vacancy_weight remains 0.40; 0.40+0.40+0.20=1.0)
     patch_res = client.patch(
         f"/api/v1/profile/{profile_id}",
-        json={"cost_weight": 0.40, "travel_weight": 0.20},
+        json={"cost_weight": 4, "travel_weight": 2},
     )
     assert patch_res.status_code == 200
     data = patch_res.json()
-    assert data["vacancy_weight"] == 0.40
-    assert data["cost_weight"] == 0.40
-    assert data["travel_weight"] == 0.20
+    assert data["vacancy_weight"] == 3
+    assert data["cost_weight"] == 4
+    assert data["travel_weight"] == 2
 
 
-def test_patch_profile_weights_3_factor_merged_sum_invalid_returns_422(
+def test_patch_profile_weights_single_factor_success(
     client: TestClient, sample_parent: User
 ):
-    """PATCH updating single weight making merged 3-factor sum != 1.0 returns 422."""
+    """PATCH updating single weight independently succeeds without sum-to-1.0 requirement."""
     set_mock_auth(sample_parent)
     payload = valid_profile_payload(
-        vacancy_weight=0.40,
-        cost_weight=0.30,
-        travel_weight=0.30,
+        vacancy_weight=3,
+        cost_weight=3,
+        travel_weight=3,
     )
     create_res = client.post("/api/v1/profile", json=payload)
     assert create_res.status_code == 201
     profile_id = create_res.json()["profile_id"]
 
-    # Patch vacancy_weight=0.70 (merged sum = 0.70 + 0.30 + 0.30 = 1.30 != 1.0)
     patch_res = client.patch(
         f"/api/v1/profile/{profile_id}",
-        json={"vacancy_weight": 0.70},
+        json={"vacancy_weight": 5},
     )
-    assert patch_res.status_code == 422
-    assert "1.0" in patch_res.text
+    assert patch_res.status_code == 200
+    data = patch_res.json()
+    assert data["vacancy_weight"] == 5
+    assert data["cost_weight"] == 3
+    assert data["travel_weight"] == 3
 
 
 def test_patch_profile_applicant_status_success(

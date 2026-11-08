@@ -543,9 +543,9 @@ def test_profile_match_success(client: TestClient, sample_parent: User, test_eng
             household_member_count=3,
             budget_max=1200.0,
             enrollment_month_year=datetime(2026, 6, 1, tzinfo=timezone.utc),
-            vacancy_weight=0.50,
-            cost_weight=0.30,
-            travel_weight=0.20,
+            vacancy_weight=3,
+            cost_weight=3,
+            travel_weight=3,
             applicant_status=ApplicantStatus.WORKING_APPLICANT,
         )
         session.add(profile)
@@ -1404,9 +1404,9 @@ def test_match_profile_linked_end_to_end_fee_and_cost_fit(
             household_member_count=3,
             budget_max=100.0,
             enrollment_month_year=datetime(2026, 6, 1, tzinfo=timezone.utc),
-            vacancy_weight=0.50,
-            cost_weight=0.30,
-            travel_weight=0.20,
+            vacancy_weight=3,
+            cost_weight=3,
+            travel_weight=3,
             applicant_status=ApplicantStatus.WORKING_APPLICANT,
         )
         session.add(profile)

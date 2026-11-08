@@ -196,6 +196,9 @@ class User(SQLModel, table=True):
 class FamilyPreferenceProfile(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("user_id", "profile_name", name="uq_family_profile_user_profile_name"),
+        CheckConstraint("vacancy_weight >= 1 AND vacancy_weight <= 5", name="ck_family_profile_vacancy_weight_1_to_5"),
+        CheckConstraint("cost_weight >= 1 AND cost_weight <= 5", name="ck_family_profile_cost_weight_1_to_5"),
+        CheckConstraint("travel_weight >= 1 AND travel_weight <= 5", name="ck_family_profile_travel_weight_1_to_5"),
     )
 
     profile_id: str | None = Field(
@@ -214,12 +217,23 @@ class FamilyPreferenceProfile(SQLModel, table=True):
     household_member_count: int = Field()
     budget_max: float = Field()
     enrollment_month_year: datetime = Field()
-    vacancy_weight: float = Field(default=0.40)
-    cost_weight: float = Field(default=0.30)
-    travel_weight: float = Field(default=0.30)
+    vacancy_weight: int = Field(default=3, ge=1, le=5)
+    cost_weight: int = Field(default=3, ge=1, le=5)
+    travel_weight: int = Field(default=3, ge=1, le=5)
     applicant_status: ApplicantStatus = Field(default=ApplicantStatus.WORKING_APPLICANT)
 
     user: User | None = Relationship(back_populates="preference_profiles")
+
+    @field_validator("vacancy_weight", "cost_weight", "travel_weight")
+    @classmethod
+    def validate_importance_ratings(cls, v: Any) -> int:
+        if isinstance(v, bool) or not isinstance(v, int) or not (1 <= v <= 5):
+            raise ValueError("Importance rating must be an integer between 1 and 5")
+        return v
+
+    @validates("vacancy_weight", "cost_weight", "travel_weight")
+    def _validate_importance_ratings_sa(self, key: str, value: Any) -> int:
+        return self.validate_importance_ratings(value)
 
 
 class Review(SQLModel, table=True):

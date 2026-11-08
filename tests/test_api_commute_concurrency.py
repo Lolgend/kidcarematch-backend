@@ -128,9 +128,9 @@ def create_profile(
             household_member_count=3,
             budget_max=1600.0,
             enrollment_month_year=datetime(2026, 6, 1, tzinfo=timezone.utc),
-            vacancy_weight=0.4,
-            cost_weight=0.3,
-            travel_weight=0.3,
+            vacancy_weight=3,
+            cost_weight=3,
+            travel_weight=3,
         )
         session.add(p)
         session.commit()

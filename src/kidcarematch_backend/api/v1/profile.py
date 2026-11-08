@@ -18,7 +18,7 @@ from kidcarematch_backend.schemas.profile import (
     ProfileResponse,
     ProfileUpdateRequest,
     parse_year_month,
-    validate_location_and_weights,
+    validate_location_preference,
 )
 
 router = APIRouter(prefix="/api/v1/profile", tags=["profile"])
@@ -292,21 +292,11 @@ def patch_profile(
     merged_workplace_postal = patch_data.get(
         "workplace_postal_code", existing_profile.workplace_postal_code
     )
-    merged_vacancy_weight = patch_data.get(
-        "vacancy_weight", existing_profile.vacancy_weight
-    )
-    merged_cost_weight = patch_data.get("cost_weight", existing_profile.cost_weight)
-    merged_travel_weight = patch_data.get(
-        "travel_weight", existing_profile.travel_weight
-    )
 
     try:
-        validate_location_and_weights(
+        validate_location_preference(
             location_preference=merged_location_pref,
             workplace_postal_code=merged_workplace_postal,
-            vacancy_weight=merged_vacancy_weight,
-            cost_weight=merged_cost_weight,
-            travel_weight=merged_travel_weight,
         )
     except ValueError as exc:
         raise HTTPException(
