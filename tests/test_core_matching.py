@@ -239,14 +239,14 @@ def setup_matching_onemap_mock(
 
 
 # ==============================================================================
-# Spec Fix 1: Candidate Pool Evaluation when travel_weight == 0.0
+# Spec Fix 1: Candidate Pool Evaluation when travel_weight is low (e.g. 1)
 # ==============================================================================
 
 
-def test_zero_travel_weight_retains_distant_high_fit_centre(
+def test_low_travel_weight_retains_distant_high_fit_centre(
     client: TestClient, test_engine, monkeypatch
 ):
-    """When candidate pool > 30 centres and parent sets travel_weight = 0.0,
+    """When candidate pool > 30 centres and parent prioritizes vacancy and cost (5/5/1),
 
     a distant centre (> 20 km away) with Available vacancy and 100% Cost Fit
     is NOT discarded and ranks #1.
@@ -308,16 +308,16 @@ def test_zero_travel_weight_retains_distant_high_fit_centre(
 
     setup_matching_onemap_mock(monkeypatch, postal_coords=coords_dict)
 
-    # Parent prioritizes vacancy and cost: travel_weight = 0.0, vacancy_weight = 0.50, cost_weight = 0.50, budget = 500
+    # Parent prioritizes vacancy and cost: vacancy_weight = 5, cost_weight = 5, travel_weight = 1, budget = 500
     payload = {
         "level": "infant",
         "enrollment_month_year": "2026-06",
         "citizenship_status": "SC",
         "home_postal_code": "560123",
         "budget_max": 500.0,
-        "vacancy_weight": 0.50,
-        "cost_weight": 0.50,
-        "travel_weight": 0.0,
+        "vacancy_weight": 5,
+        "cost_weight": 5,
+        "travel_weight": 1,
         "top_n": 5,
     }
 
@@ -333,7 +333,7 @@ def test_zero_travel_weight_retains_distant_high_fit_centre(
     assert top_centre["centre_code"] == "C_DISTANT_PERFECT"
     assert top_centre["vacancy_fit_score"] == 100.0
     assert top_centre["cost_fit_score"] == 100.0
-    assert top_centre["overall_fit_score"] == 100.0
+    assert top_centre["overall_fit_score"] == 90.91
 
 
 # ==============================================================================
@@ -574,9 +574,9 @@ def test_match_criteria_data_structure():
         home_postal_code="560123",
         workplace_postal_code="048581",
         location_preference=LocationPreference.EITHER,
-        vacancy_weight=0.40,
-        cost_weight=0.30,
-        travel_weight=0.30,
+        vacancy_weight=3,
+        cost_weight=3,
+        travel_weight=3,
         applicant_status=ApplicantStatus.WORKING_APPLICANT,
     )
     assert criteria.level == PreschoolLevel.INFANT
@@ -584,6 +584,9 @@ def test_match_criteria_data_structure():
     assert criteria.household_income == 5000.0
     assert criteria.budget_max == 600.0
     assert criteria.location_preference == LocationPreference.EITHER
+    assert abs(criteria.vacancy_weight - (1.0 / 3.0)) < 1e-6
+    assert abs(criteria.cost_weight - (1.0 / 3.0)) < 1e-6
+    assert abs(criteria.travel_weight - (1.0 / 3.0)) < 1e-6
 
 
 def test_resolve_travel_routing_mode_rules():

@@ -38,12 +38,19 @@ class MatchCriteria:
     workplace_postal_code: str | None = None
     location_preference: LocationPreference = LocationPreference.HOME
     is_default_location_preference: bool = False
-    vacancy_weight: float = 0.40
-    cost_weight: float = 0.30
-    travel_weight: float = 0.30
+    vacancy_weight: float = 1.0 / 3.0
+    cost_weight: float = 1.0 / 3.0
+    travel_weight: float = 1.0 / 3.0
     applicant_status: ApplicantStatus = ApplicantStatus.WORKING_APPLICANT
     top_n: int = 5
     profile_id: str | None = None
+
+    def __post_init__(self) -> None:
+        total = float(self.vacancy_weight + self.cost_weight + self.travel_weight)
+        if total > 0:
+            self.vacancy_weight = float(self.vacancy_weight) / total
+            self.cost_weight = float(self.cost_weight) / total
+            self.travel_weight = float(self.travel_weight) / total
 
 
 def build_explanation_prompt(
@@ -58,9 +65,9 @@ def build_explanation_prompt(
     budget_max: float | None = None,
     home_postal_code: str | None = None,
     workplace_postal_code: str | None = None,
-    vacancy_weight: float = 0.40,
-    cost_weight: float = 0.30,
-    travel_weight: float = 0.30,
+    vacancy_weight: float = 1.0 / 3.0,
+    cost_weight: float = 1.0 / 3.0,
+    travel_weight: float = 1.0 / 3.0,
     applicant_status: ApplicantStatus = ApplicantStatus.WORKING_APPLICANT,
     **kwargs: Any,
 ) -> str:
@@ -155,7 +162,7 @@ Parent Search Profile & Criteria:
 - Applicant Employment Status: {applicant_status_str}
 - Preferred Maximum Budget: {budget_text}
 - Anchor Locations: Home Postal: {criteria.home_postal_code or 'Not specified'}, Workplace Postal: {criteria.workplace_postal_code or 'Not specified'}
-- Preference Weights: Vacancy Weight: {criteria.vacancy_weight * 100:.0f}%, Cost Weight: {criteria.cost_weight * 100:.0f}%, Travel Weight: {criteria.travel_weight * 100:.0f}%
+- Preference Weights: Vacancy Weight: {round(criteria.vacancy_weight * 100)}%, Cost Weight: {round(criteria.cost_weight * 100)}%, Travel Weight: {round(criteria.travel_weight * 100)}%
 - Total Eligible Cohort Centres Evaluated: {total_candidates}
 
 Top Candidate Recommendations:
@@ -182,9 +189,9 @@ def generate_deterministic_fallback(
     budget_max: float | None = None,
     home_postal_code: str | None = None,
     workplace_postal_code: str | None = None,
-    vacancy_weight: float = 0.40,
-    cost_weight: float = 0.30,
-    travel_weight: float = 0.30,
+    vacancy_weight: float = 1.0 / 3.0,
+    cost_weight: float = 1.0 / 3.0,
+    travel_weight: float = 1.0 / 3.0,
     applicant_status: ApplicantStatus = ApplicantStatus.WORKING_APPLICANT,
     **kwargs: Any,
 ) -> FitExplanationResponse:
@@ -337,9 +344,9 @@ def generate_fit_explanation(
     budget_max: float | None = None,
     home_postal_code: str | None = None,
     workplace_postal_code: str | None = None,
-    vacancy_weight: float = 0.40,
-    cost_weight: float = 0.30,
-    travel_weight: float = 0.30,
+    vacancy_weight: float = 1.0 / 3.0,
+    cost_weight: float = 1.0 / 3.0,
+    travel_weight: float = 1.0 / 3.0,
     applicant_status: ApplicantStatus = ApplicantStatus.WORKING_APPLICANT,
     **kwargs: Any,
 ) -> FitExplanationResponse:

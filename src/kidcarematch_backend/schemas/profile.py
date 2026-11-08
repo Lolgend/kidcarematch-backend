@@ -72,17 +72,11 @@ def validate_enrollment_month_format(
     return v
 
 
-def validate_location_and_weights(
+def validate_location_preference(
     location_preference: LocationPreference,
     workplace_postal_code: str | None,
-    vacancy_weight: float,
-    cost_weight: float,
-    travel_weight: float,
 ) -> None:
-    """Enforce domain invariants across location preferences and trade-off weights.
-
-    Raises ValueError if invariants are violated.
-    """
+    """Enforce domain invariants for location preference."""
     if (
         location_preference
         in (LocationPreference.WORKPLACE, LocationPreference.EITHER)
@@ -90,10 +84,6 @@ def validate_location_and_weights(
     ):
         raise ValueError(
             "Workplace postal code is required when location preference is WORKPLACE or EITHER"
-        )
-    if round(vacancy_weight + cost_weight + travel_weight, 2) != 1.0:
-        raise ValueError(
-            "vacancy_weight, cost_weight, and travel_weight must sum to 1.0"
         )
 
 
@@ -143,23 +133,26 @@ class ProfileCreateRequest(BaseModel):
     enrollment_month_year: str = Field(
         description="Target enrollment month and year in YYYY-MM format",
     )
-    vacancy_weight: float = Field(
-        default=0.40,
-        ge=0.0,
-        le=1.0,
-        description="Trade-off weight assigned to vacancy factor (0.0 to 1.0)",
+    vacancy_weight: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        strict=True,
+        description="Importance rating assigned to vacancy factor (1 to 5, default 3)",
     )
-    cost_weight: float = Field(
-        default=0.30,
-        ge=0.0,
-        le=1.0,
-        description="Trade-off weight assigned to cost factor (0.0 to 1.0)",
+    cost_weight: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        strict=True,
+        description="Importance rating assigned to cost factor (1 to 5, default 3)",
     )
-    travel_weight: float = Field(
-        default=0.30,
-        ge=0.0,
-        le=1.0,
-        description="Trade-off weight assigned to travel factor (0.0 to 1.0)",
+    travel_weight: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        strict=True,
+        description="Importance rating assigned to travel factor (1 to 5, default 3)",
     )
     applicant_status: ApplicantStatus = Field(
         default=ApplicantStatus.WORKING_APPLICANT,
@@ -196,13 +189,10 @@ class ProfileCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_cross_field_rules(self) -> "ProfileCreateRequest":
-        """Enforce domain invariants across location preferences and trade-off weights."""
-        validate_location_and_weights(
+        """Enforce domain invariants across location preferences."""
+        validate_location_preference(
             self.location_preference,
             self.workplace_postal_code,
-            self.vacancy_weight,
-            self.cost_weight,
-            self.travel_weight,
         )
         return self
 
@@ -227,9 +217,9 @@ class ProfileResponse(BaseModel):
     household_member_count: int
     budget_max: float
     enrollment_month_year: str
-    vacancy_weight: float
-    cost_weight: float
-    travel_weight: float
+    vacancy_weight: int
+    cost_weight: int
+    travel_weight: int
     applicant_status: ApplicantStatus
 
     model_config = ConfigDict(from_attributes=True)
@@ -301,23 +291,26 @@ class ProfilePatchRequest(BaseModel):
         default=None,
         description="Target enrollment month and year in YYYY-MM format",
     )
-    vacancy_weight: float | None = Field(
+    vacancy_weight: int | None = Field(
         default=None,
-        ge=0.0,
-        le=1.0,
-        description="Trade-off weight assigned to vacancy factor (0.0 to 1.0)",
+        ge=1,
+        le=5,
+        strict=True,
+        description="Importance rating assigned to vacancy factor (1 to 5)",
     )
-    cost_weight: float | None = Field(
+    cost_weight: int | None = Field(
         default=None,
-        ge=0.0,
-        le=1.0,
-        description="Trade-off weight assigned to cost factor (0.0 to 1.0)",
+        ge=1,
+        le=5,
+        strict=True,
+        description="Importance rating assigned to cost factor (1 to 5)",
     )
-    travel_weight: float | None = Field(
+    travel_weight: int | None = Field(
         default=None,
-        ge=0.0,
-        le=1.0,
-        description="Trade-off weight assigned to travel factor (0.0 to 1.0)",
+        ge=1,
+        le=5,
+        strict=True,
+        description="Importance rating assigned to travel factor (1 to 5)",
     )
     applicant_status: ApplicantStatus | None = Field(
         default=None,

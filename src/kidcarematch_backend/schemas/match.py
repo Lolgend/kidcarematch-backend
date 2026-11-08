@@ -196,23 +196,26 @@ class CentreMatchRequest(BaseModel):
         default=None,
         description="Target enrollment month and year in YYYY-MM format (e.g. 2026-06)",
     )
-    cost_weight: float = Field(
-        default=0.30,
-        ge=0.0,
-        le=1.0,
-        description="Trade-off weight assigned to cost factor (0.0 to 1.0)",
+    vacancy_weight: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        strict=True,
+        description="Importance rating assigned to vacancy factor (1 to 5, default 3)",
     )
-    travel_weight: float = Field(
-        default=0.30,
-        ge=0.0,
-        le=1.0,
-        description="Trade-off weight assigned to travel factor (0.0 to 1.0)",
+    cost_weight: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        strict=True,
+        description="Importance rating assigned to cost factor (1 to 5, default 3)",
     )
-    vacancy_weight: float = Field(
-        default=0.40,
-        ge=0.0,
-        le=1.0,
-        description="Trade-off weight assigned to vacancy factor (0.0 to 1.0)",
+    travel_weight: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        strict=True,
+        description="Importance rating assigned to travel factor (1 to 5, default 3)",
     )
     applicant_status: ApplicantStatus = Field(
         default=ApplicantStatus.WORKING_APPLICANT,
@@ -266,11 +269,6 @@ class CentreMatchRequest(BaseModel):
                 raise ValueError(
                     "Workplace postal code is required when location preference is WORKPLACE or EITHER"
                 )
-
-        if round(self.vacancy_weight + self.cost_weight + self.travel_weight, 2) != 1.0:
-            raise ValueError(
-                "vacancy_weight, cost_weight, and travel_weight must sum to 1.0"
-            )
 
         return self
 

@@ -337,8 +337,8 @@ def test_family_preference_profile_multi_creation_for_parent(test_session: Sessi
         household_member_count=3,
         budget_max=1500.0,
         enrollment_month_year=datetime(2027, 1, 1, tzinfo=timezone.utc),
-        cost_weight=0.7,
-        travel_weight=0.3,
+        cost_weight=4,
+        travel_weight=3,
     )
     profile2 = FamilyPreferenceProfile(
         profile_id="fpp_child2",
@@ -354,8 +354,8 @@ def test_family_preference_profile_multi_creation_for_parent(test_session: Sessi
         household_member_count=3,
         budget_max=900.0,
         enrollment_month_year=datetime(2027, 6, 1, tzinfo=timezone.utc),
-        cost_weight=0.4,
-        travel_weight=0.6,
+        cost_weight=2,
+        travel_weight=4,
     )
 
     test_session.add_all([profile1, profile2])
@@ -894,7 +894,7 @@ def test_foreign_key_cascade_declarations():
 
 
 def test_family_preference_profile_default_3_factor_weights_and_applicant_status(test_session: Session):
-    """FamilyPreferenceProfile defaults to vacancy_weight=0.40, cost_weight=0.30, travel_weight=0.30, applicant_status=WORKING_APPLICANT."""
+    """FamilyPreferenceProfile defaults to vacancy_weight=3, cost_weight=3, travel_weight=3, applicant_status=WORKING_APPLICANT."""
     user = User(
         user_id="user_fpp_defaults",
         firebase_uid="fb_fpp_defaults",
@@ -922,9 +922,9 @@ def test_family_preference_profile_default_3_factor_weights_and_applicant_status
 
     loaded = test_session.get(FamilyPreferenceProfile, "fpp_defaults_01")
     assert loaded is not None
-    assert loaded.vacancy_weight == 0.40
-    assert loaded.cost_weight == 0.30
-    assert loaded.travel_weight == 0.30
+    assert loaded.vacancy_weight == 3
+    assert loaded.cost_weight == 3
+    assert loaded.travel_weight == 3
     assert loaded.applicant_status == ApplicantStatus.WORKING_APPLICANT
 
 
@@ -951,9 +951,9 @@ def test_family_preference_profile_custom_3_factor_weights_and_applicant_status(
         household_member_count=4,
         budget_max=1200.0,
         enrollment_month_year=datetime(2027, 4, 1, tzinfo=timezone.utc),
-        vacancy_weight=0.50,
-        cost_weight=0.25,
-        travel_weight=0.25,
+        vacancy_weight=5,
+        cost_weight=5,
+        travel_weight=1,
         applicant_status=ApplicantStatus.NON_WORKING_APPLICANT,
     )
     test_session.add(profile)
@@ -961,10 +961,90 @@ def test_family_preference_profile_custom_3_factor_weights_and_applicant_status(
 
     loaded = test_session.get(FamilyPreferenceProfile, "fpp_custom_01")
     assert loaded is not None
-    assert loaded.vacancy_weight == 0.50
-    assert loaded.cost_weight == 0.25
-    assert loaded.travel_weight == 0.25
+    assert loaded.vacancy_weight == 5
+    assert loaded.cost_weight == 5
+    assert loaded.travel_weight == 1
     assert loaded.applicant_status == ApplicantStatus.NON_WORKING_APPLICANT
+
+
+def test_family_preference_profile_importance_ratings_validation(test_session: Session):
+    """FamilyPreferenceProfile enforces 1-5 integer bounds and rejects non-int/bool."""
+    user = User(
+        user_id="user_fpp_invalid",
+        firebase_uid="fb_fpp_invalid",
+        email="fpp_invalid@example.com",
+        full_name="Parent Invalid",
+    )
+    test_session.add(user)
+    test_session.commit()
+    assert user.user_id is not None
+
+    # Rejection of values < 1
+    with pytest.raises((ValidationError, ValueError)):
+        FamilyPreferenceProfile(
+            profile_id="fpp_invalid_0",
+            user_id=user.user_id,
+            profile_name="Invalid 0",
+            service_required="Full Day",
+            level=PreschoolLevel.INFANT,
+            home_postal_code="123456",
+            household_income=5000.0,
+            household_member_count=3,
+            budget_max=1000.0,
+            enrollment_month_year=datetime(2027, 3, 1, tzinfo=timezone.utc),
+            vacancy_weight=0,
+        )
+
+    # Rejection of values > 5
+    with pytest.raises((ValidationError, ValueError)):
+        FamilyPreferenceProfile(
+            profile_id="fpp_invalid_6",
+            user_id=user.user_id,
+            profile_name="Invalid 6",
+            service_required="Full Day",
+            level=PreschoolLevel.INFANT,
+            home_postal_code="123456",
+            household_income=5000.0,
+            household_member_count=3,
+            budget_max=1000.0,
+            enrollment_month_year=datetime(2027, 3, 1, tzinfo=timezone.utc),
+            cost_weight=6,
+        )
+
+    # Rejection of bool
+    with pytest.raises((ValidationError, ValueError)):
+        FamilyPreferenceProfile(
+            profile_id="fpp_invalid_bool",
+            user_id=user.user_id,
+            profile_name="Invalid Bool",
+            service_required="Full Day",
+            level=PreschoolLevel.INFANT,
+            home_postal_code="123456",
+            household_income=5000.0,
+            household_member_count=3,
+            budget_max=1000.0,
+            enrollment_month_year=datetime(2027, 3, 1, tzinfo=timezone.utc),
+            travel_weight=True,
+        )
+
+    # Valid profile mutation via SA validates
+    profile = FamilyPreferenceProfile(
+        profile_id="fpp_valid_sa",
+        user_id=user.user_id,
+        profile_name="Valid SA",
+        service_required="Full Day",
+        level=PreschoolLevel.INFANT,
+        home_postal_code="123456",
+        household_income=5000.0,
+        household_member_count=3,
+        budget_max=1000.0,
+        enrollment_month_year=datetime(2027, 3, 1, tzinfo=timezone.utc),
+        vacancy_weight=3,
+    )
+    with pytest.raises(ValueError):
+        profile.vacancy_weight = 6
+    with pytest.raises(ValueError):
+        profile.cost_weight = 0
 
 
 def test_postal_coordinate_cache_persistence(test_session: Session):

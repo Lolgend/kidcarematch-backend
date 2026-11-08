@@ -65,7 +65,7 @@ A time-limited JSON Web Token (JWT) issued by SLA OneMap to authorize backend AP
 _Avoid_: OneMap API key, OneMap bearer, OneMap session
 
 **Family Preference Profile**:
-A parent-configured matching criteria profile representing a specific child or search scenario, capturing target service type, location postal anchors, household income, budget ceiling, and cost/travel trade-off weights. An authenticated parent may maintain a portfolio of multiple distinct preference profiles, each bearing a unique profile name within the parent's account.
+A parent-configured matching criteria profile representing a specific child or search scenario, capturing target service type, location postal anchors, household income, budget ceiling, and Importance Ratings across matching factors. An authenticated parent may maintain a portfolio of multiple distinct preference profiles, each bearing a unique profile name within the parent's account.
 _Avoid_: Search filter, match config, family setting
 
 **Review**:
@@ -105,8 +105,16 @@ _Avoid_: Price score, affordability index, budget rating
 The normalized percentage score (0% to 100%) evaluating a parent's total morning commute time (Home to Centre, and optionally Centre to Workplace) against preferred and maximum duration thresholds.
 _Avoid_: Commute score, distance score, transit rating
 
+**Importance Rating**:
+A parent-assigned integer score from 1 (least important) to 5 (most important) expressing the priority of Vacancy Fit, Cost Fit, or Travel Fit within a Family Preference Profile.
+_Avoid_: Priority rank, slider value, percentage weight
+
+**Effective Matching Weight**:
+The normalized proportion derived from a factor's Importance Rating relative to the sum of all active Importance Ratings, used to weight Vacancy Fit, Cost Fit, and Travel Fit when calculating Overall Fit.
+_Avoid_: Raw rating, unnormalized weight
+
 **Overall Fit**:
-The composite weighted matching score (0% to 100%) calculated as the linear combination of Vacancy Fit, Cost Fit, and Travel Fit weighted by parental priorities.
+The composite weighted matching score (0% to 100%) calculated as the linear combination of Vacancy Fit, Cost Fit, and Travel Fit weighted by their Effective Matching Weights.
 _Avoid_: Total match, recommendation score, rank score
 
 **Commute Deviation**:

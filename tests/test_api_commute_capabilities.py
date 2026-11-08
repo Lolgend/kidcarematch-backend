@@ -491,9 +491,9 @@ def test_commute_legacy_response_exact_shape_preserved(
             household_member_count=3,
             budget_max=1500.0,
             enrollment_month_year=datetime(2026, 12, 1, tzinfo=timezone.utc),
-            travel_weight=0.34,
-            cost_weight=0.33,
-            vacancy_weight=0.33,
+            travel_weight=3,
+            cost_weight=3,
+            vacancy_weight=3,
         )
         session.add(centre)
         session.add(profile)
