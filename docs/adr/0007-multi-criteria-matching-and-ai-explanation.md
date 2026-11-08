@@ -7,9 +7,8 @@ KidCareMatch provides parents in Singapore with personalized preschool recommend
 ## Decisions
 
 1. **Three-Factor Weighted Linear Matching Model**:
-   Matching scores are computed as a normalized linear combination:
+   Parents rate Vacancy Fit, Cost Fit, and Travel Fit independently using integer Importance Ratings $r_v, r_c, r_t \in \{1, 2, 3, 4, 5\}$ (defaulting to $r_v = 3, r_c = 3, r_t = 3$). Effective Matching Weights are derived once by normalizing each rating against the sum of active ratings ($w_i = r_i / (r_v + r_c + r_t)$, where $w_v, w_c, w_t \in (0.0, 1.0)$ and sum to $1.0$). Matching scores are computed as a normalized linear combination:
    $$\text{Overall Fit} = (\text{Vacancy Fit} \times w_v) + (\text{Cost Fit} \times w_c) + (\text{Travel Fit} \times w_t)$$
-   where weights $w_v, w_c, w_t \in [0.0, 1.0]$ and sum to exactly $1.0$ (defaulting to $w_v = 0.40, w_c = 0.30, w_t = 0.30$).
 
 2. **ECDA Cohort Level Filtering and Vacancy Fit Scoring**:
    Centres that do not offer the child's requested `PreschoolLevel` cohort are strictly excluded from the candidate pool. For candidate centres offering the level, reported ECDA vacancy status for the target enrollment month maps quantitatively:
@@ -37,7 +36,7 @@ KidCareMatch provides parents in Singapore with personalized preschool recommend
    - Travel Fit is normalized relative to the evaluated candidate pool: the best candidate receives $100\%$, the worst receives $0\%$, and intermediate candidates scale linearly.
 
 5. **Family Preference Profile Schema Evolution**:
-   `FamilyPreferenceProfile` and associated API request/response schemas are updated to persist `vacancy_weight`, `cost_weight`, `travel_weight`, and `applicant_status`. Existing profile records and tests are migrated with default values ($0.40, 0.30, 0.30$, and `WORKING_APPLICANT`).
+   `FamilyPreferenceProfile` and associated API request/response schemas persist raw integer Importance Ratings in `vacancy_weight`, `cost_weight`, and `travel_weight` ($1$ through $5$ inclusive, defaulting to $3, 3, 3$) alongside `applicant_status` (defaulting to `WORKING_APPLICANT`). Both profile-linked and inline `POST /api/v1/centres/match` requests accept `1`–`5` integer ratings and derive normalized Effective Matching Weights once for scoring and AI explanation generation.
 
 6. **Gemini AI Explanation with Resilient Fallback**:
    Top recommendation explanations are powered by `gemini-2.5-flash` using `google-genai` and `GEMINI_API_KEY`. Gemini generates a synthesized rationale explaining why Centre #1 achieved the top rank, plus a concise one-line highlight for each top candidate. If the Gemini API call times out or encounters network/quota errors, the service falls back to a deterministic structured template, guaranteeing zero matching API failures.
