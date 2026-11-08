@@ -46,6 +46,7 @@ from kidcarematch_backend.db.db import (
 )
 from kidcarematch_backend.main import app
 from kidcarematch_backend.schemas.match import (
+    CentreMatchRequest,
     FeeBreakdownItem,
     FitExplanationResponse,
     MatchCandidateItem,
@@ -3331,3 +3332,341 @@ def test_match_endpoint_unrecoverable_auth_failure_graceful_fallback(
     assert item["travel_breakdown"] is not None
     assert item["travel_breakdown"]["commute_distance_km"] is not None
     assert item["travel_breakdown"]["commute_duration_mins"] is not None
+
+
+# ==============================================================================
+# Ticket #99: Top-6 Match Shortlist & Stage 1 Scaling Tests
+# ==============================================================================
+
+
+def test_centre_match_request_and_criteria_default_top_n_to_six():
+    """CentreMatchRequest and MatchCriteria default top_n to 6 while preserving ge=1, le=20 bounds."""
+    # Schema defaults
+    req = CentreMatchRequest(level=PreschoolLevel.INFANT, enrollment_month_year="2026-06")
+    assert req.top_n == 6
+
+    # Criteria defaults
+    crit = MatchCriteria(level=PreschoolLevel.INFANT, enrollment_month_year="2026-06")
+    assert crit.top_n == 6
+
+    from pydantic import ValidationError
+
+    # Validation bounds preserved
+    with pytest.raises(ValidationError):
+        CentreMatchRequest(level=PreschoolLevel.INFANT, enrollment_month_year="2026-06", top_n=0)
+    with pytest.raises(ValidationError):
+        CentreMatchRequest(level=PreschoolLevel.INFANT, enrollment_month_year="2026-06", top_n=21)
+
+
+def test_api_match_defaults_to_top_six_shortlist(client: TestClient, test_engine):
+    """Calling POST /api/v1/centres/match without top_n returns a Top 6 shortlist when >= 6 match."""
+    create_centres_with_cohorts(test_engine)
+
+    # Seed 1 additional infant centre so total candidates is 7 (> 6)
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        c8 = PreschoolCentre(
+            centre_id=8,
+            centre_code="C008",
+            centre_name="Zeta Care",
+            postal="560128",
+        )
+        s8 = PreschoolService(
+            centre_id=8,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1200.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v8 = VacancyRecord(
+            record_id="VR008",
+            centre_id=8,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+        session.add_all([c8, s8, v8])
+        session.commit()
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_candidates"] == 7
+    assert data["returned_count"] == 6
+    assert len(data["results"]) == 6
+
+
+def test_stage1_candidate_cap_is_fifteen():
+    """STAGE1_MAX_CANDIDATES in core/onemap is 15."""
+    from kidcarematch_backend.core.onemap import STAGE1_MAX_CANDIDATES
+
+    assert STAGE1_MAX_CANDIDATES == 15
+
+
+def test_stage1_candidate_cap_fifteen_default(
+    client: TestClient, test_engine, monkeypatch
+):
+    """When candidate pool has 25 candidates, default top_n (6) evaluates only 15 via OneMap Stage 2 routing."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    coords_dict = {"560123": (1.3691, 103.8512)}  # Home
+
+    with Session(test_engine) as session:
+        for i in range(1, 26):
+            p_code = f"57{i:04d}"
+            coords_dict[p_code] = (1.3691 + (i * 0.001), 103.8512 + (i * 0.001))
+            c = PreschoolCentre(
+                centre_id=500 + i,
+                centre_code=f"C_POOL_{i:02d}",
+                centre_name=f"Pool Centre {i:02d}",
+                postal=p_code,
+            )
+            s = PreschoolService(
+                centre_id=500 + i,
+                type_of_service="Full Day",
+                level=PreschoolLevel.INFANT,
+                fee=1000.0,
+                citizenship_type=CitizenshipType.SC,
+            )
+            v = VacancyRecord(
+                record_id=f"v_pool_{i}",
+                centre_id=500 + i,
+                level_type=PreschoolLevel.INFANT,
+                enrollment_month_year=target_month,
+                vacancy_status="Available",
+            )
+            session.add_all([c, s, v])
+        session.commit()
+
+    _, route_count = setup_onemap_mock(monkeypatch, postal_coords=coords_dict)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        # top_n omitted -> defaults to 6 <= 15
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_candidates"] == 25
+    assert data["returned_count"] == 6
+    # Single anchor mode: 1 route call per Stage 2 candidate. Cap is 15 -> exactly 15 route calls!
+    assert route_count["count"] == 15
+
+
+def test_stage1_candidate_cap_dynamic_scaling_when_top_n_exceeds_fifteen(
+    client: TestClient, test_engine, monkeypatch
+):
+    """When caller specifies top_n = 18 (> 15), Stage 1 dynamically scales to 18 candidates."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    coords_dict = {"560123": (1.3691, 103.8512)}  # Home
+
+    with Session(test_engine) as session:
+        for i in range(1, 26):
+            p_code = f"58{i:04d}"
+            coords_dict[p_code] = (1.3691 + (i * 0.001), 103.8512 + (i * 0.001))
+            c = PreschoolCentre(
+                centre_id=600 + i,
+                centre_code=f"C_SCALE_{i:02d}",
+                centre_name=f"Scale Centre {i:02d}",
+                postal=p_code,
+            )
+            s = PreschoolService(
+                centre_id=600 + i,
+                type_of_service="Full Day",
+                level=PreschoolLevel.INFANT,
+                fee=1000.0,
+                citizenship_type=CitizenshipType.SC,
+            )
+            v = VacancyRecord(
+                record_id=f"v_scale_{i}",
+                centre_id=600 + i,
+                level_type=PreschoolLevel.INFANT,
+                enrollment_month_year=target_month,
+                vacancy_status="Available",
+            )
+            session.add_all([c, s, v])
+        session.commit()
+
+    _, route_count = setup_onemap_mock(monkeypatch, postal_coords=coords_dict)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "top_n": 18,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_candidates"] == 25
+    assert data["returned_count"] == 18
+    # Dynamic scaling max(15, 18) = 18 -> exactly 18 route calls!
+    assert route_count["count"] == 18
+
+
+def test_matching_reuses_single_httpx_client_across_coordinates_and_routing(
+    client: TestClient, test_engine, monkeypatch
+):
+    """execute_multi_criteria_match shares a single httpx.Client instance across batch coords and Stage 2 routing."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    coords_dict = {
+        "560123": (1.3691, 103.8512),  # Home
+        "048581": (1.2840, 103.8510),  # Workplace
+        "560124": (1.3695, 103.8520),  # Centre 1
+        "560125": (1.3780, 103.8550),  # Centre 2
+    }
+    with Session(test_engine) as session:
+        for i in [1, 2]:
+            p_code = f"56012{3+i}"
+            c = PreschoolCentre(
+                centre_id=800 + i,
+                centre_code=f"C_CLIENT_{i:02d}",
+                centre_name=f"Client Reuse Centre {i:02d}",
+                postal=p_code,
+            )
+            s = PreschoolService(
+                centre_id=800 + i,
+                type_of_service="Full Day",
+                level=PreschoolLevel.INFANT,
+                fee=1000.0,
+                citizenship_type=CitizenshipType.SC,
+            )
+            v = VacancyRecord(
+                record_id=f"v_client_{i}",
+                centre_id=800 + i,
+                level_type=PreschoolLevel.INFANT,
+                enrollment_month_year=target_month,
+                vacancy_status="Available",
+            )
+            session.add_all([c, s, v])
+        session.commit()
+
+    setup_onemap_mock(monkeypatch, postal_coords=coords_dict)
+
+    from kidcarematch_backend.core import matching as matching_mod
+
+    observed_clients: list[tuple[str, Any]] = []
+
+    orig_resolve_batch = matching_mod.resolve_coordinates_batch
+    orig_get_route = matching_mod.get_route_duration_and_distance
+
+    def spy_resolve_batch(*args, **kwargs):
+        client_arg = kwargs.get("client")
+        observed_clients.append(("resolve_batch", client_arg))
+        return orig_resolve_batch(*args, **kwargs)
+
+    def spy_get_route(*args, **kwargs):
+        client_arg = kwargs.get("client")
+        observed_clients.append(("get_route", client_arg))
+        return orig_get_route(*args, **kwargs)
+
+    monkeypatch.setattr(matching_mod, "resolve_coordinates_batch", spy_resolve_batch)
+    monkeypatch.setattr(matching_mod, "get_route_duration_and_distance", spy_get_route)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "workplace_postal_code": "048581",
+        "top_n": 2,
+    }
+
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+
+    # Ensure calls were made and observed (resolve_batch + 1 baseline + 2*2 candidate legs = 6 calls)
+    assert len(observed_clients) >= 4
+    # Check that client is NOT None for all calls
+    clients = [c for _, c in observed_clients]
+    assert all(c is not None for c in clients), f"Observed None client in calls: {observed_clients}"
+    assert all(isinstance(c, httpx.Client) for c in clients)
+    # Check that it is the exact same httpx.Client instance across all calls
+    first_client = clients[0]
+    assert all(c is first_client for c in clients), "Expected identical shared httpx.Client instance across all calls"
+
+
+def test_matching_reuses_single_httpx_client_in_single_anchor_mode(
+    client: TestClient, test_engine, monkeypatch
+):
+    """execute_multi_criteria_match shares a single httpx.Client instance in single anchor mode."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    coords_dict = {
+        "560123": (1.3691, 103.8512),  # Home
+        "560124": (1.3695, 103.8520),  # Centre 1
+        "560125": (1.3780, 103.8550),  # Centre 2
+    }
+    with Session(test_engine) as session:
+        for i in [1, 2]:
+            p_code = f"56012{3+i}"
+            c = PreschoolCentre(
+                centre_id=900 + i,
+                centre_code=f"C_SINGLE_{i:02d}",
+                centre_name=f"Single Client Centre {i:02d}",
+                postal=p_code,
+            )
+            s = PreschoolService(
+                centre_id=900 + i,
+                type_of_service="Full Day",
+                level=PreschoolLevel.INFANT,
+                fee=1000.0,
+                citizenship_type=CitizenshipType.SC,
+            )
+            v = VacancyRecord(
+                record_id=f"v_single_{i}",
+                centre_id=900 + i,
+                level_type=PreschoolLevel.INFANT,
+                enrollment_month_year=target_month,
+                vacancy_status="Available",
+            )
+            session.add_all([c, s, v])
+        session.commit()
+
+    setup_onemap_mock(monkeypatch, postal_coords=coords_dict)
+
+    from kidcarematch_backend.core import matching as matching_mod
+
+    observed_clients: list[tuple[str, Any]] = []
+
+    orig_resolve_batch = matching_mod.resolve_coordinates_batch
+    orig_get_route = matching_mod.get_route_duration_and_distance
+
+    def spy_resolve_batch(*args, **kwargs):
+        client_arg = kwargs.get("client")
+        observed_clients.append(("resolve_batch", client_arg))
+        return orig_resolve_batch(*args, **kwargs)
+
+    def spy_get_route(*args, **kwargs):
+        client_arg = kwargs.get("client")
+        observed_clients.append(("get_route", client_arg))
+        return orig_get_route(*args, **kwargs)
+
+    monkeypatch.setattr(matching_mod, "resolve_coordinates_batch", spy_resolve_batch)
+    monkeypatch.setattr(matching_mod, "get_route_duration_and_distance", spy_get_route)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "location_preference": "HOME",
+        "top_n": 2,
+    }
+
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+
+    # Ensure calls were made and observed (resolve_batch + 2 single anchor legs = 3 calls)
+    assert len(observed_clients) >= 3
+    clients = [c for _, c in observed_clients]
+    assert all(c is not None for c in clients), f"Observed None client in calls: {observed_clients}"
+    assert all(isinstance(c, httpx.Client) for c in clients)
+    first_client = clients[0]
+    assert all(c is first_client for c in clients), "Expected identical shared httpx.Client instance across all calls"

@@ -229,10 +229,10 @@ class CentreMatchRequest(BaseModel):
         description="Parent employment status for ECDA subsidy eligibility tier determination",
     )
     top_n: int = Field(
-        default=5,
+        default=6,
         ge=1,
         le=20,
-        description="Maximum number of top-ranked candidate centres to return (1 to 20, default 5)",
+        description="Maximum number of top-ranked candidate centres to return (1 to 20, default 6)",
     )
 
     @field_validator("service_required")

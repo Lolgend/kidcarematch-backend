@@ -42,7 +42,7 @@ class MatchCriteria:
     cost_weight: float = 1.0 / 3.0
     travel_weight: float = 1.0 / 3.0
     applicant_status: ApplicantStatus = ApplicantStatus.WORKING_APPLICANT
-    top_n: int = 5
+    top_n: int = 6
     profile_id: str | None = None
 
     def __post_init__(self) -> None:

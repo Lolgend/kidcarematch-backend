@@ -16,7 +16,7 @@ from kidcarematch_backend.db.db import PostalCoordinateCache
 
 logger = logging.getLogger(__name__)
 
-STAGE1_MAX_CANDIDATES = 30
+STAGE1_MAX_CANDIDATES = 15
 EARTH_RADIUS_KM = 6371.0
 AVERAGE_TRANSIT_SPEED_KMH = 25.0
 
