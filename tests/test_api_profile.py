@@ -1,6 +1,7 @@
 """Tests for Family Preference Profile API endpoints (Ticket #58)."""
 
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1494,30 +1495,28 @@ def test_no_trailing_slash_alias_endpoints(client: TestClient, sample_parent: Us
 
 
 def test_profile_helper_functions(test_engine):
-    """Verify extracted helper functions: parse_year_month, validate_location_and_weights, get_profile_or_404."""
+    """Verify extracted helper functions: parse_year_month, validate_location_preference, get_profile_or_404."""
     from fastapi import HTTPException
 
     from kidcarematch_backend.api.v1.profile import get_profile_or_404
     from kidcarematch_backend.schemas.profile import (
         parse_year_month,
-        validate_location_and_weights,
+        validate_location_preference,
     )
 
     # 1. parse_year_month
     dt = parse_year_month("2028-09")
     assert dt == datetime(2028, 9, 1, 0, 0, 0, tzinfo=timezone.utc)
 
-    # 2. validate_location_preference and validate_location_and_weights
-    from kidcarematch_backend.schemas.profile import validate_location_preference
-
+    # 2. validate_location_preference
     with pytest.raises(ValueError, match="Workplace postal code is required"):
         validate_location_preference(
             location_preference=LocationPreference.WORKPLACE,
             workplace_postal_code=None,
         )
 
-    # validate_location_and_weights backwards compatibility wrapper
-    validate_location_and_weights(
+    # Valid location preference does not raise
+    validate_location_preference(
         location_preference=LocationPreference.HOME,
         workplace_postal_code=None,
     )
@@ -1784,6 +1783,56 @@ def test_patch_profile_null_field_returns_422(
     patch_res = client.patch(
         f"/api/v1/profile/{profile_id}",
         json={null_field: None},
+    )
+    assert patch_res.status_code == 422
+
+
+INVALID_RATING_VALUES = [0, -1, 6, 50, 0.4, 0.3, 3.0, "3", True, False, None]
+WEIGHT_FIELDS = ["vacancy_weight", "cost_weight", "travel_weight"]
+
+
+@pytest.mark.parametrize("weight_field", WEIGHT_FIELDS)
+@pytest.mark.parametrize("invalid_val", INVALID_RATING_VALUES)
+def test_create_profile_invalid_importance_ratings_return_422(
+    client: TestClient, sample_parent: User, weight_field: str, invalid_val: Any
+):
+    """POST /api/v1/profile returns HTTP 422 for all invalid rating values across vacancy, cost, and travel weights."""
+    set_mock_auth(sample_parent)
+    payload = valid_profile_payload(**{weight_field: invalid_val})
+    response = client.post("/api/v1/profile", json=payload)
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("weight_field", WEIGHT_FIELDS)
+@pytest.mark.parametrize("invalid_val", INVALID_RATING_VALUES)
+def test_put_profile_invalid_importance_ratings_return_422(
+    client: TestClient, sample_parent: User, weight_field: str, invalid_val: Any
+):
+    """PUT /api/v1/profile/{profile_id} returns HTTP 422 for all invalid rating values across vacancy, cost, and travel weights."""
+    set_mock_auth(sample_parent)
+    create_res = client.post("/api/v1/profile", json=valid_profile_payload())
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    payload = valid_profile_payload(**{weight_field: invalid_val})
+    put_res = client.put(f"/api/v1/profile/{profile_id}", json=payload)
+    assert put_res.status_code == 422
+
+
+@pytest.mark.parametrize("weight_field", WEIGHT_FIELDS)
+@pytest.mark.parametrize("invalid_val", INVALID_RATING_VALUES)
+def test_patch_profile_invalid_importance_ratings_return_422(
+    client: TestClient, sample_parent: User, weight_field: str, invalid_val: Any
+):
+    """PATCH /api/v1/profile/{profile_id} returns HTTP 422 for all invalid rating values across vacancy, cost, and travel weights."""
+    set_mock_auth(sample_parent)
+    create_res = client.post("/api/v1/profile", json=valid_profile_payload())
+    assert create_res.status_code == 201
+    profile_id = create_res.json()["profile_id"]
+
+    patch_res = client.patch(
+        f"/api/v1/profile/{profile_id}",
+        json={weight_field: invalid_val},
     )
     assert patch_res.status_code == 422
 

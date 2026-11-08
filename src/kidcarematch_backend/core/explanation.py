@@ -47,10 +47,10 @@ class MatchCriteria:
 
     def __post_init__(self) -> None:
         total = float(self.vacancy_weight + self.cost_weight + self.travel_weight)
-        if total > 0 and abs(total - 1.0) > 1e-6:
-            self.vacancy_weight = self.vacancy_weight / total
-            self.cost_weight = self.cost_weight / total
-            self.travel_weight = self.travel_weight / total
+        if total > 0:
+            self.vacancy_weight = float(self.vacancy_weight) / total
+            self.cost_weight = float(self.cost_weight) / total
+            self.travel_weight = float(self.travel_weight) / total
 
 
 def build_explanation_prompt(

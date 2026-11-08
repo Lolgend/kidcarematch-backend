@@ -239,11 +239,11 @@ def setup_matching_onemap_mock(
 
 
 # ==============================================================================
-# Spec Fix 1: Candidate Pool Evaluation when travel_weight == 0.0
+# Spec Fix 1: Candidate Pool Evaluation when travel_weight is low (e.g. 1)
 # ==============================================================================
 
 
-def test_zero_travel_weight_retains_distant_high_fit_centre(
+def test_low_travel_weight_retains_distant_high_fit_centre(
     client: TestClient, test_engine, monkeypatch
 ):
     """When candidate pool > 30 centres and parent prioritizes vacancy and cost (5/5/1),

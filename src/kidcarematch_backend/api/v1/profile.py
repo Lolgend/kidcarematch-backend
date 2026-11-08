@@ -71,7 +71,7 @@ def create_profile(
     - Parent role requirement (ADMIN forbidden).
     - Uniqueness of profile name per parent account.
     - Validated 6-digit Singapore postal codes and conditional workplace postal requirement.
-    - Balanced trade-off weights summing to 1.0.
+    - Independent 1 to 5 integer Importance Ratings for vacancy, cost, and travel factors.
     - Normalized UTC datetime for target enrollment month.
     """
     if not current_user.user_id:
@@ -257,7 +257,7 @@ def patch_profile(
     - Uniqueness of profile name per parent account if renaming (HTTP 409).
     - Cross-field validation on merged state:
       - Location preference and workplace postal code consistency (HTTP 422).
-      - Balanced weights summing to 1.0 (HTTP 422).
+    - Independent 1 to 5 integer Importance Ratings across vacancy, cost, and travel factors (HTTP 422).
     """
     assert current_user.user_id is not None
     existing_profile = get_profile_or_404(profile_id, current_user.user_id, session)

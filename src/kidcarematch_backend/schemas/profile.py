@@ -87,17 +87,6 @@ def validate_location_preference(
         )
 
 
-def validate_location_and_weights(
-    location_preference: LocationPreference,
-    workplace_postal_code: str | None,
-    vacancy_weight: float = 3.0,
-    cost_weight: float = 3.0,
-    travel_weight: float = 3.0,
-) -> None:
-    """Backwards-compatible wrapper enforcing location preference invariants without weight summation."""
-    validate_location_preference(location_preference, workplace_postal_code)
-
-
 class ProfileCreateRequest(BaseModel):
     """Payload for creating a Family Preference Profile."""
 
