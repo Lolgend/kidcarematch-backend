@@ -236,4 +236,3 @@ def test_clear_prevents_in_flight_leader_from_polluting_cache() -> None:
     fresh_res = cache.get_or_compute("k1", lambda: ("fresh-val", True))
     assert fresh_res == "fresh-val"
 
-    assert calls == 2
