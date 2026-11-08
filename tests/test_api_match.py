@@ -4,6 +4,7 @@ import json
 import time
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -18,6 +19,11 @@ from kidcarematch_backend.auth.security import (
     get_token_claims,
 )
 from kidcarematch_backend.core.config import settings
+from kidcarematch_backend.core.explanation import (
+    MatchCriteria,
+    build_explanation_prompt,
+    generate_deterministic_fallback,
+)
 from kidcarematch_backend.core.onemap import onemap_token_manager
 from kidcarematch_backend.db.db import (
     AccountStatus,
@@ -38,7 +44,10 @@ from kidcarematch_backend.db.db import (
     init_db,
 )
 from kidcarematch_backend.main import app
-from kidcarematch_backend.schemas.match import FitExplanationResponse
+from kidcarematch_backend.schemas.match import (
+    FitExplanationResponse,
+    MatchCandidateItem,
+)
 
 
 @pytest.fixture
@@ -670,17 +679,328 @@ def test_match_invalid_top_n_bounds_returns_422(client: TestClient):
         assert response.status_code == 422
 
 
-def test_match_weights_not_summing_to_one_returns_422(client: TestClient):
-    """Custom weights that do not sum to 1.0 return 422 Unprocessable Entity."""
+def test_match_weights_default_to_3_and_allow_independent_ratings(client: TestClient):
+    """Inline matching defaults weights to 3/3/3 when omitted and accepts independent 1-5 integers."""
     payload = {
         "level": "infant",
         "enrollment_month_year": "2026-06",
-        "vacancy_weight": 0.50,
-        "cost_weight": 0.50,
-        "travel_weight": 0.50,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+
+    # Custom independent ratings e.g. 5/5/1 without sum-to-1.0 restriction
+    payload_custom = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "vacancy_weight": 5,
+        "cost_weight": 5,
+        "travel_weight": 1,
+    }
+    response_custom = client.post("/api/v1/centres/match", json=payload_custom)
+    assert response_custom.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("vacancy_weight", 0),
+        ("vacancy_weight", -1),
+        ("vacancy_weight", 6),
+        ("vacancy_weight", 10),
+        ("cost_weight", 0),
+        ("cost_weight", 6),
+        ("travel_weight", 0),
+        ("travel_weight", 6),
+        ("vacancy_weight", 0.4),
+        ("cost_weight", 3.0),
+        ("travel_weight", 2.5),
+        ("vacancy_weight", "3"),
+        ("cost_weight", True),
+        ("travel_weight", False),
+        ("vacancy_weight", None),
+        ("cost_weight", None),
+        ("travel_weight", None),
+    ],
+)
+def test_match_weights_invalid_values_return_422(
+    client: TestClient, field: str, value: Any
+):
+    """Weights < 1, > 5, floats, strings, booleans, and nulls return 422."""
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        field: value,
     }
     response = client.post("/api/v1/centres/match", json=payload)
     assert response.status_code == 422
+
+
+def test_match_criteria_effective_weights_normalization():
+    """MatchCriteria normalizes raw ratings (1-5) or proportion inputs to Effective Matching Weights."""
+    # Default 3/3/3
+    c_default = MatchCriteria(level=PreschoolLevel.INFANT, enrollment_month_year="2026-06")
+    assert abs(c_default.vacancy_weight - (1.0 / 3.0)) < 1e-6
+    assert abs(c_default.cost_weight - (1.0 / 3.0)) < 1e-6
+    assert abs(c_default.travel_weight - (1.0 / 3.0)) < 1e-6
+
+    # Tied 1/1/1
+    c_tied_1 = MatchCriteria(
+        level=PreschoolLevel.INFANT,
+        enrollment_month_year="2026-06",
+        vacancy_weight=1,
+        cost_weight=1,
+        travel_weight=1,
+    )
+    assert abs(c_tied_1.vacancy_weight - (1.0 / 3.0)) < 1e-6
+    assert abs(c_tied_1.cost_weight - (1.0 / 3.0)) < 1e-6
+    assert abs(c_tied_1.travel_weight - (1.0 / 3.0)) < 1e-6
+
+    # Tied 5/5/5
+    c_tied_5 = MatchCriteria(
+        level=PreschoolLevel.INFANT,
+        enrollment_month_year="2026-06",
+        vacancy_weight=5,
+        cost_weight=5,
+        travel_weight=5,
+    )
+    assert abs(c_tied_5.vacancy_weight - (1.0 / 3.0)) < 1e-6
+    assert abs(c_tied_5.cost_weight - (1.0 / 3.0)) < 1e-6
+    assert abs(c_tied_5.travel_weight - (1.0 / 3.0)) < 1e-6
+
+    # Skewed 5/5/1 -> 5/11, 5/11, 1/11
+    c_skewed = MatchCriteria(
+        level=PreschoolLevel.INFANT,
+        enrollment_month_year="2026-06",
+        vacancy_weight=5,
+        cost_weight=5,
+        travel_weight=1,
+    )
+    assert abs(c_skewed.vacancy_weight - (5.0 / 11.0)) < 1e-6
+    assert abs(c_skewed.cost_weight - (5.0 / 11.0)) < 1e-6
+    assert abs(c_skewed.travel_weight - (1.0 / 11.0)) < 1e-6
+    assert abs(c_skewed.vacancy_weight + c_skewed.cost_weight + c_skewed.travel_weight - 1.0) < 1e-6
+
+    # Pre-normalized floats summing to 1.0 are preserved
+    c_float = MatchCriteria(
+        level=PreschoolLevel.INFANT,
+        enrollment_month_year="2026-06",
+        vacancy_weight=0.50,
+        cost_weight=0.25,
+        travel_weight=0.25,
+    )
+    assert abs(c_float.vacancy_weight - 0.50) < 1e-6
+    assert abs(c_float.cost_weight - 0.25) < 1e-6
+    assert abs(c_float.travel_weight - 0.25) < 1e-6
+
+
+def test_fit_explanation_effective_weights_percentage_formatting():
+    """Fit explanation prompt and fallback format Effective Matching Weights as round(w * 100)%."""
+    # 5/5/1 -> 45%, 45%, 9%
+    c_551 = MatchCriteria(
+        level=PreschoolLevel.INFANT,
+        enrollment_month_year="2026-06",
+        vacancy_weight=5,
+        cost_weight=5,
+        travel_weight=1,
+    )
+    cand = MatchCandidateItem(
+        centre_id=1,
+        centre_code="C001",
+        centre_name="Sample Centre",
+        contact="12345678",
+        email=None,
+        postal="560123",
+        website_url=None,
+        food_offered="Yes",
+        address="123 Street",
+        second_languages="Chinese",
+        spark_certified=False,
+        weekday_full_day_hours="07:00 - 19:00",
+        saturday_hours=None,
+        extended_operating_hours=False,
+        transport_provided=False,
+        gov_subsidy=True,
+        last_updated=None,
+        level=PreschoolLevel.INFANT,
+        enrollment_month_year="2026-06",
+        vacancy_status="Available",
+        vacancy_fit_score=100.0,
+        cost_fit_score=100.0,
+        travel_fit_score=100.0,
+        overall_fit_score=100.0,
+    )
+    prompt_551 = build_explanation_prompt(criteria=c_551, total_candidates=1, candidates=[cand])
+    assert "Vacancy Weight: 45%, Cost Weight: 45%, Travel Weight: 9%" in prompt_551
+
+    fallback_551 = generate_deterministic_fallback(criteria=c_551, total_candidates=1, candidates=[cand])
+    assert "45% Vacancy Fit, 45% Cost Fit, and 9% Travel Fit" in fallback_551.summary_narrative
+
+    # 3/3/3 -> 33%, 33%, 33%
+    c_333 = MatchCriteria(
+        level=PreschoolLevel.INFANT,
+        enrollment_month_year="2026-06",
+        vacancy_weight=3,
+        cost_weight=3,
+        travel_weight=3,
+    )
+    prompt_333 = build_explanation_prompt(criteria=c_333, total_candidates=1, candidates=[cand])
+    assert "Vacancy Weight: 33%, Cost Weight: 33%, Travel Weight: 33%" in prompt_333
+
+    fallback_333 = generate_deterministic_fallback(criteria=c_333, total_candidates=1, candidates=[cand])
+    assert "33% Vacancy Fit, 33% Cost Fit, and 33% Travel Fit" in fallback_333.summary_narrative
+
+
+def test_profile_linked_match_equal_ratings_produce_identical_results(
+    client: TestClient, sample_parent: User, test_engine
+):
+    """Profiles with 1/1/1 and 5/5/5 produce identical Effective Matching Weights (1/3 each) and fit scores."""
+    create_centres_with_cohorts(test_engine)
+    seed_ecda_subsidy_rules(test_engine)
+    set_mock_auth(sample_parent)
+
+    assert sample_parent.user_id is not None
+    with Session(test_engine) as session:
+        p1 = FamilyPreferenceProfile(
+            profile_id="profile-tied-111",
+            user_id=sample_parent.user_id,
+            profile_name="Tied 1",
+            level=PreschoolLevel.INFANT,
+            citizenship_status=CitizenshipType.SC,
+            service_required="Full Day",
+            home_postal_code="560123",
+            household_income=5000.0,
+            household_member_count=3,
+            budget_max=1000.0,
+            enrollment_month_year=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            vacancy_weight=1,
+            cost_weight=1,
+            travel_weight=1,
+            applicant_status=ApplicantStatus.WORKING_APPLICANT,
+        )
+        p5 = FamilyPreferenceProfile(
+            profile_id="profile-tied-555",
+            user_id=sample_parent.user_id,
+            profile_name="Tied 5",
+            level=PreschoolLevel.INFANT,
+            citizenship_status=CitizenshipType.SC,
+            service_required="Full Day",
+            home_postal_code="560123",
+            household_income=5000.0,
+            household_member_count=3,
+            budget_max=1000.0,
+            enrollment_month_year=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            vacancy_weight=5,
+            cost_weight=5,
+            travel_weight=5,
+            applicant_status=ApplicantStatus.WORKING_APPLICANT,
+        )
+        session.add_all([p1, p5])
+        session.commit()
+
+    res1 = client.post("/api/v1/centres/match", json={"profile_id": "profile-tied-111", "top_n": 5})
+    assert res1.status_code == 200
+    data1 = res1.json()
+
+    res5 = client.post("/api/v1/centres/match", json={"profile_id": "profile-tied-555", "top_n": 5})
+    assert res5.status_code == 200
+    data5 = res5.json()
+
+    assert len(data1["results"]) == len(data5["results"])
+    for r1, r5 in zip(data1["results"], data5["results"]):
+        assert r1["centre_code"] == r5["centre_code"]
+        assert r1["overall_fit_score"] == r5["overall_fit_score"]
+        assert r1["vacancy_fit_score"] == r5["vacancy_fit_score"]
+        assert r1["cost_fit_score"] == r5["cost_fit_score"]
+        assert r1["travel_fit_score"] == r5["travel_fit_score"]
+
+
+def test_profile_linked_match_5_5_1_effective_weights_and_explanation(
+    client: TestClient, sample_parent: User, test_engine
+):
+    """Profile-linked match with 5/5/1 derives 5/11, 5/11, 1/11 and reflects 45%, 45%, 9% in fallback."""
+    create_centres_with_cohorts(test_engine)
+    seed_ecda_subsidy_rules(test_engine)
+    set_mock_auth(sample_parent)
+
+    assert sample_parent.user_id is not None
+    with Session(test_engine) as session:
+        profile = FamilyPreferenceProfile(
+            profile_id="profile-skewed-551",
+            user_id=sample_parent.user_id,
+            profile_name="Skewed 551",
+            level=PreschoolLevel.INFANT,
+            citizenship_status=CitizenshipType.SC,
+            service_required="Full Day",
+            home_postal_code="560123",
+            household_income=5000.0,
+            household_member_count=3,
+            budget_max=1000.0,
+            enrollment_month_year=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            vacancy_weight=5,
+            cost_weight=5,
+            travel_weight=1,
+            applicant_status=ApplicantStatus.WORKING_APPLICANT,
+        )
+        session.add(profile)
+        session.commit()
+
+    res = client.post("/api/v1/centres/match", json={"profile_id": "profile-skewed-551", "top_n": 2})
+    assert res.status_code == 200
+    data = res.json()
+
+    assert data["explanation"] is not None
+    narrative = data["explanation"]["summary_narrative"]
+    assert "45% Vacancy Fit, 45% Cost Fit, and 9% Travel Fit" in narrative
+
+
+def test_profile_linked_match_updates_reflect_immediately(
+    client: TestClient, sample_parent: User, test_engine
+):
+    """Updating a saved profile via PATCH immediately alters subsequent matching results and explanations."""
+    create_centres_with_cohorts(test_engine)
+    seed_ecda_subsidy_rules(test_engine)
+    set_mock_auth(sample_parent)
+
+    # 1. Create profile with 1/1/1
+    res_create = client.post(
+        "/api/v1/profile",
+        json={
+            "profile_name": "Dynamic Emma",
+            "level": "infant",
+            "citizenship_status": "SC",
+            "service_required": "Full Day",
+            "enrollment_month_year": "2026-06",
+            "home_postal_code": "560123",
+            "household_income": 5000.0,
+            "household_member_count": 3,
+            "budget_max": 1000.0,
+            "vacancy_weight": 1,
+            "cost_weight": 1,
+            "travel_weight": 1,
+        },
+    )
+    assert res_create.status_code == 201
+    profile_id = res_create.json()["profile_id"]
+
+    # Match initial 1/1/1
+    res_m1 = client.post("/api/v1/centres/match", json={"profile_id": profile_id, "top_n": 2})
+    assert res_m1.status_code == 200
+    assert "33% Vacancy Fit, 33% Cost Fit, and 33% Travel Fit" in res_m1.json()["explanation"]["summary_narrative"]
+
+    # 2. Patch to 5/5/1
+    res_patch = client.patch(
+        f"/api/v1/profile/{profile_id}",
+        json={"vacancy_weight": 5, "cost_weight": 5, "travel_weight": 1},
+    )
+    assert res_patch.status_code == 200
+    assert res_patch.json()["vacancy_weight"] == 5
+    assert res_patch.json()["cost_weight"] == 5
+    assert res_patch.json()["travel_weight"] == 1
+
+    # Match immediately
+    res_m2 = client.post("/api/v1/centres/match", json={"profile_id": profile_id, "top_n": 2})
+    assert res_m2.status_code == 200
+    assert "45% Vacancy Fit, 45% Cost Fit, and 9% Travel Fit" in res_m2.json()["explanation"]["summary_narrative"]
 
 
 def test_match_invalid_postal_code_returns_422(client: TestClient):
@@ -1362,9 +1682,9 @@ def test_match_candidate_ranking_incorporates_cost_fit_and_vacancy_fit(
         "household_income": 15000.0,
         "household_member_count": 3,
         "budget_max": 500.0,
-        "vacancy_weight": 0.40,
-        "cost_weight": 0.30,
-        "travel_weight": 0.30,
+        "vacancy_weight": 3,
+        "cost_weight": 3,
+        "travel_weight": 3,
         "top_n": 2,
     }
     response = client.post("/api/v1/centres/match", json=payload)
@@ -2150,9 +2470,9 @@ def test_three_factor_overall_fit_composite_ranking(
         "citizenship_status": "SC",
         "home_postal_code": "560123",
         "budget_max": 500.0,
-        "vacancy_weight": 0.40,
-        "cost_weight": 0.30,
-        "travel_weight": 0.30,
+        "vacancy_weight": 4,
+        "cost_weight": 3,
+        "travel_weight": 3,
         "top_n": 2,
     }
 
@@ -2429,9 +2749,9 @@ def test_match_prompt_structure_includes_search_params_and_candidate_breakdowns(
             "home_postal_code": "560123",
             "workplace_postal_code": "018989",
             "location_preference": "HOME",
-            "vacancy_weight": 0.50,
-            "cost_weight": 0.25,
-            "travel_weight": 0.25,
+            "vacancy_weight": 2,
+            "cost_weight": 1,
+            "travel_weight": 1,
             "applicant_status": "WORKING_APPLICANT",
             "top_n": 1,
         }
