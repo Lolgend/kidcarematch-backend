@@ -9,6 +9,7 @@ import math
 from collections import defaultdict
 from enum import Enum
 
+import httpx
 from fastapi import HTTPException, status
 from sqlmodel import Session, col, or_, select
 
@@ -368,202 +369,213 @@ def execute_multi_criteria_match(
         if c.postal and len(c.postal.strip()) == 6:
             postals_to_resolve.append(c.postal.strip())
 
-    coords_map = resolve_coordinates_batch(postals_to_resolve, session=session)
-    home_coords = (
-        coords_map.get(criteria.home_postal_code.strip())
-        if criteria.home_postal_code
-        else None
-    )
-    workplace_coords = (
-        coords_map.get(criteria.workplace_postal_code.strip())
-        if criteria.workplace_postal_code
-        else None
-    )
-
-    routing_mode = resolve_travel_routing_mode(
-        criteria=criteria,
-        has_home_coords=home_coords is not None,
-        has_workplace_coords=workplace_coords is not None,
-    )
-    has_travel_anchors = routing_mode != TravelRoutingMode.NONE
-
     travel_dev_map: dict[int, float] = {}
     travel_fit_map: dict[int, float] = {}
     travel_breakdown_map: dict[int, TravelBreakdownItem | None] = {}
+    has_travel_anchors = False
 
-    if has_travel_anchors:
-        spatial_dev_map: dict[int, float] = {}
-        base_dur = 0.0
-        base_dist = 0.0
+    with httpx.Client(timeout=5.0) as http_client:
+        coords_map = resolve_coordinates_batch(
+            postals_to_resolve, session=session, client=http_client
+        )
+        home_coords = (
+            coords_map.get(criteria.home_postal_code.strip())
+            if criteria.home_postal_code
+            else None
+        )
+        workplace_coords = (
+            coords_map.get(criteria.workplace_postal_code.strip())
+            if criteria.workplace_postal_code
+            else None
+        )
 
-        if routing_mode == TravelRoutingMode.DUAL_DETOUR:
-            assert home_coords is not None and workplace_coords is not None
-            d_hw = haversine_distance_km(
-                home_coords[0],
-                home_coords[1],
-                workplace_coords[0],
-                workplace_coords[1],
-            )
-            base_dur, base_dist = get_route_duration_and_distance(
-                home_coords, workplace_coords
-            )
+        routing_mode = resolve_travel_routing_mode(
+            criteria=criteria,
+            has_home_coords=home_coords is not None,
+            has_workplace_coords=workplace_coords is not None,
+        )
+        has_travel_anchors = routing_mode != TravelRoutingMode.NONE
 
-            for c in candidate_centres:
-                if c.centre_id is None:
-                    continue
-                c_pt = coords_map.get(c.postal) if c.postal else None
-                if c_pt:
-                    d_hc = haversine_distance_km(
-                        home_coords[0], home_coords[1], c_pt[0], c_pt[1]
-                    )
-                    d_cw = haversine_distance_km(
-                        c_pt[0], c_pt[1], workplace_coords[0], workplace_coords[1]
-                    )
-                    spatial_dev_map[c.centre_id] = max(0.0, d_hc + d_cw - d_hw)
-                else:
-                    spatial_dev_map[c.centre_id] = math.inf
+        if has_travel_anchors:
+            spatial_dev_map: dict[int, float] = {}
+            base_dur = 0.0
+            base_dist = 0.0
 
-        elif routing_mode in (
-            TravelRoutingMode.SINGLE_HOME,
-            TravelRoutingMode.SINGLE_WORKPLACE,
-        ):
-            anchor_coords = (
-                home_coords
-                if routing_mode == TravelRoutingMode.SINGLE_HOME
-                else workplace_coords
-            )
-            assert anchor_coords is not None
+            if routing_mode == TravelRoutingMode.DUAL_DETOUR:
+                assert home_coords is not None and workplace_coords is not None
+                d_hw = haversine_distance_km(
+                    home_coords[0],
+                    home_coords[1],
+                    workplace_coords[0],
+                    workplace_coords[1],
+                )
+                base_dur, base_dist = get_route_duration_and_distance(
+                    home_coords, workplace_coords, client=http_client
+                )
 
-            for c in candidate_centres:
-                if c.centre_id is None:
-                    continue
-                c_pt = coords_map.get(c.postal) if c.postal else None
-                if c_pt:
-                    spatial_dev_map[c.centre_id] = haversine_distance_km(
-                        anchor_coords[0], anchor_coords[1], c_pt[0], c_pt[1]
-                    )
-                else:
-                    spatial_dev_map[c.centre_id] = math.inf
+                for c in candidate_centres:
+                    if c.centre_id is None:
+                        continue
+                    c_pt = coords_map.get(c.postal) if c.postal else None
+                    if c_pt:
+                        d_hc = haversine_distance_km(
+                            home_coords[0], home_coords[1], c_pt[0], c_pt[1]
+                        )
+                        d_cw = haversine_distance_km(
+                            c_pt[0], c_pt[1], workplace_coords[0], workplace_coords[1]
+                        )
+                        spatial_dev_map[c.centre_id] = max(0.0, d_hc + d_cw - d_hw)
+                    else:
+                        spatial_dev_map[c.centre_id] = math.inf
 
-        # Identify Stage 2 candidates: top STAGE1_MAX_CANDIDATES by straight-line spatial deviation
-        valid_spatial_centres = [
-            c
-            for c in candidate_centres
-            if c.centre_id is not None
-            and c.centre_id in spatial_dev_map
-            and math.isfinite(spatial_dev_map[c.centre_id])
-        ]
-        valid_spatial_centres.sort(key=lambda c: spatial_dev_map[c.centre_id])  # type: ignore[index]
-        stage2_centre_ids = {
-            c.centre_id for c in valid_spatial_centres[:STAGE1_MAX_CANDIDATES]
-        }
+            elif routing_mode in (
+                TravelRoutingMode.SINGLE_HOME,
+                TravelRoutingMode.SINGLE_WORKPLACE,
+            ):
+                anchor_coords = (
+                    home_coords
+                    if routing_mode == TravelRoutingMode.SINGLE_HOME
+                    else workplace_coords
+                )
+                assert anchor_coords is not None
 
-        # Evaluate Travel Fit for all candidates (Stage 2 routing for top 30, straight-line estimation for remainder)
-        if routing_mode == TravelRoutingMode.DUAL_DETOUR:
-            assert home_coords is not None and workplace_coords is not None
-            for c in candidate_centres:
-                if c.centre_id is None:
-                    continue
-                c_pt = coords_map.get(c.postal) if c.postal else None
-                if not c_pt or not math.isfinite(spatial_dev_map.get(c.centre_id, math.inf)):
-                    travel_dev_map[c.centre_id] = math.inf
-                    travel_breakdown_map[c.centre_id] = None
-                    continue
+                for c in candidate_centres:
+                    if c.centre_id is None:
+                        continue
+                    c_pt = coords_map.get(c.postal) if c.postal else None
+                    if c_pt:
+                        spatial_dev_map[c.centre_id] = haversine_distance_km(
+                            anchor_coords[0], anchor_coords[1], c_pt[0], c_pt[1]
+                        )
+                    else:
+                        spatial_dev_map[c.centre_id] = math.inf
 
-                if c.centre_id in stage2_centre_ids:
-                    t_hc, d_hc = get_route_duration_and_distance(home_coords, c_pt)
-                    t_cw, d_cw = get_route_duration_and_distance(c_pt, workplace_coords)
-                    tot_dur = t_hc + t_cw
-                    tot_dist = d_hc + d_cw
-                    delta_time = max(0.0, tot_dur - base_dur)
-                    travel_dev_map[c.centre_id] = delta_time
-                    travel_breakdown_map[c.centre_id] = TravelBreakdownItem(
-                        commute_duration_mins=round(tot_dur, 1),
-                        commute_deviation_mins=round(delta_time, 1),
-                        commute_distance_km=round(tot_dist, 2),
-                        baseline_duration_mins=round(base_dur, 1),
-                        baseline_distance_km=round(base_dist, 2),
-                    )
-                else:
-                    d_hc = haversine_distance_km(
-                        home_coords[0], home_coords[1], c_pt[0], c_pt[1]
-                    )
-                    d_cw = haversine_distance_km(
-                        c_pt[0], c_pt[1], workplace_coords[0], workplace_coords[1]
-                    )
-                    t_hc = estimate_transit_duration_mins(d_hc)
-                    t_cw = estimate_transit_duration_mins(d_cw)
-                    tot_dur = t_hc + t_cw
-                    tot_dist = d_hc + d_cw
-                    delta_time = max(0.0, tot_dur - base_dur)
-                    travel_dev_map[c.centre_id] = delta_time
-                    travel_breakdown_map[c.centre_id] = TravelBreakdownItem(
-                        commute_duration_mins=round(tot_dur, 1),
-                        commute_deviation_mins=round(delta_time, 1),
-                        commute_distance_km=round(tot_dist, 2),
-                        baseline_duration_mins=round(base_dur, 1),
-                        baseline_distance_km=round(base_dist, 2),
-                    )
-
-        elif routing_mode in (
-            TravelRoutingMode.SINGLE_HOME,
-            TravelRoutingMode.SINGLE_WORKPLACE,
-        ):
-            anchor_coords = (
-                home_coords
-                if routing_mode == TravelRoutingMode.SINGLE_HOME
-                else workplace_coords
-            )
-            assert anchor_coords is not None
-            for c in candidate_centres:
-                if c.centre_id is None:
-                    continue
-                c_pt = coords_map.get(c.postal) if c.postal else None
-                if not c_pt or not math.isfinite(spatial_dev_map.get(c.centre_id, math.inf)):
-                    travel_dev_map[c.centre_id] = math.inf
-                    travel_breakdown_map[c.centre_id] = None
-                    continue
-
-                if c.centre_id in stage2_centre_ids:
-                    dur, dist = get_route_duration_and_distance(anchor_coords, c_pt)
-                    travel_dev_map[c.centre_id] = dist
-                    travel_breakdown_map[c.centre_id] = TravelBreakdownItem(
-                        commute_duration_mins=round(dur, 1),
-                        commute_deviation_mins=None,
-                        commute_distance_km=round(dist, 2),
-                        baseline_duration_mins=None,
-                        baseline_distance_km=None,
-                    )
-                else:
-                    dist = spatial_dev_map[c.centre_id]
-                    dur = estimate_transit_duration_mins(dist)
-                    travel_dev_map[c.centre_id] = dist
-                    travel_breakdown_map[c.centre_id] = TravelBreakdownItem(
-                        commute_duration_mins=round(dur, 1),
-                        commute_deviation_mins=None,
-                        commute_distance_km=round(dist, 2),
-                        baseline_duration_mins=None,
-                        baseline_distance_km=None,
-                    )
-
-        # Pool-relative Travel Fit normalization across all valid candidate centres
-        valid_centres = [
-            c
-            for c in candidate_centres
-            if c.centre_id is not None
-            and c.centre_id in travel_dev_map
-            and math.isfinite(travel_dev_map[c.centre_id])
-        ]
-        if valid_centres:
-            valid_devs = [
-                travel_dev_map[c.centre_id]
-                for c in valid_centres
+            # Identify Stage 2 candidates: top STAGE1_MAX_CANDIDATES (or scaled to criteria.top_n) by straight-line spatial deviation
+            effective_stage1_cap = max(STAGE1_MAX_CANDIDATES, criteria.top_n)
+            valid_spatial_centres = [
+                c
+                for c in candidate_centres
                 if c.centre_id is not None
+                and c.centre_id in spatial_dev_map
+                and math.isfinite(spatial_dev_map[c.centre_id])
             ]
-            norm_scores = normalize_travel_fit(valid_devs)
-            for c, score in zip(valid_centres, norm_scores):
-                if c.centre_id is not None:
-                    travel_fit_map[c.centre_id] = score
+            valid_spatial_centres.sort(key=lambda c: spatial_dev_map[c.centre_id])  # type: ignore[index]
+            stage2_centre_ids = {
+                c.centre_id for c in valid_spatial_centres[:effective_stage1_cap]
+            }
+
+            # Evaluate Travel Fit for all candidates (Stage 2 routing for top 15 or top_n, straight-line estimation for remainder)
+            if routing_mode == TravelRoutingMode.DUAL_DETOUR:
+                assert home_coords is not None and workplace_coords is not None
+                for c in candidate_centres:
+                    if c.centre_id is None:
+                        continue
+                    c_pt = coords_map.get(c.postal) if c.postal else None
+                    if not c_pt or not math.isfinite(spatial_dev_map.get(c.centre_id, math.inf)):
+                        travel_dev_map[c.centre_id] = math.inf
+                        travel_breakdown_map[c.centre_id] = None
+                        continue
+
+                    if c.centre_id in stage2_centre_ids:
+                        t_hc, d_hc = get_route_duration_and_distance(
+                            home_coords, c_pt, client=http_client
+                        )
+                        t_cw, d_cw = get_route_duration_and_distance(
+                            c_pt, workplace_coords, client=http_client
+                        )
+                        tot_dur = t_hc + t_cw
+                        tot_dist = d_hc + d_cw
+                        delta_time = max(0.0, tot_dur - base_dur)
+                        travel_dev_map[c.centre_id] = delta_time
+                        travel_breakdown_map[c.centre_id] = TravelBreakdownItem(
+                            commute_duration_mins=round(tot_dur, 1),
+                            commute_deviation_mins=round(delta_time, 1),
+                            commute_distance_km=round(tot_dist, 2),
+                            baseline_duration_mins=round(base_dur, 1),
+                            baseline_distance_km=round(base_dist, 2),
+                        )
+                    else:
+                        d_hc = haversine_distance_km(
+                            home_coords[0], home_coords[1], c_pt[0], c_pt[1]
+                        )
+                        d_cw = haversine_distance_km(
+                            c_pt[0], c_pt[1], workplace_coords[0], workplace_coords[1]
+                        )
+                        t_hc = estimate_transit_duration_mins(d_hc)
+                        t_cw = estimate_transit_duration_mins(d_cw)
+                        tot_dur = t_hc + t_cw
+                        tot_dist = d_hc + d_cw
+                        delta_time = max(0.0, tot_dur - base_dur)
+                        travel_dev_map[c.centre_id] = delta_time
+                        travel_breakdown_map[c.centre_id] = TravelBreakdownItem(
+                            commute_duration_mins=round(tot_dur, 1),
+                            commute_deviation_mins=round(delta_time, 1),
+                            commute_distance_km=round(tot_dist, 2),
+                            baseline_duration_mins=round(base_dur, 1),
+                            baseline_distance_km=round(base_dist, 2),
+                        )
+
+            elif routing_mode in (
+                TravelRoutingMode.SINGLE_HOME,
+                TravelRoutingMode.SINGLE_WORKPLACE,
+            ):
+                anchor_coords = (
+                    home_coords
+                    if routing_mode == TravelRoutingMode.SINGLE_HOME
+                    else workplace_coords
+                )
+                assert anchor_coords is not None
+                for c in candidate_centres:
+                    if c.centre_id is None:
+                        continue
+                    c_pt = coords_map.get(c.postal) if c.postal else None
+                    if not c_pt or not math.isfinite(spatial_dev_map.get(c.centre_id, math.inf)):
+                        travel_dev_map[c.centre_id] = math.inf
+                        travel_breakdown_map[c.centre_id] = None
+                        continue
+
+                    if c.centre_id in stage2_centre_ids:
+                        dur, dist = get_route_duration_and_distance(
+                            anchor_coords, c_pt, client=http_client
+                        )
+                        travel_dev_map[c.centre_id] = dist
+                        travel_breakdown_map[c.centre_id] = TravelBreakdownItem(
+                            commute_duration_mins=round(dur, 1),
+                            commute_deviation_mins=None,
+                            commute_distance_km=round(dist, 2),
+                            baseline_duration_mins=None,
+                            baseline_distance_km=None,
+                        )
+                    else:
+                        dist = spatial_dev_map[c.centre_id]
+                        dur = estimate_transit_duration_mins(dist)
+                        travel_dev_map[c.centre_id] = dist
+                        travel_breakdown_map[c.centre_id] = TravelBreakdownItem(
+                            commute_duration_mins=round(dur, 1),
+                            commute_deviation_mins=None,
+                            commute_distance_km=round(dist, 2),
+                            baseline_duration_mins=None,
+                            baseline_distance_km=None,
+                        )
+
+            # Pool-relative Travel Fit normalization across all valid candidate centres
+            valid_centres = [
+                c
+                for c in candidate_centres
+                if c.centre_id is not None
+                and c.centre_id in travel_dev_map
+                and math.isfinite(travel_dev_map[c.centre_id])
+            ]
+            if valid_centres:
+                valid_devs = [
+                    travel_dev_map[c.centre_id]
+                    for c in valid_centres
+                    if c.centre_id is not None
+                ]
+                norm_scores = normalize_travel_fit(valid_devs)
+                for c, score in zip(valid_centres, norm_scores):
+                    if c.centre_id is not None:
+                        travel_fit_map[c.centre_id] = score
 
     # 3. Prefetch vacancy and service records for ALL candidate centres
     candidate_ids = [

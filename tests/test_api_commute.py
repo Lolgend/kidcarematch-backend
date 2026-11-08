@@ -14,7 +14,10 @@ from kidcarematch_backend.auth.security import (
     get_optional_token_claims,
     get_token_claims,
 )
-from kidcarematch_backend.core.commute import clear_commute_postal_cache
+from kidcarematch_backend.core.commute import (
+    clear_commute_caches,
+    clear_commute_postal_cache,
+)
 from kidcarematch_backend.db.db import (
     AccountStatus,
     CitizenshipType,
@@ -297,8 +300,16 @@ def test_commute_home_only_driving_success(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -378,8 +389,16 @@ def test_commute_default_mode_is_drive(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -435,8 +454,16 @@ def test_commute_walking_home_success(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -503,8 +530,16 @@ def test_commute_cycling_home_success(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -738,8 +773,16 @@ def test_commute_routing_timeout_returns_unavailable_leg_without_haversine_fallb
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -795,8 +838,16 @@ def test_commute_missing_route_geometry_returns_unavailable_leg(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -865,8 +916,16 @@ def test_commute_routing_reactive_401_retry_success(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -1201,8 +1260,16 @@ def test_commute_workplace_unresolvable_returns_unavailable_leg2_and_preserves_l
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -1497,8 +1564,16 @@ def test_commute_workplace_whitespace_omits_workplace_anchor(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -1591,8 +1666,16 @@ def test_commute_home_only_pt_success(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -2001,8 +2084,16 @@ def test_commute_pt_subleg_missing_geometry_marks_leg_unavailable(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -2073,8 +2164,16 @@ def test_commute_pt_subleg_missing_metrics_marks_leg_unavailable(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -2126,8 +2225,16 @@ def test_commute_pt_missing_plan_marks_leg_unavailable(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -2213,8 +2320,16 @@ def test_commute_pt_default_instruction_formats(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -2481,8 +2596,16 @@ def test_commute_sample_pair_all_modes_and_reuse(
                     {
                         "SEARCHVAL": f"Location {postal}",
                         "POSTAL": postal,
-                        "LATITUDE": "1.3000" if postal == "120120" else "1.3500",
-                        "LONGITUDE": "103.8000" if postal == "120120" else "103.8500",
+                        "LATITUDE": (
+                            "1.3000"
+                            if postal == "120120"
+                            else ("1.3500" if postal == "560123" else "1.3600")
+                        ),
+                        "LONGITUDE": (
+                            "103.8000"
+                            if postal == "120120"
+                            else ("103.8500" if postal == "560123" else "103.8600")
+                        ),
                     }
                 ],
             }
@@ -2537,6 +2660,7 @@ def test_commute_sample_pair_all_modes_and_reuse(
         assert data["sample_pair"] == valid_pair
 
     # 2. Test all modes accept and reuse valid sample_pair across centres
+    clear_commute_caches()
     for centre in (centre1, centre2):
         for mode in ("drive", "pt", "walk", "cycle"):
             res = client.post(

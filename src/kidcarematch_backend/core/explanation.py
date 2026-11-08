@@ -42,7 +42,7 @@ class MatchCriteria:
     cost_weight: float = 1.0 / 3.0
     travel_weight: float = 1.0 / 3.0
     applicant_status: ApplicantStatus = ApplicantStatus.WORKING_APPLICANT
-    top_n: int = 5
+    top_n: int = 6
     profile_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -172,7 +172,8 @@ Instructions:
 Generate a structured JSON response matching the following schema:
 1. "summary_narrative": A clear 2-3 sentence overview explaining how the parent's trade-off weights shaped the overall candidate ranking, highlighting key factors (e.g., vacancy availability vs affordability vs commute logistics).
 2. "top_centre_rationale": A detailed 2-4 sentence rationale explaining why the #1 ranked centre achieved top placement, explicitly referencing its vacancy status, net out-of-pocket payable fee (after subsidies), and commute detour metrics.
-3. "candidate_highlights": A list of exactly {len(candidates)} concise 1-sentence highlights, one for each candidate centre in rank order, capturing its specific advantage or notable feature.
+3. "ranking_rationale": A 2-4 sentence comparative explanation explaining why the shortlisted candidates ({f"#1 through #{len(candidates)}" if len(candidates) > 1 else "#1"}) are ordered in their specific sequence based on Overall Fit, Vacancy Fit, Cost Fit (net payable fee), and Travel Fit (commute detour or distance), grounded in candidate data and Importance Ratings.
+4. "candidate_highlights": A list of exactly {len(candidates)} concise 1-sentence highlights, one for each candidate centre in rank order, capturing its specific advantage or notable feature.
 """
     return prompt
 
@@ -226,7 +227,9 @@ def generate_deterministic_fallback(
                 f"for enrollment in {criteria.enrollment_month_year} matching your criteria."
             ),
             top_centre_rationale="No candidate centres available to recommend.",
+            ranking_rationale="No candidate centres available to rank.",
             candidate_highlights=[],
+            fallback_used=True,
         )
 
     v_pct = round(criteria.vacancy_weight * 100)
@@ -273,6 +276,43 @@ def generate_deterministic_fallback(
         f"{fee_part}{travel_part}."
     )
 
+    if len(candidates) == 1:
+        fee_info = (
+            f", net fee ${top.fee_breakdown.estimated_monthly_payable_fee:.2f}/month ({top.cost_fit_score:.1f}% Cost Fit)"
+            if top.fee_breakdown and top.cost_fit_score is not None
+            else ""
+        )
+        travel_info = ""
+        if top.travel_breakdown and top.travel_fit_score is not None:
+            if top.travel_breakdown.commute_deviation_mins is not None:
+                travel_info = f", and {top.travel_breakdown.commute_deviation_mins:.1f}m commute detour ({top.travel_fit_score:.1f}% Travel Fit)"
+            elif top.travel_breakdown.commute_distance_km is not None:
+                travel_info = f", and {top.travel_breakdown.commute_distance_km:.2f}km commute distance ({top.travel_fit_score:.1f}% Travel Fit)"
+
+        ranking_rationale = (
+            f"{top.centre_name} is the sole candidate holding rank #1 with an Overall Fit of {top.overall_fit_score:.1f}% "
+            f"(Vacancy Fit: {top.vacancy_fit_score:.1f}% [{v_status}]{fee_info}{travel_info})."
+        )
+    else:
+        rank_items: list[str] = []
+        for idx, cand in enumerate(candidates, start=1):
+            details = [f"#{idx} {cand.centre_name} ({cand.overall_fit_score:.1f}% Overall Fit, {cand.vacancy_fit_score:.1f}% Vacancy"]
+            if cand.fee_breakdown and cand.cost_fit_score is not None:
+                details.append(f"${cand.fee_breakdown.estimated_monthly_payable_fee:.2f}/mo net fee [{cand.cost_fit_score:.1f}% Cost]")
+            if cand.travel_breakdown and cand.travel_fit_score is not None:
+                if cand.travel_breakdown.commute_deviation_mins is not None:
+                    details.append(f"{cand.travel_breakdown.commute_deviation_mins:.1f}m detour [{cand.travel_fit_score:.1f}% Travel]")
+                elif cand.travel_breakdown.commute_distance_km is not None:
+                    details.append(f"{cand.travel_breakdown.commute_distance_km:.2f}km [{cand.travel_fit_score:.1f}% Travel]")
+            rank_items.append(", ".join(details) + ")")
+
+        progression = "; ".join(rank_items)
+        ranking_rationale = (
+            f"Candidates are ranked from #1 to #{len(candidates)} based on composite Overall Fit weighted by your preference priorities: "
+            f"{progression}. "
+            f"{candidates[0].centre_name} achieved the top rank ahead of subsequent centres primarily due to its higher composite fit across the prioritized criteria."
+        )
+
     candidate_highlights: list[str] = []
     for cand in candidates:
         status_text = cand.vacancy_status or "unrecorded"
@@ -298,7 +338,9 @@ def generate_deterministic_fallback(
     return FitExplanationResponse(
         summary_narrative=summary_narrative,
         top_centre_rationale=top_centre_rationale,
+        ranking_rationale=ranking_rationale,
         candidate_highlights=candidate_highlights,
+        fallback_used=True,
     )
 
 
@@ -326,6 +368,10 @@ def _parse_gemini_response(
         raw = raw.strip()
 
         data = json.loads(raw)
+        if isinstance(data, dict) and (
+            "ranking_rationale" not in data or data["ranking_rationale"] is None
+        ):
+            data["ranking_rationale"] = ""
         return FitExplanationResponse.model_validate(data)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to parse Gemini explanation response: %s", exc)
@@ -409,12 +455,18 @@ def generate_fit_explanation(
 
         explanation = _parse_gemini_response(response, len(candidates))
         if explanation is not None:
+            if (
+                not explanation.ranking_rationale
+                or not explanation.ranking_rationale.strip()
+            ):
+                explanation.ranking_rationale = fallback.ranking_rationale
             if len(explanation.candidate_highlights) < len(candidates):
                 explanation.candidate_highlights.extend(
                     fallback.candidate_highlights[
                         len(explanation.candidate_highlights) :
                     ]
                 )
+            explanation.fallback_used = False
             return explanation
 
     except Exception as exc:  # noqa: BLE001

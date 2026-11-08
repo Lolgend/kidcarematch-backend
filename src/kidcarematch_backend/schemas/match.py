@@ -81,7 +81,7 @@ class TravelBreakdownItem(BaseModel):
 
 
 class FitExplanationResponse(BaseModel):
-    """Synthesized Gemini AI matching narrative and highlights (Ticket #71)."""
+    """Synthesized Gemini AI matching narrative and highlights (Ticket #71, Ticket #100)."""
 
     summary_narrative: str = Field(
         description="Synthesized narrative explaining multi-criteria search trade-offs",
@@ -89,9 +89,16 @@ class FitExplanationResponse(BaseModel):
     top_centre_rationale: str = Field(
         description="Deep-dive rationale explaining why the top-ranked centre was recommended",
     )
+    ranking_rationale: str = Field(
+        description="Comparative explanation of why the shortlisted candidates are ordered in their specific sequence",
+    )
     candidate_highlights: list[str] = Field(
         default_factory=list,
         description="Concise 1-sentence highlight for each candidate in top results",
+    )
+    fallback_used: bool = Field(
+        default=False,
+        description="Indicates whether the deterministic fallback explanation was used instead of Gemini AI",
     )
 
 
@@ -222,10 +229,10 @@ class CentreMatchRequest(BaseModel):
         description="Parent employment status for ECDA subsidy eligibility tier determination",
     )
     top_n: int = Field(
-        default=5,
+        default=6,
         ge=1,
         le=20,
-        description="Maximum number of top-ranked candidate centres to return (1 to 20, default 5)",
+        description="Maximum number of top-ranked candidate centres to return (1 to 20, default 6)",
     )
 
     @field_validator("service_required")

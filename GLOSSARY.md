@@ -126,7 +126,7 @@ The net estimated monthly childcare expense after deducting all applicable Singa
 _Avoid_: Out-of-pocket price, net school fee, subsidised rate
 
 **Fit Explanation**:
-The AI-generated explanatory rationale and comparative summary explaining the quantitative scoring breakdown and why a particular centre ranks as the top recommendation for a family profile.
+The AI-generated explanatory narrative, top-recommendation rationale, and comparative ranking rationale explaining the quantitative scoring breakdown and why candidate preschool centres are ordered in their specific sequence within the recommended shortlist (standardized to a default of Top 6).
 _Avoid_: AI justification, match summary, reasoning notes
 
 **Commute Route**:

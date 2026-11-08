@@ -23,6 +23,7 @@ from kidcarematch_backend.core.explanation import (
     MatchCriteria,
     build_explanation_prompt,
     generate_deterministic_fallback,
+    generate_fit_explanation,
 )
 from kidcarematch_backend.core.onemap import onemap_token_manager
 from kidcarematch_backend.db.db import (
@@ -45,8 +46,11 @@ from kidcarematch_backend.db.db import (
 )
 from kidcarematch_backend.main import app
 from kidcarematch_backend.schemas.match import (
+    CentreMatchRequest,
+    FeeBreakdownItem,
     FitExplanationResponse,
     MatchCandidateItem,
+    TravelBreakdownItem,
 )
 
 
@@ -2509,8 +2513,263 @@ def test_three_factor_overall_fit_composite_ranking(
 
 
 # ==============================================================================
-# Gemini AI Explanation Service and Resilient Fallback Tests (Ticket #71)
+# Gemini AI Explanation Service and Resilient Fallback Tests (Ticket #71, Ticket #100)
 # ==============================================================================
+
+
+def test_fit_explanation_response_schema_requires_ranking_rationale():
+    """Verify FitExplanationResponse requires ranking_rationale and defaults fallback_used=False."""
+    import pydantic
+    import pytest
+
+    # Fails when ranking_rationale is missing
+    with pytest.raises(pydantic.ValidationError) as exc_info:
+        FitExplanationResponse(
+            summary_narrative="Summary narrative.",
+            top_centre_rationale="Top centre rationale.",
+            candidate_highlights=["Highlight 1"],
+        )
+    assert "ranking_rationale" in str(exc_info.value)
+
+    # Succeeds when ranking_rationale is provided
+    resp = FitExplanationResponse(
+        summary_narrative="Summary narrative.",
+        top_centre_rationale="Top centre rationale.",
+        ranking_rationale="Alpha ranks #1 over Beta due to higher vacancy fit.",
+        candidate_highlights=["Highlight 1"],
+    )
+    assert resp.ranking_rationale == "Alpha ranks #1 over Beta due to higher vacancy fit."
+    assert resp.fallback_used is False
+
+    # Supports fallback_used=True explicitly
+    resp_fallback = FitExplanationResponse(
+        summary_narrative="Summary narrative.",
+        top_centre_rationale="Top centre rationale.",
+        ranking_rationale="Deterministic ranking rationale.",
+        candidate_highlights=[],
+        fallback_used=True,
+    )
+    assert resp_fallback.fallback_used is True
+
+
+def _create_mock_candidate(
+    centre_id: int,
+    code: str,
+    name: str,
+    overall: float,
+    vacancy: float,
+    cost: float,
+    travel: float,
+    detour_mins: float | None = 4.5,
+    net_fee: float = 720.0,
+) -> MatchCandidateItem:
+    """Helper to create MatchCandidateItem for testing explanation fallbacks and prompts."""
+    return MatchCandidateItem(
+        centre_id=centre_id,
+        centre_code=code,
+        centre_name=name,
+        contact="61234567",
+        email=None,
+        postal=f"560{centre_id:03d}",
+        website_url=None,
+        food_offered="Yes",
+        address=f"{centre_id} Mock Road",
+        second_languages="Chinese",
+        spark_certified=True,
+        weekday_full_day_hours="07:00 - 19:00",
+        saturday_hours=None,
+        extended_operating_hours=False,
+        transport_provided=False,
+        gov_subsidy=True,
+        last_updated=None,
+        level=PreschoolLevel.INFANT,
+        enrollment_month_year="2026-06",
+        vacancy_status="Available" if vacancy >= 100.0 else "Limited",
+        vacancy_fit_score=vacancy,
+        cost_fit_score=cost,
+        travel_fit_score=travel,
+        overall_fit_score=overall,
+        fee_breakdown=FeeBreakdownItem(
+            published_fee=1200.0,
+            estimated_subsidy=600.0,
+            estimated_monthly_payable_fee=net_fee,
+        ),
+        travel_breakdown=TravelBreakdownItem(
+            commute_duration_mins=35.0,
+            commute_distance_km=6.0,
+            commute_deviation_mins=detour_mins,
+            baseline_duration_mins=30.0,
+            baseline_distance_km=5.0,
+        ),
+    )
+
+
+def test_build_explanation_prompt_instructs_ranking_rationale():
+    """Verify build_explanation_prompt instructs Gemini to return ranking_rationale."""
+    criteria = MatchCriteria(
+        level=PreschoolLevel.INFANT,
+        enrollment_month_year="2026-06",
+        vacancy_weight=2,
+        cost_weight=2,
+        travel_weight=1,
+    )
+    candidates = [
+        _create_mock_candidate(1, "C001", "Alpha Centre", 90.0, 100.0, 85.0, 80.0),
+        _create_mock_candidate(2, "C002", "Beta Centre", 75.0, 50.0, 90.0, 70.0),
+    ]
+    prompt = build_explanation_prompt(criteria=criteria, total_candidates=2, candidates=candidates)
+
+    assert "ranking_rationale" in prompt
+    assert "#1 through #2" in prompt or "ranking order" in prompt.lower()
+    assert "Overall Fit" in prompt
+    assert "Vacancy Fit" in prompt
+
+
+def test_deterministic_fallback_ranking_rationale_0_1_and_6_candidates():
+    """Verify generate_deterministic_fallback creates grounded ranking_rationale for 0, 1, and 6 candidates."""
+    criteria = MatchCriteria(
+        level=PreschoolLevel.INFANT,
+        enrollment_month_year="2026-06",
+        budget_max=900.0,
+        vacancy_weight=2,
+        cost_weight=2,
+        travel_weight=1,
+    )
+
+    # 1. 0 candidates: empty pool
+    fb_0 = generate_deterministic_fallback(criteria=criteria, total_candidates=0, candidates=[])
+    assert fb_0.ranking_rationale == "No candidate centres available to rank."
+    assert fb_0.fallback_used is True
+
+    # 2. 1 candidate: sole candidate holds #1
+    cand1 = _create_mock_candidate(1, "C001", "Alpha Centre", 92.5, 100.0, 90.0, 85.0, detour_mins=3.2, net_fee=700.0)
+    fb_1 = generate_deterministic_fallback(criteria=criteria, total_candidates=1, candidates=[cand1])
+    assert fb_1.fallback_used is True
+    assert "Alpha Centre" in fb_1.ranking_rationale
+    assert "#1" in fb_1.ranking_rationale
+    assert "92.5%" in fb_1.ranking_rationale
+    assert "100.0%" in fb_1.ranking_rationale  # Vacancy
+    assert "90.0%" in fb_1.ranking_rationale   # Cost
+    assert "85.0%" in fb_1.ranking_rationale   # Travel
+
+    # 3. 6 candidates: comparative ranking progression
+    candidates_6 = [
+        _create_mock_candidate(1, "C001", "Alpha Centre", 95.0, 100.0, 90.0, 95.0, detour_mins=2.0, net_fee=650.0),
+        _create_mock_candidate(2, "C002", "Beta Centre", 88.0, 100.0, 80.0, 85.0, detour_mins=4.0, net_fee=750.0),
+        _create_mock_candidate(3, "C003", "Gamma Centre", 82.0, 50.0, 95.0, 90.0, detour_mins=3.5, net_fee=600.0),
+        _create_mock_candidate(4, "C004", "Delta Centre", 76.0, 50.0, 85.0, 80.0, detour_mins=6.0, net_fee=800.0),
+        _create_mock_candidate(5, "C005", "Epsilon Centre", 70.0, 50.0, 75.0, 75.0, detour_mins=8.0, net_fee=850.0),
+        _create_mock_candidate(6, "C006", "Zeta Centre", 62.0, 0.0, 80.0, 70.0, detour_mins=9.0, net_fee=820.0),
+    ]
+    fb_6 = generate_deterministic_fallback(criteria=criteria, total_candidates=6, candidates=candidates_6)
+    assert fb_6.fallback_used is True
+    assert "#1" in fb_6.ranking_rationale
+    assert "#6" in fb_6.ranking_rationale
+    assert "Alpha Centre" in fb_6.ranking_rationale
+    assert "Beta Centre" in fb_6.ranking_rationale
+    assert "Zeta Centre" in fb_6.ranking_rationale
+    assert "95.0%" in fb_6.ranking_rationale
+
+
+def test_generate_fit_explanation_gemini_success(monkeypatch):
+    """Verify generate_fit_explanation returns Gemini ranking_rationale with fallback_used=False on success."""
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-key")
+    criteria = MatchCriteria(level=PreschoolLevel.INFANT, enrollment_month_year="2026-06")
+    cand1 = _create_mock_candidate(1, "C001", "Alpha Centre", 90.0, 100.0, 85.0, 80.0)
+
+    gemini_data = {
+        "summary_narrative": "AI summary narrative.",
+        "top_centre_rationale": "AI top rationale.",
+        "ranking_rationale": "AI ranking rationale: Alpha is ranked #1 due to superior vacancy.",
+        "candidate_highlights": ["Alpha Centre: Top highlight."],
+        "fallback_used": False,
+    }
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.text = json.dumps(gemini_data)
+    mock_resp.parsed = FitExplanationResponse.model_validate(gemini_data)
+    mock_client.models.generate_content.return_value = mock_resp
+
+    with patch("google.genai.Client", return_value=mock_client):
+        res = generate_fit_explanation(criteria=criteria, total_candidates=1, candidates=[cand1])
+
+    assert res.summary_narrative == "AI summary narrative."
+    assert res.top_centre_rationale == "AI top rationale."
+    assert res.ranking_rationale == "AI ranking rationale: Alpha is ranked #1 due to superior vacancy."
+    assert res.fallback_used is False
+
+
+def test_generate_fit_explanation_partial_fallback_when_ranking_rationale_blank(monkeypatch):
+    """Verify generate_fit_explanation falls back to deterministic ranking_rationale if Gemini returns empty/whitespace ranking_rationale."""
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-key")
+    criteria = MatchCriteria(level=PreschoolLevel.INFANT, enrollment_month_year="2026-06")
+    cand1 = _create_mock_candidate(1, "C001", "Alpha Centre", 90.0, 100.0, 85.0, 80.0)
+
+    gemini_data = {
+        "summary_narrative": "AI summary narrative.",
+        "top_centre_rationale": "AI top rationale.",
+        "ranking_rationale": "   ",
+        "candidate_highlights": ["Alpha Centre: Top highlight."],
+    }
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.text = json.dumps(gemini_data)
+    mock_resp.parsed = FitExplanationResponse.model_validate(gemini_data)
+    mock_client.models.generate_content.return_value = mock_resp
+
+    with patch("google.genai.Client", return_value=mock_client):
+        res = generate_fit_explanation(criteria=criteria, total_candidates=1, candidates=[cand1])
+
+    assert res.summary_narrative == "AI summary narrative."
+    assert res.top_centre_rationale == "AI top rationale."
+    # ranking_rationale was blank, so it fell back cleanly to deterministic fallback
+    assert "Alpha Centre" in res.ranking_rationale
+    assert "#1" in res.ranking_rationale
+    assert res.fallback_used is False
+
+
+def test_generate_fit_explanation_partial_fallback_when_ranking_rationale_omitted_in_json(monkeypatch):
+    """Verify generate_fit_explanation falls back cleanly to deterministic ranking_rationale if Gemini JSON omits ranking_rationale."""
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-key")
+    criteria = MatchCriteria(level=PreschoolLevel.INFANT, enrollment_month_year="2026-06")
+    cand1 = _create_mock_candidate(1, "C001", "Alpha Centre", 90.0, 100.0, 85.0, 80.0)
+
+    raw_json = json.dumps({
+        "summary_narrative": "AI summary narrative without ranking_rationale.",
+        "top_centre_rationale": "AI top rationale.",
+        "candidate_highlights": ["Alpha Centre: Top highlight."],
+    })
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.text = raw_json
+    mock_resp.parsed = None
+    mock_client.models.generate_content.return_value = mock_resp
+
+    with patch("google.genai.Client", return_value=mock_client):
+        res = generate_fit_explanation(criteria=criteria, total_candidates=1, candidates=[cand1])
+
+    assert res.summary_narrative == "AI summary narrative without ranking_rationale."
+    assert res.top_centre_rationale == "AI top rationale."
+    assert "Alpha Centre" in res.ranking_rationale
+    assert "#1" in res.ranking_rationale
+    assert res.fallback_used is False
+
+
+def test_generate_fit_explanation_full_fallback_on_gemini_error(monkeypatch):
+    """Verify generate_fit_explanation falls back completely with fallback_used=True when Gemini fails."""
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-key")
+    criteria = MatchCriteria(level=PreschoolLevel.INFANT, enrollment_month_year="2026-06")
+    cand1 = _create_mock_candidate(1, "C001", "Alpha Centre", 90.0, 100.0, 85.0, 80.0)
+
+    mock_client = MagicMock()
+    mock_client.models.generate_content.side_effect = RuntimeError("Gemini service unavailable")
+
+    with patch("google.genai.Client", return_value=mock_client):
+        res = generate_fit_explanation(criteria=criteria, total_candidates=1, candidates=[cand1])
+
+    assert res.fallback_used is True
+    assert "Alpha Centre" in res.ranking_rationale
+    assert "#1" in res.ranking_rationale
 
 
 def test_match_gemini_ai_explanation_success(
@@ -2524,6 +2783,7 @@ def test_match_gemini_ai_explanation_success(
     mock_explanation_data = {
         "summary_narrative": "Alpha Preschool is the top recommendation for infant care enrollment in June 2026 based on high vacancy certainty and balanced affordability.",
         "top_centre_rationale": "Alpha Preschool achieved the #1 rank with 100% Vacancy Fit and competitive monthly fees.",
+        "ranking_rationale": "Alpha Preschool ranks #1 ahead of Zeta and Beta due to immediate infant vacancy certainty and competitive net fees.",
         "candidate_highlights": [
             "Alpha Preschool: Immediate availability for infant care.",
             "Zeta Early Years: Legacy immediate vacancy status.",
@@ -2551,6 +2811,8 @@ def test_match_gemini_ai_explanation_success(
         assert data["explanation"] is not None
         assert data["explanation"]["summary_narrative"] == mock_explanation_data["summary_narrative"]
         assert data["explanation"]["top_centre_rationale"] == mock_explanation_data["top_centre_rationale"]
+        assert data["explanation"]["ranking_rationale"] == mock_explanation_data["ranking_rationale"]
+        assert data["explanation"]["fallback_used"] is False
         assert data["explanation"]["candidate_highlights"] == mock_explanation_data["candidate_highlights"]
 
         results = data["results"]
@@ -2593,6 +2855,9 @@ def test_match_resilient_fallback_when_gemini_api_key_is_none(
         assert "INFANT" in explanation["summary_narrative"]
         assert "2026-06" in explanation["summary_narrative"]
         assert "Alpha Preschool" in explanation["top_centre_rationale"]
+        assert "Alpha Preschool" in explanation["ranking_rationale"]
+        assert "#1" in explanation["ranking_rationale"]
+        assert explanation["fallback_used"] is True
         assert len(explanation["candidate_highlights"]) == 2
         assert "Alpha Preschool" in explanation["candidate_highlights"][0]
 
@@ -2724,6 +2989,8 @@ def test_match_explanation_empty_candidate_pool(
     assert data["explanation"] is not None
     assert "No preschool centres" in data["explanation"]["summary_narrative"]
     assert "No candidate centres available" in data["explanation"]["top_centre_rationale"]
+    assert data["explanation"]["ranking_rationale"] == "No candidate centres available to rank."
+    assert data["explanation"]["fallback_used"] is True
     assert data["explanation"]["candidate_highlights"] == []
 
 
@@ -2741,6 +3008,7 @@ def test_match_prompt_structure_includes_search_params_and_candidate_breakdowns(
     mock_explanation_data = {
         "summary_narrative": "Detailed narrative test.",
         "top_centre_rationale": "Top rationale test.",
+        "ranking_rationale": "Detailed ranking rationale test.",
         "candidate_highlights": ["Highlight 1"],
     }
     mock_response.text = json.dumps(mock_explanation_data)
@@ -2789,6 +3057,102 @@ def test_match_prompt_structure_includes_search_params_and_candidate_breakdowns(
         assert "Cost Fit" in contents
         assert "Travel Fit" in contents
         assert "Payable Fee" in contents or "payable fee" in contents.lower()
+
+
+def test_match_api_partial_gemini_fallback_when_ranking_rationale_blank(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Verify POST /api/v1/centres/match cleanly falls back to deterministic ranking_rationale when Gemini returns empty ranking_rationale."""
+    create_centres_with_cohorts(test_engine)
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr(settings, "GEMINI_MODEL", "gemini-2.5-flash")
+
+    mock_explanation_data = {
+        "summary_narrative": "Synthesized AI summary narrative from Gemini.",
+        "top_centre_rationale": "Top centre AI rationale from Gemini.",
+        "ranking_rationale": "   ",
+        "candidate_highlights": [
+            "Alpha Preschool: Immediate availability for infant care.",
+            "Zeta Early Years: Legacy immediate vacancy status.",
+        ],
+    }
+
+    mock_client_instance = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = json.dumps(mock_explanation_data)
+    mock_response.parsed = FitExplanationResponse.model_validate(mock_explanation_data)
+    mock_client_instance.models.generate_content.return_value = mock_response
+
+    with patch("google.genai.Client", return_value=mock_client_instance):
+        payload = {
+            "level": "infant",
+            "enrollment_month_year": "2026-06",
+            "citizenship_status": "SC",
+            "top_n": 2,
+        }
+        response = client.post("/api/v1/centres/match", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["explanation"] is not None
+        assert data["explanation"]["summary_narrative"] == "Synthesized AI summary narrative from Gemini."
+        assert data["explanation"]["top_centre_rationale"] == "Top centre AI rationale from Gemini."
+        # Cleanly fell back to deterministic ranking rationale without failing the match request
+        assert data["explanation"]["ranking_rationale"] != ""
+        assert "Alpha Preschool" in data["explanation"]["ranking_rationale"]
+        assert "#1" in data["explanation"]["ranking_rationale"]
+        assert data["explanation"]["fallback_used"] is False
+
+
+def test_match_api_deterministic_fallback_with_1_match(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Verify POST /api/v1/centres/match deterministic fallback with exactly 1 match."""
+    create_centres_with_cohorts(test_engine)
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", None)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "top_n": 1,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["results"]) == 1
+
+    explanation = data["explanation"]
+    assert explanation is not None
+    assert explanation["fallback_used"] is True
+    assert "Alpha Preschool" in explanation["ranking_rationale"]
+    assert "sole candidate holding rank #1" in explanation["ranking_rationale"]
+
+
+def test_match_api_deterministic_fallback_with_6_matches(
+    client: TestClient, test_engine, monkeypatch
+):
+    """Verify POST /api/v1/centres/match deterministic fallback with 6 matches."""
+    create_centres_with_cohorts(test_engine)
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", None)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "top_n": 6,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["results"]) == 6
+
+    explanation = data["explanation"]
+    assert explanation is not None
+    assert explanation["fallback_used"] is True
+    assert "#1" in explanation["ranking_rationale"]
+    assert "#6" in explanation["ranking_rationale"]
+    assert "Alpha Preschool" in explanation["ranking_rationale"]
 
 
 # ==============================================================================
@@ -2968,3 +3332,341 @@ def test_match_endpoint_unrecoverable_auth_failure_graceful_fallback(
     assert item["travel_breakdown"] is not None
     assert item["travel_breakdown"]["commute_distance_km"] is not None
     assert item["travel_breakdown"]["commute_duration_mins"] is not None
+
+
+# ==============================================================================
+# Ticket #99: Top-6 Match Shortlist & Stage 1 Scaling Tests
+# ==============================================================================
+
+
+def test_centre_match_request_and_criteria_default_top_n_to_six():
+    """CentreMatchRequest and MatchCriteria default top_n to 6 while preserving ge=1, le=20 bounds."""
+    # Schema defaults
+    req = CentreMatchRequest(level=PreschoolLevel.INFANT, enrollment_month_year="2026-06")
+    assert req.top_n == 6
+
+    # Criteria defaults
+    crit = MatchCriteria(level=PreschoolLevel.INFANT, enrollment_month_year="2026-06")
+    assert crit.top_n == 6
+
+    from pydantic import ValidationError
+
+    # Validation bounds preserved
+    with pytest.raises(ValidationError):
+        CentreMatchRequest(level=PreschoolLevel.INFANT, enrollment_month_year="2026-06", top_n=0)
+    with pytest.raises(ValidationError):
+        CentreMatchRequest(level=PreschoolLevel.INFANT, enrollment_month_year="2026-06", top_n=21)
+
+
+def test_api_match_defaults_to_top_six_shortlist(client: TestClient, test_engine):
+    """Calling POST /api/v1/centres/match without top_n returns a Top 6 shortlist when >= 6 match."""
+    create_centres_with_cohorts(test_engine)
+
+    # Seed 1 additional infant centre so total candidates is 7 (> 6)
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    with Session(test_engine) as session:
+        c8 = PreschoolCentre(
+            centre_id=8,
+            centre_code="C008",
+            centre_name="Zeta Care",
+            postal="560128",
+        )
+        s8 = PreschoolService(
+            centre_id=8,
+            type_of_service="Full Day",
+            level=PreschoolLevel.INFANT,
+            fee=1200.0,
+            citizenship_type=CitizenshipType.SC,
+        )
+        v8 = VacancyRecord(
+            record_id="VR008",
+            centre_id=8,
+            level_type=PreschoolLevel.INFANT,
+            enrollment_month_year=target_month,
+            vacancy_status="Available",
+        )
+        session.add_all([c8, s8, v8])
+        session.commit()
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_candidates"] == 7
+    assert data["returned_count"] == 6
+    assert len(data["results"]) == 6
+
+
+def test_stage1_candidate_cap_is_fifteen():
+    """STAGE1_MAX_CANDIDATES in core/onemap is 15."""
+    from kidcarematch_backend.core.onemap import STAGE1_MAX_CANDIDATES
+
+    assert STAGE1_MAX_CANDIDATES == 15
+
+
+def test_stage1_candidate_cap_fifteen_default(
+    client: TestClient, test_engine, monkeypatch
+):
+    """When candidate pool has 25 candidates, default top_n (6) evaluates only 15 via OneMap Stage 2 routing."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    coords_dict = {"560123": (1.3691, 103.8512)}  # Home
+
+    with Session(test_engine) as session:
+        for i in range(1, 26):
+            p_code = f"57{i:04d}"
+            coords_dict[p_code] = (1.3691 + (i * 0.001), 103.8512 + (i * 0.001))
+            c = PreschoolCentre(
+                centre_id=500 + i,
+                centre_code=f"C_POOL_{i:02d}",
+                centre_name=f"Pool Centre {i:02d}",
+                postal=p_code,
+            )
+            s = PreschoolService(
+                centre_id=500 + i,
+                type_of_service="Full Day",
+                level=PreschoolLevel.INFANT,
+                fee=1000.0,
+                citizenship_type=CitizenshipType.SC,
+            )
+            v = VacancyRecord(
+                record_id=f"v_pool_{i}",
+                centre_id=500 + i,
+                level_type=PreschoolLevel.INFANT,
+                enrollment_month_year=target_month,
+                vacancy_status="Available",
+            )
+            session.add_all([c, s, v])
+        session.commit()
+
+    _, route_count = setup_onemap_mock(monkeypatch, postal_coords=coords_dict)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        # top_n omitted -> defaults to 6 <= 15
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_candidates"] == 25
+    assert data["returned_count"] == 6
+    # Single anchor mode: 1 route call per Stage 2 candidate. Cap is 15 -> exactly 15 route calls!
+    assert route_count["count"] == 15
+
+
+def test_stage1_candidate_cap_dynamic_scaling_when_top_n_exceeds_fifteen(
+    client: TestClient, test_engine, monkeypatch
+):
+    """When caller specifies top_n = 18 (> 15), Stage 1 dynamically scales to 18 candidates."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    coords_dict = {"560123": (1.3691, 103.8512)}  # Home
+
+    with Session(test_engine) as session:
+        for i in range(1, 26):
+            p_code = f"58{i:04d}"
+            coords_dict[p_code] = (1.3691 + (i * 0.001), 103.8512 + (i * 0.001))
+            c = PreschoolCentre(
+                centre_id=600 + i,
+                centre_code=f"C_SCALE_{i:02d}",
+                centre_name=f"Scale Centre {i:02d}",
+                postal=p_code,
+            )
+            s = PreschoolService(
+                centre_id=600 + i,
+                type_of_service="Full Day",
+                level=PreschoolLevel.INFANT,
+                fee=1000.0,
+                citizenship_type=CitizenshipType.SC,
+            )
+            v = VacancyRecord(
+                record_id=f"v_scale_{i}",
+                centre_id=600 + i,
+                level_type=PreschoolLevel.INFANT,
+                enrollment_month_year=target_month,
+                vacancy_status="Available",
+            )
+            session.add_all([c, s, v])
+        session.commit()
+
+    _, route_count = setup_onemap_mock(monkeypatch, postal_coords=coords_dict)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "top_n": 18,
+    }
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_candidates"] == 25
+    assert data["returned_count"] == 18
+    # Dynamic scaling max(15, 18) = 18 -> exactly 18 route calls!
+    assert route_count["count"] == 18
+
+
+def test_matching_reuses_single_httpx_client_across_coordinates_and_routing(
+    client: TestClient, test_engine, monkeypatch
+):
+    """execute_multi_criteria_match shares a single httpx.Client instance across batch coords and Stage 2 routing."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    coords_dict = {
+        "560123": (1.3691, 103.8512),  # Home
+        "048581": (1.2840, 103.8510),  # Workplace
+        "560124": (1.3695, 103.8520),  # Centre 1
+        "560125": (1.3780, 103.8550),  # Centre 2
+    }
+    with Session(test_engine) as session:
+        for i in [1, 2]:
+            p_code = f"56012{3+i}"
+            c = PreschoolCentre(
+                centre_id=800 + i,
+                centre_code=f"C_CLIENT_{i:02d}",
+                centre_name=f"Client Reuse Centre {i:02d}",
+                postal=p_code,
+            )
+            s = PreschoolService(
+                centre_id=800 + i,
+                type_of_service="Full Day",
+                level=PreschoolLevel.INFANT,
+                fee=1000.0,
+                citizenship_type=CitizenshipType.SC,
+            )
+            v = VacancyRecord(
+                record_id=f"v_client_{i}",
+                centre_id=800 + i,
+                level_type=PreschoolLevel.INFANT,
+                enrollment_month_year=target_month,
+                vacancy_status="Available",
+            )
+            session.add_all([c, s, v])
+        session.commit()
+
+    setup_onemap_mock(monkeypatch, postal_coords=coords_dict)
+
+    from kidcarematch_backend.core import matching as matching_mod
+
+    observed_clients: list[tuple[str, Any]] = []
+
+    orig_resolve_batch = matching_mod.resolve_coordinates_batch
+    orig_get_route = matching_mod.get_route_duration_and_distance
+
+    def spy_resolve_batch(*args, **kwargs):
+        client_arg = kwargs.get("client")
+        observed_clients.append(("resolve_batch", client_arg))
+        return orig_resolve_batch(*args, **kwargs)
+
+    def spy_get_route(*args, **kwargs):
+        client_arg = kwargs.get("client")
+        observed_clients.append(("get_route", client_arg))
+        return orig_get_route(*args, **kwargs)
+
+    monkeypatch.setattr(matching_mod, "resolve_coordinates_batch", spy_resolve_batch)
+    monkeypatch.setattr(matching_mod, "get_route_duration_and_distance", spy_get_route)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "workplace_postal_code": "048581",
+        "top_n": 2,
+    }
+
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+
+    # Ensure calls were made and observed (resolve_batch + 1 baseline + 2*2 candidate legs = 6 calls)
+    assert len(observed_clients) >= 4
+    # Check that client is NOT None for all calls
+    clients = [c for _, c in observed_clients]
+    assert all(c is not None for c in clients), f"Observed None client in calls: {observed_clients}"
+    assert all(isinstance(c, httpx.Client) for c in clients)
+    # Check that it is the exact same httpx.Client instance across all calls
+    first_client = clients[0]
+    assert all(c is first_client for c in clients), "Expected identical shared httpx.Client instance across all calls"
+
+
+def test_matching_reuses_single_httpx_client_in_single_anchor_mode(
+    client: TestClient, test_engine, monkeypatch
+):
+    """execute_multi_criteria_match shares a single httpx.Client instance in single anchor mode."""
+    target_month = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    coords_dict = {
+        "560123": (1.3691, 103.8512),  # Home
+        "560124": (1.3695, 103.8520),  # Centre 1
+        "560125": (1.3780, 103.8550),  # Centre 2
+    }
+    with Session(test_engine) as session:
+        for i in [1, 2]:
+            p_code = f"56012{3+i}"
+            c = PreschoolCentre(
+                centre_id=900 + i,
+                centre_code=f"C_SINGLE_{i:02d}",
+                centre_name=f"Single Client Centre {i:02d}",
+                postal=p_code,
+            )
+            s = PreschoolService(
+                centre_id=900 + i,
+                type_of_service="Full Day",
+                level=PreschoolLevel.INFANT,
+                fee=1000.0,
+                citizenship_type=CitizenshipType.SC,
+            )
+            v = VacancyRecord(
+                record_id=f"v_single_{i}",
+                centre_id=900 + i,
+                level_type=PreschoolLevel.INFANT,
+                enrollment_month_year=target_month,
+                vacancy_status="Available",
+            )
+            session.add_all([c, s, v])
+        session.commit()
+
+    setup_onemap_mock(monkeypatch, postal_coords=coords_dict)
+
+    from kidcarematch_backend.core import matching as matching_mod
+
+    observed_clients: list[tuple[str, Any]] = []
+
+    orig_resolve_batch = matching_mod.resolve_coordinates_batch
+    orig_get_route = matching_mod.get_route_duration_and_distance
+
+    def spy_resolve_batch(*args, **kwargs):
+        client_arg = kwargs.get("client")
+        observed_clients.append(("resolve_batch", client_arg))
+        return orig_resolve_batch(*args, **kwargs)
+
+    def spy_get_route(*args, **kwargs):
+        client_arg = kwargs.get("client")
+        observed_clients.append(("get_route", client_arg))
+        return orig_get_route(*args, **kwargs)
+
+    monkeypatch.setattr(matching_mod, "resolve_coordinates_batch", spy_resolve_batch)
+    monkeypatch.setattr(matching_mod, "get_route_duration_and_distance", spy_get_route)
+
+    payload = {
+        "level": "infant",
+        "enrollment_month_year": "2026-06",
+        "citizenship_status": "SC",
+        "home_postal_code": "560123",
+        "location_preference": "HOME",
+        "top_n": 2,
+    }
+
+    response = client.post("/api/v1/centres/match", json=payload)
+    assert response.status_code == 200
+
+    # Ensure calls were made and observed (resolve_batch + 2 single anchor legs = 3 calls)
+    assert len(observed_clients) >= 3
+    clients = [c for _, c in observed_clients]
+    assert all(c is not None for c in clients), f"Observed None client in calls: {observed_clients}"
+    assert all(isinstance(c, httpx.Client) for c in clients)
+    first_client = clients[0]
+    assert all(c is first_client for c in clients), "Expected identical shared httpx.Client instance across all calls"

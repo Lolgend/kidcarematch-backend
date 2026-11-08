@@ -9,12 +9,13 @@ import json
 import logging
 import math
 import secrets
+import threading
 import time as time_module
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone, tzinfo
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 from fastapi import HTTPException, status
@@ -23,6 +24,7 @@ from sqlmodel import Session
 
 from kidcarematch_backend.core.config import settings
 from kidcarematch_backend.core.onemap import onemap_token_manager
+from kidcarematch_backend.core.route_cache import BoundedTTLCacheWithCoalescing
 from kidcarematch_backend.db.db import PostalCoordinateCache
 from kidcarematch_backend.schemas.commute import (
     AllowedSampleDefinition,
@@ -75,6 +77,21 @@ COMMUTE_MAX_WORKERS: int = getattr(settings, "COMMUTE_MAX_WORKERS", 4)
 # Bounded in-memory cache for verified exact-postcode resolutions
 _COMMUTE_POSTAL_CACHE_MAX = 512
 _COMMUTE_POSTAL_CACHE: dict[str, Coordinate] = {}
+_VERIFIED_POSTAL_CODES: set[str] = set()
+_commute_postal_lock = threading.Lock()
+_commute_db_lock = threading.Lock()
+
+
+class _PostalInFlight:
+    __slots__ = ("event", "exception", "result")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.result: Coordinate | None = None
+        self.exception: Exception | None = None
+
+
+_commute_postal_in_flight: dict[str, _PostalInFlight] = {}
 
 REASON_METADATA: dict[ReasonCode, tuple[FailureClass, bool]] = {
     "no_itinerary": ("sample_dependent", True),
@@ -133,9 +150,71 @@ def compute_anchor_revision(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+class CommuteRouteKey(NamedTuple):
+    start_lat: float
+    start_lng: float
+    end_lat: float
+    end_lng: float
+    mode: CommuteMode
+    date: str | None
+    time: str | None
+
+
+_COMMUTE_ROUTE_CACHE: BoundedTTLCacheWithCoalescing[
+    CommuteRouteKey,
+    NegotiatedRouteLeg,
+] = BoundedTTLCacheWithCoalescing(maxsize=1024, ttl=3600.0)
+
+
+def set_verified_postal(postal: str, lat: float, lng: float) -> Coordinate:
+    """Store verified postal coordinate in memory and mark verified in-process."""
+    clean_postal = postal.strip()
+    with _commute_postal_lock:
+        coord = Coordinate(lat=lat, lng=lng)
+        _COMMUTE_POSTAL_CACHE[clean_postal] = coord
+        _VERIFIED_POSTAL_CODES.add(clean_postal)
+        if len(_COMMUTE_POSTAL_CACHE) > _COMMUTE_POSTAL_CACHE_MAX:
+            evicted = next(iter(_COMMUTE_POSTAL_CACHE))
+            _COMMUTE_POSTAL_CACHE.pop(evicted, None)
+        return coord
+
+
+def is_postal_verified(postal: str) -> bool:
+    """Return whether postal has been verified in-process with exact POSTAL match."""
+    clean_postal = postal.strip()
+    with _commute_postal_lock:
+        return clean_postal in _VERIFIED_POSTAL_CODES
+
+
+def warm_verified_postal_from_db(postal: str, lat: float, lng: float) -> None:
+    """If postal was verified in-process, re-warm _COMMUTE_POSTAL_CACHE from DB cache hit."""
+    clean_postal = postal.strip()
+    with _commute_postal_lock:
+        if clean_postal in _VERIFIED_POSTAL_CODES:
+            _COMMUTE_POSTAL_CACHE[clean_postal] = Coordinate(lat=lat, lng=lng)
+            if len(_COMMUTE_POSTAL_CACHE) > _COMMUTE_POSTAL_CACHE_MAX:
+                evicted = next(iter(_COMMUTE_POSTAL_CACHE))
+                _COMMUTE_POSTAL_CACHE.pop(evicted, None)
+
+
 def clear_commute_postal_cache() -> None:
-    """Clear in-memory cache of verified postal resolutions (useful for test isolation)."""
-    _COMMUTE_POSTAL_CACHE.clear()
+    """Clear in-memory caches of verified postal resolutions and route legs (useful for test isolation)."""
+    with _commute_postal_lock:
+        _COMMUTE_POSTAL_CACHE.clear()
+        _VERIFIED_POSTAL_CODES.clear()
+        _commute_postal_in_flight.clear()
+    _COMMUTE_ROUTE_CACHE.clear()
+
+
+def clear_commute_route_cache() -> None:
+    """Clear in-memory cache of evaluated commute route legs."""
+    _COMMUTE_ROUTE_CACHE.clear()
+
+
+def clear_commute_caches() -> None:
+    """Clear all in-memory commute caches (postal and route legs)."""
+    clear_commute_postal_cache()
+    clear_commute_route_cache()
 
 
 def _execute_get_with_retry(
@@ -191,6 +270,7 @@ def resolve_commute_postal(
     Verified coordinates are cached in _COMMUTE_POSTAL_CACHE and upserted into
     database PostalCoordinateCache if session is provided.
     Legacy unverified database cache rows are not trusted on cache misses.
+    Concurrent requests for the same uncached postal coalesce into a single HTTP search request.
     """
     if not postal:
         return None
@@ -198,8 +278,20 @@ def resolve_commute_postal(
     if len(clean_postal) != 6 or not clean_postal.isdigit():
         return None
 
-    if clean_postal in _COMMUTE_POSTAL_CACHE:
-        return _COMMUTE_POSTAL_CACHE[clean_postal]
+    with _commute_postal_lock:
+        if clean_postal in _COMMUTE_POSTAL_CACHE:
+            return _COMMUTE_POSTAL_CACHE[clean_postal]
+        if clean_postal in _commute_postal_in_flight:
+            flight = _commute_postal_in_flight[clean_postal]
+            is_leader = False
+        else:
+            flight = _PostalInFlight()
+            _commute_postal_in_flight[clean_postal] = flight
+            is_leader = True
+
+    if not is_leader:
+        flight.event.wait()
+        return flight.result
 
     params: dict[str, str | int] = {
         "searchVal": clean_postal,
@@ -225,53 +317,60 @@ def resolve_commute_postal(
                         and -180 <= lng <= 180
                     ):
                         raise ValueError("OneMap returned invalid WGS84 coordinates")
-                    coord = Coordinate(lat=lat, lng=lng)
-                    _COMMUTE_POSTAL_CACHE[clean_postal] = coord
-                    if len(_COMMUTE_POSTAL_CACHE) > _COMMUTE_POSTAL_CACHE_MAX:
-                        _COMMUTE_POSTAL_CACHE.pop(next(iter(_COMMUTE_POSTAL_CACHE)))
+                    coord = set_verified_postal(clean_postal, lat, lng)
 
                     if session is not None:
-                        try:
-                            db_entry = session.get(PostalCoordinateCache, clean_postal)
-                            x_val = (
-                                float(result["X"])
-                                if result.get("X") and str(result["X"]).upper() != "NIL"
-                                else None
-                            )
-                            y_val = (
-                                float(result["Y"])
-                                if result.get("Y") and str(result["Y"]).upper() != "NIL"
-                                else None
-                            )
-                            address_val = result.get("ADDRESS")
-                            if db_entry is not None:
-                                db_entry.latitude = lat
-                                db_entry.longitude = lng
-                                db_entry.x_coord = x_val
-                                db_entry.y_coord = y_val
-                                db_entry.address = address_val
-                                db_entry.last_updated = datetime.now(timezone.utc)
-                                session.add(db_entry)
-                            else:
-                                db_entry = PostalCoordinateCache(
-                                    postal_code=clean_postal,
-                                    latitude=lat,
-                                    longitude=lng,
-                                    x_coord=x_val,
-                                    y_coord=y_val,
-                                    address=address_val,
+                        with _commute_db_lock:
+                            try:
+                                db_entry = session.get(PostalCoordinateCache, clean_postal)
+                                x_val = (
+                                    float(result["X"])
+                                    if result.get("X") and str(result["X"]).upper() != "NIL"
+                                    else None
                                 )
-                                session.add(db_entry)
-                            session.commit()
-                        except (SQLAlchemyError, OSError) as exc:
-                            session.rollback()
-                            logger.warning(
-                                "Failed to upsert PostalCoordinateCache for %s: %s",
-                                clean_postal,
-                                exc,
-                            )
+                                y_val = (
+                                    float(result["Y"])
+                                    if result.get("Y") and str(result["Y"]).upper() != "NIL"
+                                    else None
+                                )
+                                address_val = result.get("ADDRESS")
+                                if db_entry is not None:
+                                    db_entry.latitude = lat
+                                    db_entry.longitude = lng
+                                    db_entry.x_coord = x_val
+                                    db_entry.y_coord = y_val
+                                    db_entry.address = address_val
+                                    db_entry.last_updated = datetime.now(timezone.utc)
+                                    session.add(db_entry)
+                                else:
+                                    db_entry = PostalCoordinateCache(
+                                        postal_code=clean_postal,
+                                        latitude=lat,
+                                        longitude=lng,
+                                        x_coord=x_val,
+                                        y_coord=y_val,
+                                        address=address_val,
+                                    )
+                                    session.add(db_entry)
+                                session.commit()
+                            except (SQLAlchemyError, OSError) as exc:
+                                session.rollback()
+                                logger.warning(
+                                    "Failed to upsert PostalCoordinateCache for %s: %s",
+                                    clean_postal,
+                                    exc,
+                                )
 
+                    with _commute_postal_lock:
+                        flight.result = coord
+                        _commute_postal_in_flight.pop(clean_postal, None)
+                        flight.event.set()
                     return coord
+
+        with _commute_postal_lock:
+            flight.result = None
+            _commute_postal_in_flight.pop(clean_postal, None)
+            flight.event.set()
     except (
         httpx.HTTPError,
         httpx.TimeoutException,
@@ -286,6 +385,10 @@ def resolve_commute_postal(
             clean_postal,
             exc,
         )
+        with _commute_postal_lock:
+            flight.exception = exc
+            _commute_postal_in_flight.pop(clean_postal, None)
+            flight.event.set()
 
     return None
 
@@ -1194,67 +1297,19 @@ def _unavailable_negotiated_leg(
     )
 
 
-def get_negotiated_commute_leg(
+def _execute_negotiated_leg_routing(
     from_anchor: AnchorName,
     to_anchor: AnchorName,
     start: Coordinate,
     end: Coordinate,
-    mode: CommuteMode = "drive",
-    departure: datetime | None = None,
-    client: httpx.Client | None = None,
-    timeout: float | None = None,
-    deadline: float | None = None,
+    mode: CommuteMode,
+    effective_departure: datetime | None,
+    params: dict[str, Any],
+    client: httpx.Client | None,
+    effective_timeout: float,
+    deadline: float | None,
 ) -> NegotiatedRouteLeg:
-    """Query OneMap routing endpoint returning NegotiatedRouteLeg with classified diagnostics."""
-    effective_departure: datetime | None = departure
-    if mode == "pt":
-        dep = departure or get_next_representative_wednesday()
-        dep_sgt = (
-            dep.replace(tzinfo=SGT)
-            if dep.tzinfo is None
-            else dep.astimezone(SGT)
-        )
-        effective_departure = dep_sgt
-        params: dict[str, Any] = {
-            "start": f"{start.lat},{start.lng}",
-            "end": f"{end.lat},{end.lng}",
-            "routeType": "pt",
-            "date": dep_sgt.strftime("%m-%d-%Y"),
-            "time": dep_sgt.strftime("%H:%M:%S"),
-            "mode": "TRANSIT",
-            "maxWalkDistance": 1000,
-            "numItineraries": 1,
-        }
-    else:
-        params = {
-            "start": f"{start.lat},{start.lng}",
-            "end": f"{end.lat},{end.lng}",
-            "routeType": mode,
-        }
-
-    call_timeout = (
-        timeout
-        if timeout is not None
-        else getattr(
-            settings,
-            "COMMUTE_CALL_TIMEOUT_SECONDS",
-            COMMUTE_CALL_TIMEOUT_SECONDS,
-        )
-    )
-    if deadline is not None:
-        rem = max(0.0, deadline - time_module.monotonic())
-        if rem <= 0.0:
-            return _unavailable_negotiated_leg(
-                from_anchor,
-                to_anchor,
-                "Evaluation budget exhausted",
-                build_commute_reason("evaluation_budget_exhausted"),
-                departure_at=effective_departure if mode == "pt" else None,
-            )
-        effective_timeout = min(call_timeout, rem)
-    else:
-        effective_timeout = call_timeout
-
+    """Execute external OneMap routing request and return NegotiatedRouteLeg."""
     try:
         response = _fetch_onemap(
             settings.ONEMAP_ROUTING_API_URL,
@@ -1599,6 +1654,137 @@ def get_negotiated_commute_leg(
             build_commute_reason("invalid_provider_payload"),
             departure_at=effective_departure if mode == "pt" else None,
         )
+
+
+def get_negotiated_commute_leg(
+    from_anchor: AnchorName,
+    to_anchor: AnchorName,
+    start: Coordinate,
+    end: Coordinate,
+    mode: CommuteMode = "drive",
+    departure: datetime | None = None,
+    client: httpx.Client | None = None,
+    timeout: float | None = None,
+    deadline: float | None = None,
+) -> NegotiatedRouteLeg:
+    """Query OneMap routing endpoint returning NegotiatedRouteLeg with classified diagnostics.
+
+    Results are cached in a thread-safe bounded TTL cache (maxsize=1024, ttl=3600s)
+    keyed by normalized coordinates rounded to 6 decimal places (plus date and time for PT mode)
+    with concurrent in-flight request coalescing.
+    Only successful legs (status == 'available') are cached; unavailable and failed legs are never cached.
+    """
+    start_lat = round(start.lat, 6)
+    start_lng = round(start.lng, 6)
+    end_lat = round(end.lat, 6)
+    end_lng = round(end.lng, 6)
+
+    effective_departure: datetime | None = departure
+    if mode == "pt":
+        dep = departure or get_next_representative_wednesday()
+        dep_sgt = (
+            dep.replace(tzinfo=SGT)
+            if dep.tzinfo is None
+            else dep.astimezone(SGT)
+        )
+        effective_departure = dep_sgt
+        date_str: str | None = dep_sgt.strftime("%m-%d-%Y")
+        time_str: str | None = dep_sgt.strftime("%H:%M:%S")
+        params: dict[str, Any] = {
+            "start": f"{start.lat},{start.lng}",
+            "end": f"{end.lat},{end.lng}",
+            "routeType": "pt",
+            "date": date_str,
+            "time": time_str,
+            "mode": "TRANSIT",
+            "maxWalkDistance": 1000,
+            "numItineraries": 1,
+        }
+    else:
+        date_str = None
+        time_str = None
+        params = {
+            "start": f"{start.lat},{start.lng}",
+            "end": f"{end.lat},{end.lng}",
+            "routeType": mode,
+        }
+
+    route_key = CommuteRouteKey(
+        start_lat=start_lat,
+        start_lng=start_lng,
+        end_lat=end_lat,
+        end_lng=end_lng,
+        mode=mode,
+        date=date_str,
+        time=time_str,
+    )
+
+    call_timeout = (
+        timeout
+        if timeout is not None
+        else getattr(
+            settings,
+            "COMMUTE_CALL_TIMEOUT_SECONDS",
+            COMMUTE_CALL_TIMEOUT_SECONDS,
+        )
+    )
+    if deadline is not None:
+        rem = max(0.0, deadline - time_module.monotonic())
+        if rem <= 0.0:
+            return _unavailable_negotiated_leg(
+                from_anchor,
+                to_anchor,
+                "Evaluation budget exhausted",
+                build_commute_reason("evaluation_budget_exhausted"),
+                departure_at=effective_departure if mode == "pt" else None,
+            )
+        effective_timeout = min(call_timeout, rem)
+        wait_timeout = rem
+    else:
+        effective_timeout = call_timeout
+        wait_timeout = call_timeout
+
+    def _compute_leg() -> tuple[NegotiatedRouteLeg, bool]:
+        leg = _execute_negotiated_leg_routing(
+            from_anchor=from_anchor,
+            to_anchor=to_anchor,
+            start=start,
+            end=end,
+            mode=mode,
+            effective_departure=effective_departure,
+            params=params,
+            client=client,
+            effective_timeout=effective_timeout,
+            deadline=deadline,
+        )
+        return leg, leg.status == "available"
+
+    try:
+        resolved_leg = _COMMUTE_ROUTE_CACHE.get_or_compute(
+            route_key, _compute_leg, timeout=wait_timeout
+        )
+    except TimeoutError:
+        if deadline is not None and time_module.monotonic() >= deadline:
+            return _unavailable_negotiated_leg(
+                from_anchor,
+                to_anchor,
+                "Evaluation budget exhausted",
+                build_commute_reason("evaluation_budget_exhausted"),
+                departure_at=effective_departure if mode == "pt" else None,
+            )
+        return _unavailable_negotiated_leg(
+            from_anchor,
+            to_anchor,
+            "Route request timed out",
+            build_commute_reason("provider_timeout"),
+            departure_at=effective_departure if mode == "pt" else None,
+        )
+
+    return resolved_leg.model_copy(
+        deep=True,
+        update={"from_anchor": from_anchor, "to_anchor": to_anchor},
+    )
+
 
 def build_negotiated_commute_sample(
     kind: SampleKind,
@@ -2345,6 +2531,7 @@ __all__ = [
     "REASON_METADATA",
     "SGT",
     "CommuteAnchors",
+    "CommuteRouteKey",
     "CycleValidationResult",
     "build_allowed_samples",
     "build_commute_reason",
