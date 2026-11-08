@@ -533,9 +533,10 @@ def test_inline_match_authenticated_user_without_profile(
 # ==============================================================================
 
 
-def test_profile_match_success(client: TestClient, sample_parent: User, test_engine):
+def test_profile_match_success(client: TestClient, sample_parent: User, test_engine, monkeypatch):
     """POST /api/v1/centres/match with profile_id loads criteria from user's profile."""
     create_centres_with_cohorts(test_engine)
+    setup_onemap_mock(monkeypatch)
     set_mock_auth(sample_parent)
 
     assert sample_parent.user_id is not None
@@ -851,11 +852,12 @@ def test_fit_explanation_effective_weights_percentage_formatting():
 
 
 def test_profile_linked_match_equal_ratings_produce_identical_results(
-    client: TestClient, sample_parent: User, test_engine
+    client: TestClient, sample_parent: User, test_engine, monkeypatch
 ):
     """Profiles with 1/1/1 and 5/5/5 produce identical Effective Matching Weights (1/3 each) and fit scores."""
     create_centres_with_cohorts(test_engine)
     seed_ecda_subsidy_rules(test_engine)
+    setup_onemap_mock(monkeypatch)
     set_mock_auth(sample_parent)
 
     assert sample_parent.user_id is not None
@@ -915,11 +917,12 @@ def test_profile_linked_match_equal_ratings_produce_identical_results(
 
 
 def test_profile_linked_match_5_5_1_effective_weights_and_explanation(
-    client: TestClient, sample_parent: User, test_engine
+    client: TestClient, sample_parent: User, test_engine, monkeypatch
 ):
     """Profile-linked match with 5/5/1 derives 5/11, 5/11, 1/11 and reflects 45%, 45%, 9% in fallback."""
     create_centres_with_cohorts(test_engine)
     seed_ecda_subsidy_rules(test_engine)
+    setup_onemap_mock(monkeypatch)
     set_mock_auth(sample_parent)
 
     assert sample_parent.user_id is not None
@@ -954,11 +957,12 @@ def test_profile_linked_match_5_5_1_effective_weights_and_explanation(
 
 
 def test_profile_linked_match_updates_reflect_immediately(
-    client: TestClient, sample_parent: User, test_engine
+    client: TestClient, sample_parent: User, test_engine, monkeypatch
 ):
     """Updating a saved profile via PATCH immediately alters subsequent matching results and explanations."""
     create_centres_with_cohorts(test_engine)
     seed_ecda_subsidy_rules(test_engine)
+    setup_onemap_mock(monkeypatch)
     set_mock_auth(sample_parent)
 
     # 1. Create profile with 1/1/1
@@ -1703,11 +1707,12 @@ def test_match_candidate_ranking_incorporates_cost_fit_and_vacancy_fit(
 
 
 def test_match_profile_linked_end_to_end_fee_and_cost_fit(
-    client: TestClient, sample_parent: User, test_engine
+    client: TestClient, sample_parent: User, test_engine, monkeypatch
 ):
     """Profile-linked match executes complete fee resolution, subsidy means-testing, and cost fit scoring."""
     create_centres_with_cohorts(test_engine)
     seed_ecda_subsidy_rules(test_engine)
+    setup_onemap_mock(monkeypatch)
     set_mock_auth(sample_parent)
 
     assert sample_parent.user_id is not None
@@ -1776,6 +1781,10 @@ def setup_onemap_mock(
         "560123": (1.3691, 103.8512),  # Ang Mo Kio (Home)
         "560124": (1.3695, 103.8520),  # Close to Home
         "560125": (1.3780, 103.8550),  # Moderate distance
+        "560126": (1.3800, 103.8560),  # Delta Kids Haven
+        "560127": (1.3820, 103.8570),  # Epsilon Infant Academy
+        "560128": (1.3840, 103.8580),  # Zeta Early Years
+        "560129": (1.3860, 103.8590),  # Omega Kindergarten
         "048581": (1.2840, 103.8510),  # Raffles Place (Workplace)
         "600123": (1.3320, 103.7430),  # Jurong East (Far outlier)
         "520123": (1.3520, 103.9440),  # Tampines
