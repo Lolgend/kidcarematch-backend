@@ -23,7 +23,6 @@ def test_cache_hit_and_miss():
     val2 = cache.get_or_compute("k1", compute)
     assert val2 == "val-1"
     assert call_count == 1
-    assert len(cache) == 1
 
 
 def test_cache_ttl_expiration():
@@ -54,23 +53,43 @@ def test_cache_maxsize_lru_eviction():
         maxsize=3, ttl=60.0
     )
 
-    cache.get_or_compute("k1", lambda: ("v1", True))
-    cache.get_or_compute("k2", lambda: ("v2", True))
-    cache.get_or_compute("k3", lambda: ("v3", True))
+    compute_counts: dict[str, int] = {"k1": 0, "k2": 0, "k3": 0, "k4": 0}
 
-    assert len(cache) == 3
-    assert cache.get("k1") == "v1"
+    def make_compute(k: str):
+        def _fn():
+            compute_counts[k] += 1
+            return f"val-{k}", True
+
+        return _fn
+
+    cache.get_or_compute("k1", make_compute("k1"))
+    cache.get_or_compute("k2", make_compute("k2"))
+    cache.get_or_compute("k3", make_compute("k3"))
+
+    assert compute_counts["k1"] == 1
+    assert compute_counts["k2"] == 1
+    assert compute_counts["k3"] == 1
 
     # Access k1 to make it most recently used (LRU: k2 is now oldest)
-    cache.get_or_compute("k1", lambda: ("v1-new", True))
+    val_k1 = cache.get_or_compute("k1", make_compute("k1"))
+    assert val_k1 == "val-k1"
+    assert compute_counts["k1"] == 1  # Cache hit, not recomputed
 
     # Add k4 -> should evict k2
-    cache.get_or_compute("k4", lambda: ("v4", True))
-    assert len(cache) == 3
-    assert cache.get("k1") == "v1"
-    assert cache.get("k2") is None
-    assert cache.get("k3") == "v3"
-    assert cache.get("k4") == "v4"
+    val_k4 = cache.get_or_compute("k4", make_compute("k4"))
+    assert val_k4 == "val-k4"
+    assert compute_counts["k4"] == 1
+
+    # k1 and k3 are still cached
+    assert cache.get_or_compute("k1", make_compute("k1")) == "val-k1"
+    assert compute_counts["k1"] == 1
+
+    assert cache.get_or_compute("k3", make_compute("k3")) == "val-k3"
+    assert compute_counts["k3"] == 1
+
+    # k2 was evicted -> recomputed
+    assert cache.get_or_compute("k2", make_compute("k2")) == "val-k2"
+    assert compute_counts["k2"] == 2
 
 
 def test_uncacheable_result_not_stored_and_retried():
@@ -90,14 +109,11 @@ def test_uncacheable_result_not_stored_and_retried():
     res1 = cache.get_or_compute("k1", compute_failing)
     assert res1 == "fallback-val"
     assert attempts == 1
-    assert len(cache) == 0
-    assert cache.get("k1") is None
 
     # Next attempt retries and succeeds, caching the value
     res2 = cache.get_or_compute("k1", compute_failing)
     assert res2 == "success-val"
     assert attempts == 2
-    assert len(cache) == 1
 
     # Third attempt hits cache
     res3 = cache.get_or_compute("k1", compute_failing)
@@ -164,17 +180,32 @@ def test_concurrent_in_flight_uncacheable_coalescing():
     assert len(results) == 4
     assert all(r == "fallback-result" for r in results)
     assert call_count == 1
-    # Cache must NOT contain "uncached-key"
-    assert len(cache) == 0
-    assert cache.get("uncached-key") is None
+
+    # Key was not stored in cache -> subsequent compute is called
+    next_res = cache.get_or_compute("uncached-key", lambda: ("new-val", True))
+    assert next_res == "new-val"
 
 
 def test_clear_resets_cache_and_in_flight():
     cache: BoundedTTLCacheWithCoalescing[str, str] = BoundedTTLCacheWithCoalescing(
         maxsize=10, ttl=60.0
     )
-    cache.get_or_compute("k1", lambda: ("v1", True))
-    assert len(cache) == 1
+    calls = 0
+
+    def compute():
+        nonlocal calls
+        calls += 1
+        return "v1", True
+
+    assert cache.get_or_compute("k1", compute) == "v1"
+    assert calls == 1
+
+    # Second call hits cache
+    assert cache.get_or_compute("k1", compute) == "v1"
+    assert calls == 1
+
     cache.clear()
-    assert len(cache) == 0
-    assert cache.get("k1") is None
+
+    # After clear(), next call recomputes
+    assert cache.get_or_compute("k1", compute) == "v1"
+    assert calls == 2

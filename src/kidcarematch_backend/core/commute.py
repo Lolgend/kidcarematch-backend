@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone, tzinfo
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 from fastapi import HTTPException, status
@@ -150,8 +150,18 @@ def compute_anchor_revision(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+class CommuteRouteKey(NamedTuple):
+    start_lat: float
+    start_lng: float
+    end_lat: float
+    end_lng: float
+    mode: CommuteMode
+    date: str | None
+    time: str | None
+
+
 _COMMUTE_ROUTE_CACHE: BoundedTTLCacheWithCoalescing[
-    tuple[float, float, float, float, CommuteMode, str | None, str | None],
+    CommuteRouteKey,
     NegotiatedRouteLeg,
 ] = BoundedTTLCacheWithCoalescing(maxsize=1024, ttl=3600.0)
 
@@ -1698,14 +1708,14 @@ def get_negotiated_commute_leg(
             "routeType": mode,
         }
 
-    route_key = (
-        start_lat,
-        start_lng,
-        end_lat,
-        end_lng,
-        mode,
-        date_str,
-        time_str,
+    route_key = CommuteRouteKey(
+        start_lat=start_lat,
+        start_lng=start_lng,
+        end_lat=end_lat,
+        end_lng=end_lng,
+        mode=mode,
+        date=date_str,
+        time=time_str,
     )
 
     call_timeout = (
@@ -2520,6 +2530,7 @@ __all__ = [
     "REASON_METADATA",
     "SGT",
     "CommuteAnchors",
+    "CommuteRouteKey",
     "CycleValidationResult",
     "build_allowed_samples",
     "build_commute_reason",

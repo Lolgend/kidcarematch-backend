@@ -6,7 +6,7 @@ import threading
 import time
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 from sqlmodel import Session, col, select
@@ -426,8 +426,15 @@ def resolve_coordinates_batch(
     return result_map
 
 
+class OneMapRouteKey(NamedTuple):
+    start_lat: float
+    start_lng: float
+    end_lat: float
+    end_lng: float
+
+
 _ONEMAP_ROUTE_CACHE: BoundedTTLCacheWithCoalescing[
-    tuple[float, float, float, float], tuple[float, float]
+    OneMapRouteKey, tuple[float, float]
 ] = BoundedTTLCacheWithCoalescing(maxsize=1024, ttl=3600.0)
 
 
@@ -458,11 +465,11 @@ def get_route_duration_and_distance(
     if straight_dist_km < 0.001:
         return 0.0, 0.0
 
-    cache_key = (
-        round(start[0], 6),
-        round(start[1], 6),
-        round(end[0], 6),
-        round(end[1], 6),
+    cache_key = OneMapRouteKey(
+        start_lat=round(start[0], 6),
+        start_lng=round(start[1], 6),
+        end_lat=round(end[0], 6),
+        end_lng=round(end[1], 6),
     )
 
     def _compute_route() -> tuple[tuple[float, float], bool]:

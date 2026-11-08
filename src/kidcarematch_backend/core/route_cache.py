@@ -105,36 +105,8 @@ class BoundedTTLCacheWithCoalescing(Generic[K, V]):
 
         return result
 
-    def get(self, key: K) -> V | None:
-        """Directly retrieve non-expired cached value, or None."""
-        now = time.monotonic()
-        with self._lock:
-            if key in self._cache:
-                expires_at, cached_val = self._cache[key]
-                if now < expires_at:
-                    self._cache.move_to_end(key)
-                    return cached_val
-                del self._cache[key]
-            return None
-
-    def put(self, key: K, value: V) -> None:
-        """Directly insert a value into the cache with standard TTL."""
-        with self._lock:
-            self._cache[key] = (time.monotonic() + self._ttl, value)
-            if len(self._cache) > self._maxsize:
-                self._cache.popitem(last=False)
-
     def clear(self) -> None:
         """Clear all cached entries and in-flight tracking."""
         with self._lock:
             self._cache.clear()
             self._in_flight.clear()
-
-    def __len__(self) -> int:
-        with self._lock:
-            # Clean up expired items lazily on length query or return active
-            now = time.monotonic()
-            expired = [k for k, (exp, _) in self._cache.items() if now >= exp]
-            for k in expired:
-                del self._cache[k]
-            return len(self._cache)

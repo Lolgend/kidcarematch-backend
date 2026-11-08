@@ -464,7 +464,7 @@ def execute_multi_criteria_match(
                 c.centre_id for c in valid_spatial_centres[:effective_stage1_cap]
             }
 
-            # Evaluate Travel Fit for all candidates (Stage 2 routing for top 30, straight-line estimation for remainder)
+            # Evaluate Travel Fit for all candidates (Stage 2 routing for top 15 or top_n, straight-line estimation for remainder)
             if routing_mode == TravelRoutingMode.DUAL_DETOUR:
                 assert home_coords is not None and workplace_coords is not None
                 for c in candidate_centres:

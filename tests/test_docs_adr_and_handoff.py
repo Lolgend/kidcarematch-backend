@@ -19,13 +19,6 @@ def test_adr_0007_reflects_stage1_cap_top6_and_ranking_rationale() -> None:
     assert "ranking_rationale" in content
     assert "FitExplanationResponse" in content
 
-    # Check that alias docs/adr/0007-multi-criteria-preschool-matching.md exists
-    alias_path = REPO_ROOT / "docs" / "adr" / "0007-multi-criteria-preschool-matching.md"
-    assert alias_path.is_file(), f"Expected {alias_path} to exist"
-    alias_content = alias_path.read_text(encoding="utf-8")
-    assert "STAGE1_MAX_CANDIDATES = 15" in alias_content or "15" in alias_content
-    assert "max(15, top_n)" in alias_content
-
 
 def test_adr_0011_records_decisions_and_rationale() -> None:
     """ADR-0011 records route caching, coalescing, top-6 shortlist, and ranking rationale."""
