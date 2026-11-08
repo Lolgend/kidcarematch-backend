@@ -12,6 +12,7 @@ import httpx
 from sqlmodel import Session, col, select
 
 from kidcarematch_backend.core.config import settings
+from kidcarematch_backend.core.route_cache import BoundedTTLCacheWithCoalescing
 from kidcarematch_backend.db.db import PostalCoordinateCache
 
 logger = logging.getLogger(__name__)
@@ -265,6 +266,24 @@ def _fetch_onemap(
     return response
 
 
+def _warm_commute_postal_if_verified(postal: str, lat: float, lng: float) -> None:
+    try:
+        from kidcarematch_backend.core.commute import warm_verified_postal_from_db
+
+        warm_verified_postal_from_db(postal, lat, lng)
+    except ImportError:
+        pass
+
+
+def _set_commute_postal_verified(postal: str, lat: float, lng: float) -> None:
+    try:
+        from kidcarematch_backend.core.commute import set_verified_postal
+
+        set_verified_postal(postal, lat, lng)
+    except ImportError:
+        pass
+
+
 def resolve_postal_coordinates(
     postal: str | None,
     session: Session,
@@ -274,6 +293,7 @@ def resolve_postal_coordinates(
 
     Checks persistent database cache (PostalCoordinateCache) first.
     If not cached, queries OneMap search API and persists the resolved coordinates.
+    Exact POSTAL matches warm the in-memory commute postal cache and mark it verified.
     """
     if not postal:
         return None
@@ -284,6 +304,7 @@ def resolve_postal_coordinates(
     # 1. Query persistent database cache
     cached = session.get(PostalCoordinateCache, clean_postal)
     if cached is not None:
+        _warm_commute_postal_if_verified(clean_postal, cached.latitude, cached.longitude)
         return cached.latitude, cached.longitude
 
     # 2. Query external OneMap Search API
@@ -309,20 +330,27 @@ def resolve_postal_coordinates(
         data = response.json()
 
         if data.get("found", 0) > 0 and data.get("results"):
-            first = data["results"][0]
-            lat = float(first["LATITUDE"])
-            lon = float(first["LONGITUDE"])
+            results = data["results"]
+            exact_match = None
+            for item in results:
+                if str(item.get("POSTAL") or "").strip() == clean_postal:
+                    exact_match = item
+                    break
+
+            selected = exact_match if exact_match is not None else results[0]
+            lat = float(selected["LATITUDE"])
+            lon = float(selected["LONGITUDE"])
             x_val = (
-                float(first["X"])
-                if first.get("X") and str(first["X"]).upper() != "NIL"
+                float(selected["X"])
+                if selected.get("X") and str(selected["X"]).upper() != "NIL"
                 else None
             )
             y_val = (
-                float(first["Y"])
-                if first.get("Y") and str(first["Y"]).upper() != "NIL"
+                float(selected["Y"])
+                if selected.get("Y") and str(selected["Y"]).upper() != "NIL"
                 else None
             )
-            address = first.get("ADDRESS")
+            address = selected.get("ADDRESS")
 
             cache_entry = PostalCoordinateCache(
                 postal_code=clean_postal,
@@ -335,6 +363,16 @@ def resolve_postal_coordinates(
             session.add(cache_entry)
             session.commit()
             session.refresh(cache_entry)
+
+            if (
+                exact_match is not None
+                and math.isfinite(lat)
+                and math.isfinite(lon)
+                and -90 <= lat <= 90
+                and -180 <= lon <= 180
+            ):
+                _set_commute_postal_verified(clean_postal, lat, lon)
+
             return lat, lon
     except (
         httpx.HTTPError,
@@ -371,6 +409,9 @@ def resolve_coordinates_batch(
         )
     ).all()
 
+    for rec in cached_records:
+        _warm_commute_postal_if_verified(rec.postal_code, rec.latitude, rec.longitude)
+
     result_map: dict[str, tuple[float, float]] = {
         rec.postal_code: (rec.latitude, rec.longitude) for rec in cached_records
     }
@@ -385,6 +426,21 @@ def resolve_coordinates_batch(
     return result_map
 
 
+_ONEMAP_ROUTE_CACHE: BoundedTTLCacheWithCoalescing[
+    tuple[float, float, float, float], tuple[float, float]
+] = BoundedTTLCacheWithCoalescing(maxsize=1024, ttl=3600.0)
+
+
+def clear_onemap_route_cache() -> None:
+    """Clear bounded in-memory cache of OneMap route calculations."""
+    _ONEMAP_ROUTE_CACHE.clear()
+
+
+def clear_onemap_caches() -> None:
+    """Clear all in-memory OneMap caches."""
+    clear_onemap_route_cache()
+
+
 def get_route_duration_and_distance(
     start: tuple[float, float],
     end: tuple[float, float],
@@ -393,69 +449,87 @@ def get_route_duration_and_distance(
     """Calculate commute route travel duration (minutes) and distance (km) between two coordinates.
 
     Calls OneMap Public Transport Routing API (`routeType=pt`).
+    Results are cached in a thread-safe bounded TTL cache (maxsize=1024, ttl=3600s)
+    with concurrent in-flight request coalescing.
     Falls back gracefully to straight-line distance and estimated transit time if external API fails.
+    Fallback estimates are never cached so future calls retry OneMap.
     """
     straight_dist_km = haversine_distance_km(start[0], start[1], end[0], end[1])
     if straight_dist_km < 0.001:
         return 0.0, 0.0
 
-    params: dict[str, str | int] = {
-        "start": f"{start[0]},{start[1]}",
-        "end": f"{end[0]},{end[1]}",
-        "routeType": "pt",
-        "date": datetime.now(timezone.utc).strftime("%m-%d-%Y"),
-        "time": "08:00:00",
-        "mode": "transit",
-        "maxWalkDistance": 1000,
-        "numItineraries": 1,
-    }
+    cache_key = (
+        round(start[0], 6),
+        round(start[1], 6),
+        round(end[0], 6),
+        round(end[1], 6),
+    )
 
-    try:
-        if client is not None:
-            response = _fetch_onemap(
-                settings.ONEMAP_ROUTING_API_URL, params=params, client=client
-            )
-        else:
-            with httpx.Client(timeout=5.0) as http_client:
+    def _compute_route() -> tuple[tuple[float, float], bool]:
+        params: dict[str, str | int] = {
+            "start": f"{start[0]},{start[1]}",
+            "end": f"{end[0]},{end[1]}",
+            "routeType": "pt",
+            "date": datetime.now(timezone.utc).strftime("%m-%d-%Y"),
+            "time": "08:00:00",
+            "mode": "transit",
+            "maxWalkDistance": 1000,
+            "numItineraries": 1,
+        }
+
+        try:
+            if client is not None:
                 response = _fetch_onemap(
-                    settings.ONEMAP_ROUTING_API_URL, params=params, client=http_client
+                    settings.ONEMAP_ROUTING_API_URL, params=params, client=client
                 )
+            else:
+                with httpx.Client(timeout=5.0) as http_client:
+                    response = _fetch_onemap(
+                        settings.ONEMAP_ROUTING_API_URL,
+                        params=params,
+                        client=http_client,
+                    )
 
-        response.raise_for_status()
-        data = response.json()
+            response.raise_for_status()
+            data = response.json()
 
-        # Parse Public Transport itinerary response
-        plan = data.get("plan")
-        if plan and plan.get("itineraries"):
-            first_itinerary = plan["itineraries"][0]
-            duration_secs = first_itinerary.get("duration", 0)
-            duration_mins = duration_secs / 60.0
-            return round(duration_mins, 1), round(straight_dist_km, 2)
+            # Parse Public Transport itinerary response
+            plan = data.get("plan")
+            if plan and plan.get("itineraries"):
+                first_itinerary = plan["itineraries"][0]
+                duration_secs = first_itinerary.get("duration", 0)
+                duration_mins = duration_secs / 60.0
+                return (round(duration_mins, 1), round(straight_dist_km, 2)), True
 
-        # Parse Alternative route_summary format
-        summary = data.get("route_summary")
-        if summary:
-            duration_secs = summary.get("total_time", 0)
-            dist_meters = summary.get("total_distance", 0)
-            return round(duration_secs / 60.0, 1), round(dist_meters / 1000.0, 2)
+            # Parse Alternative route_summary format
+            summary = data.get("route_summary")
+            if summary:
+                duration_secs = summary.get("total_time", 0)
+                dist_meters = summary.get("total_distance", 0)
+                return (
+                    round(duration_secs / 60.0, 1),
+                    round(dist_meters / 1000.0, 2),
+                ), True
 
-    except (
-        httpx.HTTPError,
-        httpx.TimeoutException,
-        ValueError,
-        KeyError,
-        OSError,
-    ) as exc:
-        logger.warning(
-            "OneMap Routing API call failed (%s -> %s), falling back to straight-line: %s",
-            start,
-            end,
-            exc,
-        )
+        except (
+            httpx.HTTPError,
+            httpx.TimeoutException,
+            ValueError,
+            KeyError,
+            OSError,
+        ) as exc:
+            logger.warning(
+                "OneMap Routing API call failed (%s -> %s), falling back to straight-line: %s",
+                start,
+                end,
+                exc,
+            )
 
-    # Graceful fallback: straight-line estimation
-    est_duration_mins = estimate_transit_duration_mins(straight_dist_km)
-    return round(est_duration_mins, 1), round(straight_dist_km, 2)
+        # Graceful fallback: straight-line estimation (NOT cacheable)
+        est_duration_mins = estimate_transit_duration_mins(straight_dist_km)
+        return (round(est_duration_mins, 1), round(straight_dist_km, 2)), False
+
+    return _ONEMAP_ROUTE_CACHE.get_or_compute(cache_key, _compute_route)
 
 
 def normalize_travel_fit(deviations: list[float]) -> list[float]:

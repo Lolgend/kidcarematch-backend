@@ -171,13 +171,23 @@ def test_pt_mode_concurrent_dispatch_home_to_centre_and_direct(
         if "elastic/search" in url_str:
             params = kwargs.get("params", {})
             postal = str(params.get("searchVal", ""))
+            lat = (
+                "1.300000"
+                if postal == "120120"
+                else ("1.350000" if postal == "560123" else "1.280000")
+            )
+            lng = (
+                "103.800000"
+                if postal == "120120"
+                else ("103.850000" if postal == "560123" else "103.820000")
+            )
             mock_resp.json.return_value = {
                 "found": 1,
                 "results": [
                     {
                         "POSTAL": postal,
-                        "LATITUDE": "1.300000",
-                        "LONGITUDE": "103.800000",
+                        "LATITUDE": lat,
+                        "LONGITUDE": lng,
                         "X": "28000",
                         "Y": "30000",
                         "ADDRESS": f"{postal} Singapore",
@@ -285,13 +295,23 @@ def test_non_pt_mode_concurrent_dispatch_all_three_legs(
         if "elastic/search" in url_str:
             params = kwargs.get("params", {})
             postal = str(params.get("searchVal", ""))
+            lat = (
+                "1.300000"
+                if postal == "120120"
+                else ("1.350000" if postal == "560123" else "1.280000")
+            )
+            lng = (
+                "103.800000"
+                if postal == "120120"
+                else ("103.850000" if postal == "560123" else "103.820000")
+            )
             mock_resp.json.return_value = {
                 "found": 1,
                 "results": [
                     {
                         "POSTAL": postal,
-                        "LATITUDE": "1.300000",
-                        "LONGITUDE": "103.800000",
+                        "LATITUDE": lat,
+                        "LONGITUDE": lng,
                         "X": "28000",
                         "Y": "30000",
                         "ADDRESS": f"{postal} Singapore",
@@ -377,13 +397,23 @@ def test_individual_call_timeout_returns_provider_timeout_when_deadline_intact(
         if "elastic/search" in url_str:
             params = kwargs.get("params", {})
             postal = str(params.get("searchVal", ""))
+            lat = (
+                "1.300000"
+                if postal == "120120"
+                else ("1.350000" if postal == "560123" else "1.280000")
+            )
+            lng = (
+                "103.800000"
+                if postal == "120120"
+                else ("103.850000" if postal == "560123" else "103.820000")
+            )
             mock_resp.json.return_value = {
                 "found": 1,
                 "results": [
                     {
                         "POSTAL": postal,
-                        "LATITUDE": "1.300000",
-                        "LONGITUDE": "103.800000",
+                        "LATITUDE": lat,
+                        "LONGITUDE": lng,
                         "X": "28000",
                         "Y": "30000",
                         "ADDRESS": f"{postal} Singapore",
